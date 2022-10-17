@@ -41,15 +41,10 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         Dimensionality of the latent space.
     n_latent_donor
         Dimensionality of the latent space for sample embeddings.
-    linear_decoder_zx
-        Whether to use a linear decoder for the decoder from z to x.
-    linear_decoder_uz
-        Whether to use a linear decoder for the decoder from u to z.
-    linear_decoder_uz_scaler
+    uz_scaler
         Whether to incorporate a learned scaler term in the decoder from u to z.
-    linear_decoder_uz_scaler_n_hidden
-        If `linear_decoder_uz_scaler` is True, the number of hidden
-        units in the neural network used to produce the scaler term
+    uz_scaler_n_hidden
+        The number of hidden units in the neural network used to produce the scaler term
         in decoder from u to z.
     px_kwargs
         Keyword args for :class:`~mrvi.components.DecoderZX`.

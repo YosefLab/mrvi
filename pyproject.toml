@@ -19,7 +19,10 @@ maintainers = [
 urls.Documentation = "https://scvi-v2.readthedocs.io/"
 urls.Source = "https://github.com/YosefLab/scvi-v2"
 urls.Home-page = "https://github.com/YosefLab/scvi-v2"
-dependencies = ["anndata"]
+dependencies = [
+    "anndata",
+    "scvi-tools>=0.17.0"
+]
 
 [project.optional-dependencies]
 dev = [

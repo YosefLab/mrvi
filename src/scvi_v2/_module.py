@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, Dict, Optional
 
 import flax.linen as nn
 import jax
@@ -7,7 +7,6 @@ import numpyro.distributions as dist
 from scvi import REGISTRY_KEYS
 from scvi.distributions import JaxNegativeBinomialMeanDisp as NegativeBinomial
 from scvi.module.base import JaxBaseModuleClass, LossRecorder
-from typings import Dict, Optional
 
 from ._components import ConditionalBatchNorm1d, Dense, NormalNN
 from ._constants import MRVI_REGISTRY_KEYS
@@ -17,9 +16,9 @@ DEFAULT_PX_KWARGS = {"n_hidden": 32}
 DEFAULT_PZ_KWARGS = {}
 
 
-class DecoderZX(nn.Module):
+class _DecoderZX(nn.Module):
 
-    n_int: int
+    n_in: int
     n_out: int
     n_nuisance: int
     n_hidden: int = 128
@@ -36,11 +35,11 @@ class DecoderZX(nn.Module):
             raise ValueError(f"Invalid activation {self.activation}")
 
         self.n_latent = self.n_in - self.n_nuisance
-        self.amat = Dense(self.n_latent, self.n_out, bias=False)
+        self.amat = Dense(self.n_out, use_bias=False)
         self.amat_site = self.param("amat_site", jax.random.normal, (self.n_nuisance, self.n_latent, self.n_out))
         self.offsets = self.param("zx_offsets", jax.random.normal, (self.n_nuisance, self.n_out))
         self.dropout_ = nn.Dropout(0.1)
-        self.px_r = self.param("px_r", jax.random.normal, self.n_out)
+        self.px_r = self.param("px_r", jax.random.normal, (self.n_out,))
 
     def __call__(self, z: NdArray, size_factor: NdArray, training: bool = False) -> NegativeBinomial:
         nuisance_oh = z[..., -self.n_nuisance :]
@@ -55,10 +54,10 @@ class DecoderZX(nn.Module):
         mu = x1 + x2 + offsets
         mu = self.activation_fn(mu)
         mu = mu * size_factor
-        return NegativeBinomial(mu=mu, theta=self.px_r.exp())
+        return NegativeBinomial(mean=mu, inverse_dispersion=jnp.exp(self.px_r))
 
 
-class DecoderUZ(nn.Module):
+class _DecoderUZ(nn.Module):
 
     n_latent: int
     n_sample: int
@@ -83,18 +82,18 @@ class DecoderUZ(nn.Module):
             )
 
     def __call__(self, u: NdArray, sample_index: NdArray, training: bool = False) -> jnp.ndarray:
-        sample_index_ = sample_index.squeeze()
+        sample_index_ = sample_index.squeeze().astype(int)
         As = self.amat_sample[sample_index_]
 
-        u_detach = u.detach()[..., None]
-        z2 = (As * u_detach).sum(-2)
+        u_stop_grad = jax.lax.stop_gradient(u)[..., None]
+        z2 = (As * u_stop_grad).sum(-2)
         offsets = self.offsets[sample_index_]
         delta = z2 + offsets
         if self.scaler is not None:
             sample_oh = jax.nn.one_hot(sample_index, self.n_sample)
             if u.ndim != sample_oh.ndim:
                 sample_oh = jnp.broadcast_to(sample_oh[None], (u.shape[0], *sample_oh.shape))
-            inputs = jnp.concatenate([u.detach(), sample_oh], axis=-1)
+            inputs = jnp.concatenate([u_stop_grad.squeeze(-1), sample_oh], axis=-1)
             delta = delta * self.scaler(inputs)
         return u + delta
 
@@ -127,25 +126,25 @@ class MrVAE(JaxBaseModuleClass):
         n_nuisance = sum(self.n_cats_per_nuisance_keys)
 
         # Generative model
-        self.px = DecoderZX(
+        self.px = _DecoderZX(
             self.n_latent + n_nuisance,
             self.n_input,
             n_nuisance=n_nuisance,
             **px_kwargs,
         )
-        self.pz = DecoderUZ(
+        self.pz = _DecoderUZ(
             self.n_latent,
             self.n_sample,
             self.n_latent,
-            scaler=self.uz_scaler,
+            use_scaler=self.uz_scaler,
             scaler_n_hidden=self.uz_scaler_n_hidden,
             **pz_kwargs,
         )
 
         # Inference model
-        self.x_featurizer = nn.Sequential([Dense(self.encoder_n_hidden), nn.relu()])
+        self.x_featurizer = nn.Sequential([Dense(self.encoder_n_hidden), nn.relu])
         self.bnn = ConditionalBatchNorm1d(self.encoder_n_hidden, self.n_sample)
-        self.x_featurizer2 = nn.Sequential([Dense(self.encoder_n_hidden), nn.relu()])
+        self.x_featurizer2 = nn.Sequential([Dense(self.encoder_n_hidden), nn.relu])
         self.bnn2 = ConditionalBatchNorm1d(self.encoder_n_hidden, self.n_sample)
         self.qu = NormalNN(self.encoder_n_hidden + self.n_latent_sample, self.n_latent, n_categories=1)
 
@@ -163,7 +162,7 @@ class MrVAE(JaxBaseModuleClass):
         x_ = jnp.log1p(x)
 
         sample_index_cf = sample_index if cf_sample is None else cf_sample
-        zsample = self.sample_embeddings(sample_index_cf.long().squeeze(-1))
+        zsample = self.sample_embeddings(sample_index_cf.squeeze(-1).astype(int))
         zsample_ = zsample
         if mc_samples >= 2:
             zsample_ = zsample[None].expand(mc_samples, *zsample.shape)
@@ -172,7 +171,7 @@ class MrVAE(JaxBaseModuleClass):
         for dim in range(categorical_nuisance_keys.shape[-1]):
             nuisance_oh.append(
                 jax.nn.one_hot(
-                    categorical_nuisance_keys[:, [dim]],
+                    categorical_nuisance_keys[:, dim],
                     self.n_cats_per_nuisance_keys[dim],
                 )
             )
@@ -197,11 +196,7 @@ class MrVAE(JaxBaseModuleClass):
             u_rng = self.make_rng("u")
             u = qu.rsample(u_rng)
 
-        if self.linear_decoder_uz:
-            z = self.pz(u, sample_index_cf)
-        else:
-            inputs = jnp.concatenate([u, zsample_], axis=-1)
-            z = self.pz(inputs)
+        z = self.pz(u, sample_index_cf)
         library = jnp.expand_dims(jnp.log(x.sum(1)), 1)
 
         return {
@@ -221,8 +216,8 @@ class MrVAE(JaxBaseModuleClass):
 
     def generative(self, z, library, nuisance_oh):
         inputs = jnp.concatenate([z, nuisance_oh], axis=-1)
-        px = self.px(inputs, size_factor=library.exp())
-        h = px.loc / library.exp()
+        px = self.px(inputs, size_factor=jnp.exp(library))
+        h = px.mean / jnp.exp(library)
 
         pu = dist.Normal(0, 1)
         return {"px": px, "pu": pu, "h": h}
@@ -236,7 +231,7 @@ class MrVAE(JaxBaseModuleClass):
     ) -> jnp.ndarray:
 
         reconstruction_loss = -generative_outputs["px"].log_prob(tensors[REGISTRY_KEYS.X_KEY]).sum(-1)
-        kl_u = inference_outputs["qu"].kl_divergence(generative_outputs["pu"]).sum(-1)
+        kl_u = dist.kl_divergence(inference_outputs["qu"], generative_outputs["pu"]).sum(-1)
         kl_local_for_warmup = kl_u
 
         weighted_kl_local = kl_weight * kl_local_for_warmup

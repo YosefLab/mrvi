@@ -1,10 +1,10 @@
 from typing import Any, Optional, Tuple
 
 import flax.linen as nn
-from flax.linen.initializers import variance_scaling
 import jax
 import jax.numpy as jnp
 import numpyro.distributions as dist
+from flax.linen.initializers import variance_scaling
 
 from ._types import NdArray
 

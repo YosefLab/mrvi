@@ -25,7 +25,8 @@ DEFAULT_TRAIN_KWARGS = {
     "check_val_every_n_epoch": 1,
     "batch_size": 256,
     "train_size": 0.9,
-    "plan_kwargs": {"lr": 1e-2, "n_epochs_kl_warmup": 20},
+    "lr": 1e-3,
+    # "plan_kwargs": {"n_epochs_kl_warmup": 20},
 }
 
 
@@ -123,8 +124,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             **trainer_kwargs,
         )
         train_kwargs = dict(deepcopy(DEFAULT_TRAIN_KWARGS), **train_kwargs)
-        plan_kwargs = plan_kwargs or {}
-        train_kwargs["plan_kwargs"] = dict(deepcopy(DEFAULT_TRAIN_KWARGS["plan_kwargs"]), **plan_kwargs)
+        # plan_kwargs = plan_kwargs or {}
+        # train_kwargs["plan_kwargs"] = dict(deepcopy(DEFAULT_TRAIN_KWARGS["plan_kwargs"]), **plan_kwargs)
         super().train(**train_kwargs)
 
     def get_latent_representation(
@@ -142,8 +143,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         u = []
         z = []
         for tensors in tqdm(scdl):
-            inference_inputs = self.module._get_inference_input(tensors)
-            outputs = self.module.inference(mc_samples=mc_samples, **inference_inputs)
+            run_inference = self.module.get_inference_fn(mc_samples=mc_samples)
+            outputs = run_inference(tensors)
             u.append(outputs["u"].mean(0).cpu())
             z.append(outputs["z"].mean(0).cpu())
 
@@ -206,16 +207,14 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             xs = []
             for sample in range(self.summary_stats.n_sample):
                 cf_sample = sample * np.ones_like(tensors[MRVI_REGISTRY_KEYS.SAMPLE_KEY])
-                inference_inputs = self.module._get_inference_input(tensors)
-                inference_outputs = self.module.inference(
-                    mc_samples=mc_samples, cf_sample=cf_sample, **inference_inputs
-                )
+                run_inference = self.module.get_inference_fn(mc_samples=mc_samples)
+                inference_outputs = run_inference(tensors, cf_sample=cf_sample)
                 new = inference_outputs["z"]
 
                 xs.append(new[:, :, None])
 
             xs = jnp.concatenate(xs, axis=2).mean(0)
-            reps.append(xs.cpu().numpy())
+            reps.append(xs)
         reps = np.array(jax.device_get(jnp.concatenate(reps, axis=0)))
 
         if return_distances:

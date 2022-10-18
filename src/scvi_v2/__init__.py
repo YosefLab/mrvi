@@ -1,5 +1,8 @@
 from importlib.metadata import version
 
-__all__ = []
+from ._model import MrVI
+from ._module import MrVAE
+
+__all__ = ["MrVI", "MrVAE"]
 
 __version__ = version("scvi-v2")

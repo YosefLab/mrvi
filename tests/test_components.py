@@ -1,6 +1,7 @@
 import jax
 import jax.numpy as jnp
-from scvi_v2._components import Dense, ResnetFC, NormalNN, ConditionalBatchNorm1d
+
+from scvi_v2._components import ConditionalBatchNorm1d, Dense, NormalNN, ResnetFC
 
 
 def test_dense():

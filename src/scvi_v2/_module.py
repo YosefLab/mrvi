@@ -151,7 +151,7 @@ class MrVAE(JaxBaseModuleClass):
 
     @property
     def required_rngs(self):  # noqa: D102
-        return ("params", "u")
+        return ("params", "u", "dropout")
 
     def _get_inference_input(self, tensors: Dict[str, NdArray]) -> Dict[str, Any]:
         x = tensors[REGISTRY_KEYS.X_KEY]

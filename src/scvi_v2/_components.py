@@ -1,10 +1,10 @@
-from typing import Any, Optional
+from typing import Any, Optional, Tuple
 
 import flax.linen as nn
+from flax.linen.initializers import variance_scaling
 import jax
 import jax.numpy as jnp
 import numpyro.distributions as dist
-from flax.linen.initializers import variance_scaling
 
 from ._types import NdArray
 
@@ -29,19 +29,11 @@ class ResnetFC(nn.Module):
     activation: str = "softmax"
 
     def setup(self):
-        self.module1 = nn.Sequential(
-            [
-                nn.Dense(self.n_hidden),
-                nn.BatchNorm(),
-                nn.relu,
-            ]
-        )
-        self.module2 = nn.Sequential(
-            [
-                nn.Dense(self.n_out),
-                nn.BatchNorm(),
-            ]
-        )
+        self.dense1 = nn.Dense(self.n_hidden)
+        self.bn1 = nn.BatchNorm()
+        self.relu1 = nn.relu
+        self.dense2 = nn.Dense(self.n_out)
+        self.bn2 = nn.BatchNorm()
         if self.n_in != self.n_hidden:
             self.id_map1 = nn.Dense(self.n_hidden)
         else:
@@ -61,10 +53,13 @@ class ResnetFC(nn.Module):
             n_d1, nd2 = inputs.shape[:2]
             inputs = inputs.reshape(n_d1 * nd2, -1)
             need_reshaping = True
-        h = self.module1(inputs)
+        h = self.dense1(inputs)
+        h = self.bn1(h, use_running_average=not training)
+        h = self.relu1(h)
         if self.id_map1 is not None:
             h = h + self.id_map1(inputs)
-        h = self.module2(h)
+        h = self.dense2(h)
+        h = self.bn2(h, use_running_average=not training)
         if need_reshaping:
             h = h.view(n_d1, nd2, -1)
         if self.activation_fn is not None:
@@ -84,7 +79,7 @@ class _NormalNN(nn.Module):
         self._mean = nn.Dense(self.n_out)
         self._var = nn.Sequential([nn.Dense(self.n_out), nn.softplus])
 
-    def __call__(self, inputs: NdArray, training: bool = False) -> dist.Normal:
+    def __call__(self, inputs: NdArray, training: bool = False) -> Tuple[jnp.ndarray, jnp.ndarray]:
         if self.n_layers >= 1:
             h = self.hidden(inputs)
             mean = self._mean(h)
@@ -93,7 +88,7 @@ class _NormalNN(nn.Module):
             mean = self._mean(inputs)
             k = mean.shape[0]
             var = self._var[None].expand(k, -1)
-        return dist.Normal(mean, var)
+        return mean, var
 
 
 class NormalNN(nn.Module):
@@ -124,11 +119,12 @@ class NormalNN(nn.Module):
         vars = jnp.concatenate(vars, axis=-1)
         if categories is not None:
             # categories (minibatch, 1)
-            n_cats = categories.shape[0]
-            cat_ = categories.unsqueeze(-1).expand(n_cats, self.n_out, 1)
             if means.ndim == 4:
                 d1, n_cats, _, _ = means.shape
                 cat_ = categories[None, :, None].expand(d1, n_cats, self.n_out, 1)
+            else:
+                n_cats = categories.shape[0]
+                cat_ = jnp.broadcast_to(jnp.expand_dims(categories, -1), (n_cats, self.n_out, 1))
             means = jnp.take_along_axis(means, cat_, -1)
             vars = jnp.take_along_axis(vars, cat_, -1)
         means = means.squeeze(-1)
@@ -141,10 +137,12 @@ class ConditionalBatchNorm1d(nn.Module):
     num_classes: int
 
     @staticmethod
-    def _get_embedding_initializer(num_features: int) -> nn.initializers.Initializer:
+    def _get_embedding_initializer(num_features: int) -> jax.nn.initializers.Initializer:
         def init(key: jax.random.KeyArray, shape: tuple, dtype: Any = jnp.float_) -> jnp.ndarray:
             weights = jnp.zeros(shape)
-            weights[:, :num_features] = jax.random.normal(key, shape, dtype) * 0.02 + 1
+            weights = weights.at[:, :num_features].set(
+                jax.random.normal(key, (shape[0], num_features), dtype) * 0.02 + 1
+            )
             return weights
 
         return init
@@ -156,6 +154,7 @@ class ConditionalBatchNorm1d(nn.Module):
         )
 
     def __call__(self, x: NdArray, y: NdArray, training: bool = False) -> jnp.ndarray:
+        need_reshaping = False
         if x.ndim == 3:
             n_d1, nd2 = x.shape[:2]
             x = x.reshape(n_d1 * nd2, -1)
@@ -164,8 +163,9 @@ class ConditionalBatchNorm1d(nn.Module):
             y = jnp.broadcast_to(y[None], (n_d1, nd2, -1))
             y = y.reshape(n_d1 * nd2, -1)
 
-        out = self.bn(x)
-        gamma, beta = self.embed(y.squeeze(-1).long()).chunk(2, 1)
+        out = self.bn(x, use_running_average=not training)
+        y_embed = self.embed(y.squeeze(-1).astype(int))
+        gamma, beta = y_embed[:, : self.num_features], y_embed[:, self.num_features :]
         out = gamma * out + beta
 
         if need_reshaping:

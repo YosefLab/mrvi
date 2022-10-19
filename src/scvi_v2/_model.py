@@ -10,7 +10,6 @@ from scvi import REGISTRY_KEYS
 from scvi.data import AnnDataManager
 from scvi.data.fields import CategoricalJointObsField, CategoricalObsField, LayerField
 from scvi.model.base import BaseModelClass, JaxTrainingMixin
-from scvi.module.base import JaxModuleWrapper
 from sklearn.metrics import pairwise_distances
 from tqdm import tqdm
 
@@ -25,8 +24,7 @@ DEFAULT_TRAIN_KWARGS = {
     "check_val_every_n_epoch": 1,
     "batch_size": 256,
     "train_size": 0.9,
-    "lr": 1e-3,
-    # "plan_kwargs": {"n_epochs_kl_warmup": 20},
+    "plan_kwargs": {"lr": 1e-3, "n_epochs_kl_warmup": 20},
 }
 
 
@@ -73,8 +71,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             .values
         )
         self.data_splitter = None
-        self.module = JaxModuleWrapper(
-            MrVAE,
+        self.module = MrVAE(
             n_input=self.summary_stats.n_vars,
             n_sample=n_sample,
             n_obs_per_sample=n_obs_per_sample,
@@ -82,6 +79,10 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             **model_kwargs,
         )
         self.init_params_ = self._get_init_params(locals())
+
+    def to_device(self, device):  # noqa: #D102
+        # TODO(jhong): remove this once we have a better way to handle device.
+        pass
 
     @classmethod
     def setup_anndata(
@@ -124,8 +125,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             **trainer_kwargs,
         )
         train_kwargs = dict(deepcopy(DEFAULT_TRAIN_KWARGS), **train_kwargs)
-        # plan_kwargs = plan_kwargs or {}
-        # train_kwargs["plan_kwargs"] = dict(deepcopy(DEFAULT_TRAIN_KWARGS["plan_kwargs"]), **plan_kwargs)
+        plan_kwargs = plan_kwargs or {}
+        train_kwargs["plan_kwargs"] = dict(deepcopy(DEFAULT_TRAIN_KWARGS["plan_kwargs"]), **plan_kwargs)
         super().train(**train_kwargs)
 
     def get_latent_representation(
@@ -138,15 +139,15 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
     ) -> np.ndarray:
         self._check_if_trained(warn=False)
         adata = self._validate_anndata(adata)
-        scdl = self._make_data_loader(adata=adata, indices=indices, batch_size=batch_size)
+        scdl = self._make_data_loader(adata=adata, indices=indices, batch_size=batch_size, iter_ndarray=True)
 
         u = []
         z = []
-        for tensors in tqdm(scdl):
-            run_inference = self.module.get_inference_fn(mc_samples=mc_samples)
-            outputs = run_inference(tensors)
-            u.append(outputs["u"].mean(0).cpu())
-            z.append(outputs["z"].mean(0).cpu())
+        jit_inference_fn = self.module.get_jit_inference_fn(inference_kwargs={"mc_samples": mc_samples})
+        for array_dict in tqdm(scdl):
+            outputs = jit_inference_fn(self.module.rngs, array_dict)
+            u.append(outputs["u"].mean(0))
+            z.append(outputs["z"].mean(0))
 
         u = np.array(jax.device_get(jnp.concatenate(u, axis=0)))
         z = np.array(jax.device_get(jnp.concatenate(z, axis=0)))
@@ -200,15 +201,17 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         adata = self.adata if adata is None else adata
         self._check_if_trained(warn=False)
         adata = self._validate_anndata(adata)
-        scdl = self._make_data_loader(adata=adata, indices=None, batch_size=batch_size)
+        scdl = self._make_data_loader(adata=adata, indices=None, batch_size=batch_size, iter_ndarray=True)
 
         reps = []
-        for tensors in tqdm(scdl):
+        for array_dict in tqdm(scdl):
             xs = []
             for sample in range(self.summary_stats.n_sample):
-                cf_sample = sample * np.ones_like(tensors[MRVI_REGISTRY_KEYS.SAMPLE_KEY])
-                run_inference = self.module.get_inference_fn(mc_samples=mc_samples)
-                inference_outputs = run_inference(tensors, cf_sample=cf_sample)
+                cf_sample = sample * np.ones_like(array_dict[MRVI_REGISTRY_KEYS.SAMPLE_KEY])
+                jit_inference_fn = self.module.get_jit_inference_fn(
+                    inference_kwargs={"mc_samples": mc_samples, "cf_sample": cf_sample}
+                )
+                inference_outputs = jit_inference_fn(self.module.rngs, array_dict)
                 new = inference_outputs["z"]
 
                 xs.append(new[:, :, None])

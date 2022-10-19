@@ -27,6 +27,7 @@ class ResnetFC(nn.Module):
     n_out: int
     n_hidden: int = 128
     activation: str = "softmax"
+    training: Optional[bool] = None
 
     def setup(self):
         self.dense1 = nn.Dense(self.n_hidden)
@@ -47,7 +48,8 @@ class ResnetFC(nn.Module):
         else:
             raise ValueError(f"Invalid activation {self.activation}")
 
-    def __call__(self, inputs: NdArray, training: bool = False) -> NdArray:
+    def __call__(self, inputs: NdArray, training: Optional[bool] = None) -> NdArray:
+        training = nn.merge_param("training", self.training, training)
         need_reshaping = False
         if inputs.ndim == 3:
             n_d1, nd2 = inputs.shape[:2]
@@ -61,7 +63,7 @@ class ResnetFC(nn.Module):
         h = self.dense2(h)
         h = self.bn2(h, use_running_average=not training)
         if need_reshaping:
-            h = h.view(n_d1, nd2, -1)
+            h = h.reshape(n_d1, nd2, -1)
         if self.activation_fn is not None:
             return self.activation_fn(h)
         return h
@@ -73,15 +75,17 @@ class _NormalNN(nn.Module):
     n_out: int
     n_hidden: int = 128
     n_layers: int = 1
+    training: Optional[bool] = None
 
     def setup(self):
         self.hidden = ResnetFC(n_in=self.n_in, n_out=self.n_hidden, activation="relu")
         self._mean = nn.Dense(self.n_out)
         self._var = nn.Sequential([nn.Dense(self.n_out), nn.softplus])
 
-    def __call__(self, inputs: NdArray, training: bool = False) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    def __call__(self, inputs: NdArray, training: Optional[bool] = None) -> Tuple[jnp.ndarray, jnp.ndarray]:
+        training = nn.merge_param("training", self.training, training)
         if self.n_layers >= 1:
-            h = self.hidden(inputs)
+            h = self.hidden(inputs, training=training)
             mean = self._mean(h)
             var = self._var(h)
         else:
@@ -98,6 +102,7 @@ class NormalNN(nn.Module):
     n_hidden: int = 128
     n_layers: int = 1
     eps: float = 1e-5
+    training: Optional[bool] = None
 
     def setup(self):
         nn_kwargs = {
@@ -108,11 +113,14 @@ class NormalNN(nn.Module):
         }
         self.cat_modules = [_NormalNN(**nn_kwargs) for _ in range(self.n_categories)]
 
-    def __call__(self, inputs: NdArray, categories: Optional[NdArray] = None, training: bool = False) -> dist.Normal:
+    def __call__(
+        self, inputs: NdArray, categories: Optional[NdArray] = None, training: Optional[bool] = None
+    ) -> dist.Normal:
+        training = nn.merge_param("training", self.training, training)
         means = []
         vars = []
         for module in self.cat_modules:
-            _means, _vars = module(inputs)
+            _means, _vars = module(inputs, training=training)
             means.append(_means[..., None])
             vars.append(_vars[..., None])
         means = jnp.concatenate(means, axis=-1)
@@ -133,8 +141,10 @@ class NormalNN(nn.Module):
 
 
 class ConditionalBatchNorm1d(nn.Module):
+
     num_features: int
     num_classes: int
+    training: Optional[bool] = None
 
     @staticmethod
     def _get_embedding_initializer(num_features: int) -> jax.nn.initializers.Initializer:
@@ -153,7 +163,8 @@ class ConditionalBatchNorm1d(nn.Module):
             self.num_classes, self.num_features * 2, embedding_init=self._get_embedding_initializer(self.num_features)
         )
 
-    def __call__(self, x: NdArray, y: NdArray, training: bool = False) -> jnp.ndarray:
+    def __call__(self, x: NdArray, y: NdArray, training: Optional[bool] = None) -> jnp.ndarray:
+        training = nn.merge_param("training", self.training, training)
         need_reshaping = False
         if x.ndim == 3:
             n_d1, nd2 = x.shape[:2]

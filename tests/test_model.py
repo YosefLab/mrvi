@@ -1,11 +1,9 @@
 import numpy as np
-import pytest
 from scvi.data import synthetic_iid
 
 from scvi_v2 import MrVI
 
 
-# @pytest.mark.skip(reason="This decorator should be removed once scvi-tools jax fixes are in.")
 def test_mrvi():
     adata = synthetic_iid()
     adata.obs["sample"] = np.random.choice(15, size=adata.shape[0])

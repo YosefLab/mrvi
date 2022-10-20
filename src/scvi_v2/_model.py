@@ -202,22 +202,19 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         self._check_if_trained(warn=False)
         adata = self._validate_anndata(adata)
         scdl = self._make_data_loader(adata=adata, indices=None, batch_size=batch_size, iter_ndarray=True)
+        n_sample = self.summary_stats.n_sample
 
         reps = []
         for array_dict in tqdm(scdl):
-            xs = []
-            for sample in range(self.summary_stats.n_sample):
-                cf_sample = sample * np.ones_like(array_dict[MRVI_REGISTRY_KEYS.SAMPLE_KEY])
-                jit_inference_fn = self.module.get_jit_inference_fn(
-                    inference_kwargs={"mc_samples": mc_samples, "cf_sample": cf_sample}
-                )
-                inference_outputs = jit_inference_fn(self.module.rngs, array_dict)
-                new = inference_outputs["z"]
-
-                xs.append(new[:, :, None])
-
-            xs = jnp.concatenate(xs, axis=2).mean(0)
-            reps.append(xs)
+            n_cells = array_dict[REGISTRY_KEYS.X_KEY].shape[0]
+            cf_sample = np.broadcast_to(np.arange(n_sample)[:, None], (n_sample, n_cells)).reshape(-1, 1)
+            jit_inference_fn = self.module.get_jit_inference_fn(
+                inference_kwargs={"mc_samples": mc_samples, "cf_sample": cf_sample}
+            )
+            tiled_array_dict = {k: np.tile(v, (n_sample, 1)) for k, v in array_dict.items()}
+            inference_outputs = jit_inference_fn(self.module.rngs, tiled_array_dict)
+            zs = inference_outputs["z"].reshape(mc_samples, n_cells, n_sample, -1).mean(0)
+            reps.append(zs)
         reps = np.array(jax.device_get(jnp.concatenate(reps, axis=0)))
 
         if return_distances:

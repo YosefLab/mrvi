@@ -208,6 +208,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         for array_dict in tqdm(scdl):
             n_cells = array_dict[REGISTRY_KEYS.X_KEY].shape[0]
             cf_sample = np.broadcast_to(np.arange(n_sample)[:, None], (n_sample, n_cells)).reshape(-1, 1)
+            # TODO (jhong): Update once `get_jit_inference_fn` which allows for traced values.
             jit_inference_fn = self.module.get_jit_inference_fn(
                 inference_kwargs={"mc_samples": mc_samples, "cf_sample": cf_sample}
             )

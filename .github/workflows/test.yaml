@@ -58,5 +58,6 @@ jobs:
             - name: Upload coverage
               env:
                   CODECOV_NAME: ${{ matrix.python }}-${{ matrix.os }}
+                  CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
               run: |
-                  codecov --required --flags=unittests
+                  codecov --required --flags=unittests -t ${CODECOV_TOKEN}

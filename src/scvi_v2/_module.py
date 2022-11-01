@@ -6,14 +6,14 @@ import jax.numpy as jnp
 import numpyro.distributions as dist
 from scvi import REGISTRY_KEYS
 from scvi.distributions import JaxNegativeBinomialMeanDisp as NegativeBinomial
-from scvi.module.base import JaxBaseModuleClass, LossRecorder, flax_configure
+from scvi.module.base import JaxBaseModuleClass, LossOutput, flax_configure
 
 from ._components import ConditionalBatchNorm1d, Dense, NormalNN
 from ._constants import MRVI_REGISTRY_KEYS
 from ._types import NdArray
 
 DEFAULT_PX_KWARGS = {"n_hidden": 32}
-DEFAULT_PZ_KWARGS = {}
+DEFAULT_PZ_KWARGS = {"scaler_n_hidden": 32}
 
 
 class _DecoderZX(nn.Module):
@@ -79,7 +79,7 @@ class _DecoderUZ(nn.Module):
                     Dense(self.scaler_n_hidden),
                     nn.LayerNorm(),
                     nn.relu,
-                    nn.Dense(1),
+                    Dense(1),
                     nn.sigmoid,
                 ]
             )
@@ -96,8 +96,8 @@ class _DecoderUZ(nn.Module):
         if self.scaler is not None:
             sample_oh = jax.nn.one_hot(sample_index, self.n_sample)
             if u.ndim != sample_oh.ndim:
-                sample_oh = jnp.broadcast_to(sample_oh[None], (u.shape[0], *sample_oh.shape))
-            inputs = jnp.concatenate([u_stop_grad.squeeze(-1), sample_oh], axis=-1)
+                sample_oh = jax.lax.broadcast(sample_oh, (u.shape[0], ))
+            inputs = jnp.concatenate([jax.lax.stop_gradient(u), sample_oh], axis=-1)
             delta = delta * self.scaler(inputs)
         return u + delta
 
@@ -111,15 +111,14 @@ class MrVAE(JaxBaseModuleClass):
     n_obs_per_sample: NdArray
     n_cats_per_nuisance_keys: NdArray
     n_latent: int = 10
-    n_latent_sample: int = 10
+    n_latent_sample: int = 2
     uz_scaler: bool = False
-    uz_scaler_n_hidden: int = 32
     encoder_n_hidden: int = 128
     px_kwargs: Optional[dict] = None
     pz_kwargs: Optional[dict] = None
     training: bool = True
 
-    def setup(self):
+    def setup(self): # noqa: D102
         px_kwargs = DEFAULT_PX_KWARGS.copy()
         if self.px_kwargs is not None:
             px_kwargs.update(self.px_kwargs)
@@ -143,7 +142,6 @@ class MrVAE(JaxBaseModuleClass):
             self.n_sample,
             self.n_latent,
             use_scaler=self.uz_scaler,
-            scaler_n_hidden=self.uz_scaler_n_hidden,
             **pz_kwargs,
         )
 
@@ -171,7 +169,7 @@ class MrVAE(JaxBaseModuleClass):
         zsample = self.sample_embeddings(sample_index_cf.squeeze(-1).astype(int))
         zsample_ = zsample
         if mc_samples >= 2:
-            zsample_ = jnp.broadcast_to(zsample, (mc_samples, *zsample.shape))
+            zsample_ = jax.lax.broadcast(zsample, (mc_samples,))
 
         nuisance_oh = []
         for dim in range(categorical_nuisance_keys.shape[-1]):
@@ -188,13 +186,12 @@ class MrVAE(JaxBaseModuleClass):
         x_feat = self.x_featurizer2(x_feat)
         x_feat = self.bnn2(x_feat, sample_index, training=self.training)
         if x_.ndim != zsample_.ndim:
-            x_feat_ = jnp.broadcast_to(x_feat[None], (mc_samples, *x_feat.shape))
-            nuisance_oh = jnp.broadcast_to(nuisance_oh[None], (mc_samples, *nuisance_oh.shape))
+            x_feat_ = jax.lax.broadcast(x_feat, (mc_samples, ))
+            nuisance_oh = jax.lax.broadcast(nuisance_oh, (mc_samples, ))
         else:
             x_feat_ = x_feat
 
         inputs = jnp.concatenate([x_feat_, zsample_], axis=-1)
-        # inputs = x_feat_
         qu = self.qu(inputs, training=self.training)
         if use_mean:
             u = qu.loc
@@ -238,16 +235,12 @@ class MrVAE(JaxBaseModuleClass):
 
         reconstruction_loss = -generative_outputs["px"].log_prob(tensors[REGISTRY_KEYS.X_KEY]).sum(-1)
         kl_u = dist.kl_divergence(inference_outputs["qu"], generative_outputs["pu"]).sum(-1)
-        kl_local_for_warmup = kl_u
 
-        weighted_kl_local = kl_weight * kl_local_for_warmup
+        weighted_kl_local = kl_weight * kl_u
         loss = jnp.mean(reconstruction_loss + weighted_kl_local)
 
-        kl_local = jnp.array(0.0)
-        kl_global = jnp.array(0.0)
-        return LossRecorder(
-            loss,
-            reconstruction_loss,
-            kl_local,
-            kl_global,
+        return LossOutput(
+            loss=loss,
+            reconstruction_loss=reconstruction_loss,
+            kl_local=kl_u,
         )

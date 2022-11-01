@@ -6,7 +6,7 @@ import jax.numpy as jnp
 import numpyro.distributions as dist
 from scvi import REGISTRY_KEYS
 from scvi.distributions import JaxNegativeBinomialMeanDisp as NegativeBinomial
-from scvi.module.base import JaxBaseModuleClass, LossRecorder, flax_configure
+from scvi.module.base import JaxBaseModuleClass, LossOutput, flax_configure
 
 from ._components import ConditionalBatchNorm1d, Dense, NormalNN
 from ._constants import MRVI_REGISTRY_KEYS
@@ -245,9 +245,9 @@ class MrVAE(JaxBaseModuleClass):
 
         kl_local = jnp.array(0.0)
         kl_global = jnp.array(0.0)
-        return LossRecorder(
-            loss,
-            reconstruction_loss,
-            kl_local,
-            kl_global,
+        return LossOutput(
+            loss=loss,
+            reconstruction_loss=reconstruction_loss,
+            kl_local=kl_local,
+            kl_global=kl_global,
         )

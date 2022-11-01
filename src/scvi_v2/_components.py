@@ -30,13 +30,13 @@ class ResnetFC(nn.Module):
     training: Optional[bool] = None
 
     def setup(self):
-        self.dense1 = nn.Dense(self.n_hidden)
+        self.dense1 = Dense(self.n_hidden)
         self.bn1 = nn.BatchNorm()
         self.relu1 = nn.relu
-        self.dense2 = nn.Dense(self.n_out)
+        self.dense2 = Dense(self.n_out)
         self.bn2 = nn.BatchNorm()
         if self.n_in != self.n_hidden:
-            self.id_map1 = nn.Dense(self.n_hidden)
+            self.id_map1 = Dense(self.n_hidden)
         else:
             self.id_map1 = None
 
@@ -52,8 +52,8 @@ class ResnetFC(nn.Module):
         training = nn.merge_param("training", self.training, training)
         need_reshaping = False
         if inputs.ndim == 3:
-            n_d1, nd2 = inputs.shape[:2]
-            inputs = inputs.reshape(n_d1 * nd2, -1)
+            n_d1, n_d2 = inputs.shape[:2]
+            inputs = inputs.reshape(n_d1 * n_d2, -1)
             need_reshaping = True
         h = self.dense1(inputs)
         h = self.bn1(h, use_running_average=not training)
@@ -63,7 +63,7 @@ class ResnetFC(nn.Module):
         h = self.dense2(h)
         h = self.bn2(h, use_running_average=not training)
         if need_reshaping:
-            h = h.reshape(n_d1, nd2, -1)
+            h = h.reshape(n_d1, n_d2, -1)
         if self.activation_fn is not None:
             return self.activation_fn(h)
         return h
@@ -79,8 +79,8 @@ class _NormalNN(nn.Module):
 
     def setup(self):
         self.hidden = ResnetFC(n_in=self.n_in, n_out=self.n_hidden, activation="relu")
-        self._mean = nn.Dense(self.n_out)
-        self._var = nn.Sequential([nn.Dense(self.n_out), nn.softplus])
+        self._mean = Dense(self.n_out)
+        self._var = nn.Sequential([Dense(self.n_out), nn.softplus])
 
     def __call__(self, inputs: NdArray, training: Optional[bool] = None) -> Tuple[jnp.ndarray, jnp.ndarray]:
         training = nn.merge_param("training", self.training, training)
@@ -128,11 +128,10 @@ class NormalNN(nn.Module):
         if categories is not None:
             # categories (minibatch, 1)
             if means.ndim == 4:
-                d1, n_cats, _, _ = means.shape
-                cat_ = categories[None, :, None].expand(d1, n_cats, self.n_out, 1)
+                d1 = means.shape[0]
+                cat_ = jax.lax.transpose(jax.lax.broadcast(categories, (d1, self.n_out, 1)), (0, 3, 1, 2))
             else:
-                n_cats = categories.shape[0]
-                cat_ = jnp.broadcast_to(jnp.expand_dims(categories, -1), (n_cats, self.n_out, 1))
+                cat_ = jax.lax.transpose(jax.lax.broadcast(categories, (self.n_out, 1)), (2, 0, 1))
             means = jnp.take_along_axis(means, cat_, -1)
             vars = jnp.take_along_axis(vars, cat_, -1)
         means = means.squeeze(-1)
@@ -167,12 +166,12 @@ class ConditionalBatchNorm1d(nn.Module):
         training = nn.merge_param("training", self.training, training)
         need_reshaping = False
         if x.ndim == 3:
-            n_d1, nd2 = x.shape[:2]
-            x = x.reshape(n_d1 * nd2, -1)
+            n_d1, n_d2 = x.shape[:2]
+            x = x.reshape(n_d1 * n_d2, -1)
             need_reshaping = True
 
-            y = jnp.broadcast_to(y[None], (n_d1, nd2, -1))
-            y = y.reshape(n_d1 * nd2, -1)
+            y = jax.lax.broadcast(y[None], (n_d1, ))
+            y = y.reshape(n_d1 * n_d2, -1)
 
         out = self.bn(x, use_running_average=not training)
         y_embed = self.embed(y.squeeze(-1).astype(int))
@@ -180,6 +179,6 @@ class ConditionalBatchNorm1d(nn.Module):
         out = gamma * out + beta
 
         if need_reshaping:
-            out = out.reshape(n_d1, nd2, -1)
+            out = out.reshape(n_d1, n_d2, -1)
 
         return out

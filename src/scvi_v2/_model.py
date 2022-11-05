@@ -204,17 +204,54 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         scdl = self._make_data_loader(adata=adata, indices=None, batch_size=batch_size, iter_ndarray=True)
         n_sample = self.summary_stats.n_sample
 
+        vars_in = {"params": self.module.params, **self.module.state}
+        rngs = self.module.rngs
+
+        def inference_fn(
+            x,
+            sample_index,
+            categorical_nuisance_keys,
+            cf_sample,
+        ):
+            return self.module.apply(
+                vars_in,
+                rngs=rngs,
+                method=self.module.inference,
+                x=x,
+                sample_index=sample_index,
+                categorical_nuisance_keys=categorical_nuisance_keys,
+                cf_sample=cf_sample,
+                mc_samples=mc_samples,
+            )["z"].mean(0)
+
+        @jax.jit
+        def fn(
+            x,
+            sample_index,
+            categorical_nuisance_keys,
+            cf_sample,
+        ):
+
+            return jax.vmap(inference_fn, in_axes=(None, None, None, 0), out_axes=-2)(
+                x,
+                sample_index,
+                categorical_nuisance_keys,
+                cf_sample,
+            )
+
         reps = []
         for array_dict in tqdm(scdl):
             n_cells = array_dict[REGISTRY_KEYS.X_KEY].shape[0]
-            cf_sample = np.broadcast_to(np.arange(n_sample)[:, None], (n_sample, n_cells)).reshape(-1, 1)
-            # TODO (jhong): Update once `get_jit_inference_fn` which allows for traced values.
-            jit_inference_fn = self.module.get_jit_inference_fn(
-                inference_kwargs={"mc_samples": mc_samples, "cf_sample": cf_sample}
+            cf_sample = np.broadcast_to(np.arange(n_sample)[:, None, None], (n_sample, n_cells, 1))
+            inputs = self.module._get_inference_input(
+                array_dict,
             )
-            tiled_array_dict = {k: np.tile(v, (n_sample, 1)) for k, v in array_dict.items()}
-            inference_outputs = jit_inference_fn(self.module.rngs, tiled_array_dict)
-            zs = inference_outputs["z"].reshape(mc_samples, n_cells, n_sample, -1).mean(0)
+            zs = fn(
+                x=jnp.array(inputs["x"]),
+                sample_index=jnp.array(inputs["sample_index"]),
+                categorical_nuisance_keys=jnp.array(inputs["categorical_nuisance_keys"]),
+                cf_sample=jnp.array(cf_sample),
+            )
             reps.append(zs)
         reps = np.array(jax.device_get(jnp.concatenate(reps, axis=0)))
 

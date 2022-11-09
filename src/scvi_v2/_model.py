@@ -85,7 +85,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         pass
 
     @classmethod
-    def setup_anndata(
+    def setup_anndata(  # noqa: #D102
         cls,
         adata: AnnData,
         layer: Optional[str] = None,
@@ -104,7 +104,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         adata_manager.register_fields(adata, **kwargs)
         cls.register_manager(adata_manager)
 
-    def train(
+    def train(  # noqa: #D102
         self,
         max_epochs: Optional[int] = None,
         use_gpu: Optional[Union[str, int, bool]] = None,
@@ -133,17 +133,43 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         self,
         adata: Optional[AnnData] = None,
         indices=None,
+        use_mean: bool = True,
         mc_samples: int = 5000,
         batch_size: Optional[int] = None,
         give_z: bool = False,
     ) -> np.ndarray:
+        """
+        Computes the latent representation of the data.
+
+        Parameters
+        ----------
+        adata
+            AnnData object to use. Defaults to the AnnData object used to initialize the model.
+        indices
+            Indices of cells to use.
+        use_mean
+            Whether to use the mean of the posterior in the computation of the latent. If False,
+            `mc_samples` samples from the posterior are used.
+        mc_samples
+            Number of Monte Carlo samples to use for computing the latent representation.
+        batch_size
+            Batch size to use for computing the latent representation.
+        give_z
+            Whether to return the z latent representation or the u latent representation.
+
+        Returns
+        -------
+        The latent representation of the data.
+        """
         self._check_if_trained(warn=False)
         adata = self._validate_anndata(adata)
         scdl = self._make_data_loader(adata=adata, indices=indices, batch_size=batch_size, iter_ndarray=True)
 
         u = []
         z = []
-        jit_inference_fn = self.module.get_jit_inference_fn(inference_kwargs={"mc_samples": mc_samples})
+        jit_inference_fn = self.module.get_jit_inference_fn(
+            inference_kwargs={"use_mean": use_mean, "mc_samples": mc_samples if not use_mean else 1}
+        )
         for array_dict in tqdm(scdl):
             outputs = jit_inference_fn(self.module.rngs, array_dict)
             u.append(outputs["u"].mean(0))

@@ -399,7 +399,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
         adj_dists = jax.vmap(compute_local_distance, (0, 0), 0)(local_reps, cell_sample_probs)
         return dict(
-            distance_matrix=adj_dists.mean(0),
-            cell_sample_probs=cell_sample_probs,
-            cell_cell_probs=cell_scores,
+            distance_matrix=np.array(adj_dists.mean(0)),
+            cell_sample_probs=np.array(cell_sample_probs),
+            cell_cell_probs=np.array(cell_scores),
         )

@@ -310,6 +310,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         self._check_if_trained(warn=False)
         adata = self._validate_anndata(adata)
         scdl = self._make_data_loader(adata=adata, batch_size=batch_size, iter_ndarray=True, shuffle=False)
+        cpus = jax.devices("cpu")
 
         vars_in = {"params": self.module.params, **self.module.state}
         rngs = self.module.rngs
@@ -343,8 +344,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             )
             qu_m.append(_qu_m)
             qu_std.append(_qu_std)
-        qu_m = jax.device_get(jnp.concatenate(qu_m, axis=0))
-        qu_std = jax.device_get(jnp.concatenate(qu_std, axis=0))
+        qu_m = jax.device_put(jnp.concatenate(qu_m, axis=0), cpus[0])
+        qu_std = jax.device_put(jnp.concatenate(qu_std, axis=0), cpus[0])
 
         n_latent = qu_m.shape[-1]
         base_dist = dist.Chi2(df=n_latent)
@@ -373,15 +374,17 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
         sample_assignments = adata.obs["_scvi_sample"].values
         cell_sample_probs = []
+        cpus = jax.devices("cpu")
         for i in range(self.summary_stats.n_sample):
             cell_in_s = sample_assignments == i
             cell_sample_probs.append(cell_scores[:, cell_in_s].max(-1)[:, None])
-        cell_sample_probs = jax.device_get(jnp.concatenate(cell_sample_probs, axis=1))
+        cell_sample_probs = jax.device_put(jnp.concatenate(cell_sample_probs, axis=1), cpus[0])
 
         # local reps
         local_reps = self.get_local_sample_representation(
             adata=adata, batch_size=batch_size, mc_samples=mc_samples, return_distances=False
         )
+        local_reps = jax.device_put(local_reps, cpus[0])
 
         # weightings
         def compute_local_distance(rep, sample_probs):

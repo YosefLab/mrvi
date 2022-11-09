@@ -85,7 +85,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         pass
 
     @classmethod
-    def setup_anndata(
+    def setup_anndata(  # noqa: #D102
         cls,
         adata: AnnData,
         layer: Optional[str] = None,
@@ -104,7 +104,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         adata_manager.register_fields(adata, **kwargs)
         cls.register_manager(adata_manager)
 
-    def train(
+    def train(  # noqa: #D102
         self,
         max_epochs: Optional[int] = None,
         use_gpu: Optional[Union[str, int, bool]] = None,
@@ -133,24 +133,56 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         self,
         adata: Optional[AnnData] = None,
         indices=None,
+        use_mean: bool = True,
         mc_samples: int = 5000,
         batch_size: Optional[int] = None,
         give_z: bool = False,
     ) -> np.ndarray:
+        """
+        Computes the latent representation of the data.
+
+        Parameters
+        ----------
+        adata
+            AnnData object to use. Defaults to the AnnData object used to initialize the model.
+        indices
+            Indices of cells to use.
+        use_mean
+            Whether to use the mean of the posterior in the computation of the latent. If False,
+            `mc_samples` samples from the posterior are used.
+        mc_samples
+            Number of Monte Carlo samples to use for computing the latent representation.
+        batch_size
+            Batch size to use for computing the latent representation.
+        give_z
+            Whether to return the z latent representation or the u latent representation.
+
+        Returns
+        -------
+        The latent representation of the data.
+        """
         self._check_if_trained(warn=False)
         adata = self._validate_anndata(adata)
         scdl = self._make_data_loader(adata=adata, indices=indices, batch_size=batch_size, iter_ndarray=True)
 
-        u = []
-        z = []
-        jit_inference_fn = self.module.get_jit_inference_fn(inference_kwargs={"mc_samples": mc_samples})
+        us = []
+        zs = []
+        jit_inference_fn = self.module.get_jit_inference_fn(
+            inference_kwargs={"use_mean": use_mean, "mc_samples": mc_samples if not use_mean else 1}
+        )
         for array_dict in tqdm(scdl):
             outputs = jit_inference_fn(self.module.rngs, array_dict)
-            u.append(outputs["u"].mean(0))
-            z.append(outputs["z"].mean(0))
 
-        u = np.array(jax.device_get(jnp.concatenate(u, axis=0)))
-        z = np.array(jax.device_get(jnp.concatenate(z, axis=0)))
+            u = outputs["u"]
+            z = outputs["z"]
+            if use_mean is False and mc_samples > 1:
+                u = u.mean(0)
+                z = z.mean(0)
+            us.append(u)
+            zs.append(z)
+
+        u = np.array(jax.device_get(jnp.concatenate(us, axis=0)))
+        z = np.array(jax.device_get(jnp.concatenate(zs, axis=0)))
         return z if give_z else u
 
     @staticmethod
@@ -204,17 +236,55 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         scdl = self._make_data_loader(adata=adata, indices=None, batch_size=batch_size, iter_ndarray=True)
         n_sample = self.summary_stats.n_sample
 
+        vars_in = {"params": self.module.params, **self.module.state}
+        rngs = self.module.rngs
+
+        # TODO: use `self.module.get_jit_inference_fn` when it supports traced values.
+        def inference_fn(
+            x,
+            sample_index,
+            categorical_nuisance_keys,
+            cf_sample,
+        ):
+            return self.module.apply(
+                vars_in,
+                rngs=rngs,
+                method=self.module.inference,
+                x=x,
+                sample_index=sample_index,
+                categorical_nuisance_keys=categorical_nuisance_keys,
+                cf_sample=cf_sample,
+                mc_samples=mc_samples,
+            )["z"].mean(0)
+
+        @jax.jit
+        def vmapped_inference_fn(
+            x,
+            sample_index,
+            categorical_nuisance_keys,
+            cf_sample,
+        ):
+
+            return jax.vmap(inference_fn, in_axes=(None, None, None, 0), out_axes=-2)(
+                x,
+                sample_index,
+                categorical_nuisance_keys,
+                cf_sample,
+            )
+
         reps = []
         for array_dict in tqdm(scdl):
             n_cells = array_dict[REGISTRY_KEYS.X_KEY].shape[0]
-            cf_sample = np.broadcast_to(np.arange(n_sample)[:, None], (n_sample, n_cells)).reshape(-1, 1)
-            # TODO (jhong): Update once `get_jit_inference_fn` which allows for traced values.
-            jit_inference_fn = self.module.get_jit_inference_fn(
-                inference_kwargs={"mc_samples": mc_samples, "cf_sample": cf_sample}
+            cf_sample = np.broadcast_to(np.arange(n_sample)[:, None, None], (n_sample, n_cells, 1))
+            inputs = self.module._get_inference_input(
+                array_dict,
             )
-            tiled_array_dict = {k: np.tile(v, (n_sample, 1)) for k, v in array_dict.items()}
-            inference_outputs = jit_inference_fn(self.module.rngs, tiled_array_dict)
-            zs = inference_outputs["z"].reshape(mc_samples, n_cells, n_sample, -1).mean(0)
+            zs = vmapped_inference_fn(
+                x=jnp.array(inputs["x"]),
+                sample_index=jnp.array(inputs["sample_index"]),
+                categorical_nuisance_keys=jnp.array(inputs["categorical_nuisance_keys"]),
+                cf_sample=jnp.array(cf_sample),
+            )
             reps.append(zs)
         reps = np.array(jax.device_get(jnp.concatenate(reps, axis=0)))
 

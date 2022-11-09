@@ -15,7 +15,9 @@ def test_mrvi():
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)
     model.is_trained_ = True
     model.history
-    model.get_latent_representation()
+    assert model.get_latent_representation().shape == (adata.shape[0], 10)
+    assert model.get_latent_representation(use_mean=False, mc_samples=2).shape == (adata.shape[0], 10)
+    assert model.get_latent_representation(use_mean=False, mc_samples=1).shape == (adata.shape[0], 10)
     assert model.get_local_sample_representation().shape == (adata.shape[0], 15, 10)
     assert model.get_local_sample_representation(return_distances=True).shape == (
         adata.shape[0],

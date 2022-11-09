@@ -165,18 +165,24 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         adata = self._validate_anndata(adata)
         scdl = self._make_data_loader(adata=adata, indices=indices, batch_size=batch_size, iter_ndarray=True)
 
-        u = []
-        z = []
+        us = []
+        zs = []
         jit_inference_fn = self.module.get_jit_inference_fn(
             inference_kwargs={"use_mean": use_mean, "mc_samples": mc_samples if not use_mean else 1}
         )
         for array_dict in tqdm(scdl):
             outputs = jit_inference_fn(self.module.rngs, array_dict)
-            u.append(outputs["u"].mean(0))
-            z.append(outputs["z"].mean(0))
 
-        u = np.array(jax.device_get(jnp.concatenate(u, axis=0)))
-        z = np.array(jax.device_get(jnp.concatenate(z, axis=0)))
+            u = outputs["u"]
+            z = outputs["z"]
+            if use_mean is False and mc_samples > 1:
+                u = u.mean(0)
+                z = z.mean(0)
+            us.append(u)
+            zs.append(z)
+
+        u = np.array(jax.device_get(jnp.concatenate(us, axis=0)))
+        z = np.array(jax.device_get(jnp.concatenate(zs, axis=0)))
         return z if give_z else u
 
     @staticmethod

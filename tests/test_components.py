@@ -24,7 +24,7 @@ def test_normalnn():
     key = jax.random.PRNGKey(0)
     key, subkey = jax.random.split(key)
     x = jnp.ones((20, 10))
-    cats = jax.random.choice(subkey, 3, (20, 1))
+    cats = jax.random.choice(subkey, 3, (20,))
     normalnn = NormalNN(10, 30, 3, training=True)
     params = normalnn.init(key, x, cats)
     normalnn.apply(params, x, cats, mutable=["batch_stats"])

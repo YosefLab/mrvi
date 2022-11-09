@@ -12,6 +12,7 @@ from scvi.data.fields import CategoricalJointObsField, CategoricalObsField, Laye
 from scvi.model.base import BaseModelClass, JaxTrainingMixin
 from sklearn.metrics import pairwise_distances
 from tqdm import tqdm
+import numpyro.distributions as dist
 
 from ._constants import MRVI_REGISTRY_KEYS
 from ._module import MrVAE
@@ -209,6 +210,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
     def get_local_sample_representation(
         self,
         adata=None,
+        indices=None,
         batch_size=256,
         mc_samples: int = 10,
         return_distances=False,
@@ -233,7 +235,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         adata = self.adata if adata is None else adata
         self._check_if_trained(warn=False)
         adata = self._validate_anndata(adata)
-        scdl = self._make_data_loader(adata=adata, indices=None, batch_size=batch_size, iter_ndarray=True)
+        scdl = self._make_data_loader(adata=adata, indices=indices, batch_size=batch_size, iter_ndarray=True)
         n_sample = self.summary_stats.n_sample
 
         vars_in = {"params": self.module.params, **self.module.state}
@@ -292,3 +294,112 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             return self.compute_distance_matrix_from_representations(reps)
 
         return reps
+
+    def get_cell_scores(
+        self,
+        adata=None,
+        batch_size=256,
+    ):
+        """Computes cell overlap probability score square matrix.
+
+        For each pair of cells, the score corresponds to the minimum value alpha s.t.
+        n belongs in the alpha-confidence ellipse of np (symmetrized).
+        """
+
+        adata = self.adata if adata is None else adata
+        self._check_if_trained(warn=False)
+        adata = self._validate_anndata(adata)
+        scdl = self._make_data_loader(adata=adata, batch_size=batch_size, iter_ndarray=True, shuffle=False)
+
+        vars_in = {"params": self.module.params, **self.module.state}
+        rngs = self.module.rngs
+
+        @jax.jit
+        def inference_fn(
+            x,
+            sample_index,
+            categorical_nuisance_keys,
+        ):
+            outs = self.module.apply(
+                vars_in,
+                rngs=rngs,
+                method=self.module.inference,
+                x=x,
+                sample_index=sample_index,
+                categorical_nuisance_keys=categorical_nuisance_keys,
+            )
+            return outs["qu"].loc, outs["qu"].scale
+
+        qu_m = []
+        qu_std = []
+        for array_dict in tqdm(scdl):
+            inputs = self.module._get_inference_input(
+                array_dict,
+            )
+            _qu_m, _qu_std = inference_fn(
+                x=jnp.array(inputs["x"]),
+                sample_index=jnp.array(inputs["sample_index"]),
+                categorical_nuisance_keys=jnp.array(inputs["categorical_nuisance_keys"]),
+            )
+            qu_m.append(_qu_m)
+            qu_std.append(_qu_std)
+        qu_m = jax.device_get(jnp.concatenate(qu_m, axis=0))
+        qu_std = jax.device_get(jnp.concatenate(qu_std, axis=0))
+
+        n_latent = qu_m.shape[-1]
+        base_dist = dist.Chi2(df=n_latent)
+
+        def compute_ccdf(qu_m, qu_mb, qu_mb_std):
+            delta = qu_m - qu_mb
+            prec = qu_mb_std**-2
+            t = ((delta**2) * prec).sum(-1)
+            tail_prob = 1.0 - base_dist.cdf(t)
+            return tail_prob
+
+        qu_m1 = qu_m.copy()
+        qu_m2 = qu_m.copy()
+        tail_probs = jax.vmap(compute_ccdf, (None, 0, 0), -1)(qu_m1, qu_m2, qu_std)
+
+        scores = jnp.maximum(tail_probs, tail_probs.T)
+        return scores
+
+    def get_aggregated_distance_mat(self, adata, batch_size=256, mc_samples: int = 10, proba_threshold=0.01):
+        assert adata is not None
+        # get uncertainty masks
+        cell_scores = self.get_cell_scores(
+            adata=adata,
+            batch_size=batch_size,
+        )
+
+        sample_assignments = adata.obs["_scvi_sample"].values
+        cell_sample_probs = []
+        for i in range(self.summary_stats.n_sample):
+            cell_in_s = sample_assignments == i
+            cell_sample_probs.append(cell_scores[:, cell_in_s].max(-1)[:, None])
+        cell_sample_probs = jax.device_get(jnp.concatenate(cell_sample_probs, axis=1))
+
+        # local reps
+        local_reps = self.get_local_sample_representation(
+            adata=adata, batch_size=batch_size, mc_samples=mc_samples, return_distances=False
+        )
+
+        # weightings
+        def compute_local_distance(rep, sample_probs):
+            rep_norm = (rep**2).sum(-1, keepdims=True)
+            rep_norm = jnp.sqrt(rep_norm)
+            reps_ = rep / rep_norm
+            cos_sim = (reps_[None, :] * reps_[:, None]).sum(-1)
+            cos_dist = 1 - cos_sim
+
+            ood_sample = (sample_probs < proba_threshold).astype(float)
+            ood_mask = ood_sample[:, None] * ood_sample[None, :]
+
+            adj_dist = cos_dist * (1.0 - ood_mask) + (2.0 * ood_mask)
+            return adj_dist
+
+        adj_dists = jax.vmap(compute_local_distance, (0, 0), 0)(local_reps, cell_sample_probs)
+        return dict(
+            distance_matrix=adj_dists.mean(0),
+            cell_sample_probs=cell_sample_probs,
+            cell_cell_probs=cell_scores,
+        )

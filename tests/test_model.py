@@ -26,3 +26,6 @@ def test_mrvi():
     )
     # tests __repr__
     print(model)
+
+    adata_ = adata[:100]
+    model.get_aggregated_distance_mat(adata_)

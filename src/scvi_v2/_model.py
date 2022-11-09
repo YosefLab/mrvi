@@ -207,6 +207,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         vars_in = {"params": self.module.params, **self.module.state}
         rngs = self.module.rngs
 
+        # TODO: use `self.module.get_jit_inference_fn` when it supports traced values.
         def inference_fn(
             x,
             sample_index,
@@ -225,7 +226,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             )["z"].mean(0)
 
         @jax.jit
-        def fn(
+        def vmapped_inference_fn(
             x,
             sample_index,
             categorical_nuisance_keys,
@@ -246,7 +247,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             inputs = self.module._get_inference_input(
                 array_dict,
             )
-            zs = fn(
+            zs = vmapped_inference_fn(
                 x=jnp.array(inputs["x"]),
                 sample_index=jnp.array(inputs["sample_index"]),
                 categorical_nuisance_keys=jnp.array(inputs["categorical_nuisance_keys"]),

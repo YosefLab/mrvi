@@ -34,12 +34,12 @@ class ResnetBlock(nn.Module):
     def __call__(self, inputs: NdArray, training: Optional[bool] = None) -> NdArray:  # noqa: D102
         training = nn.merge_param("training", self.training, training)
         h = Dense(self.n_hidden)(inputs)
-        h = nn.BatchNorm()(h, use_running_average=not training)
+        h = nn.BatchNorm(momentum=0.9)(h, use_running_average=not training)
         h = nn.relu(h)
         if self.n_in != self.n_hidden:
             h = h + Dense(self.n_hidden)(inputs)
         h = Dense(self.n_out)(h)
-        h = nn.BatchNorm()(h, use_running_average=not training)
+        h = nn.BatchNorm(momentum=0.9)(h, use_running_average=not training)
         return self.output_activation(h)
 
 
@@ -56,13 +56,11 @@ class NormalDistOutputNN(nn.Module):
     @nn.compact
     def __call__(self, inputs: NdArray, training: Optional[bool] = None) -> dist.Normal:  # noqa: D102
         training = nn.merge_param("training", self.training, training)
-        _var_nn = nn.Sequential([Dense(self.n_out), nn.softplus])
-        _mean_nn = Dense(self.n_out)
         h = inputs
         for _ in range(self.n_layers):
             h = ResnetBlock(n_in=self.n_in, n_out=self.n_hidden)(h, training=training)
-        mean = _mean_nn(h)
-        var = _var_nn(h)
+        mean = Dense(self.n_out)(h)
+        var = nn.Sequential([Dense(self.n_out), nn.softplus])(h)
         return dist.Normal(mean, var + self.var_eps)
 
 
@@ -94,7 +92,7 @@ class ConditionalBatchNorm1d(nn.Module):
     def __call__(self, x: NdArray, condition: NdArray, training: Optional[bool] = None) -> jnp.ndarray:  # noqa: D102
         training = nn.merge_param("training", self.training, training)
 
-        out = nn.BatchNorm(use_bias=False, use_scale=False)(x, use_running_average=not training)
+        out = nn.BatchNorm(momentum=0.9, use_bias=False, use_scale=False)(x, use_running_average=not training)
         cond_int = condition.squeeze(-1).astype(int)
         gamma = nn.Embed(
             self.n_conditions, self.n_features, embedding_init=self._gamma_initializer(), name="gamma_conditional"

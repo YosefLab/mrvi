@@ -1,4 +1,4 @@
-from typing import Any, Optional, Tuple
+from typing import Any, Callable, Optional
 
 import flax.linen as nn
 import jax
@@ -21,164 +21,87 @@ class Dense(nn.Dense):
         super().__init__(*args, **kwargs)
 
 
-class ResnetFC(nn.Module):
+class ResnetBlock(nn.Module):
+    """Resnet block."""
 
     n_in: int
     n_out: int
     n_hidden: int = 128
-    activation: str = "softmax"
+    output_activation: Callable = nn.relu
     training: Optional[bool] = None
 
-    def setup(self):
-        self.dense1 = Dense(self.n_hidden)
-        self.bn1 = nn.BatchNorm()
-        self.relu1 = nn.relu
-        self.dense2 = Dense(self.n_out)
-        self.bn2 = nn.BatchNorm()
+    @nn.compact
+    def __call__(self, inputs: NdArray, training: Optional[bool] = None) -> NdArray:  # noqa: D102
+        training = nn.merge_param("training", self.training, training)
+        h = Dense(self.n_hidden)(inputs)
+        h = nn.BatchNorm()(h, use_running_average=not training)
+        h = nn.relu(h)
         if self.n_in != self.n_hidden:
-            self.id_map1 = Dense(self.n_hidden)
-        else:
-            self.id_map1 = None
-
-        self.activation_fn = None
-        if self.activation == "softmax":
-            self.activation_fn = nn.softmax
-        elif self.activation == "relu":
-            self.activation_fn = nn.relu
-        else:
-            raise ValueError(f"Invalid activation {self.activation}")
-
-    def __call__(self, inputs: NdArray, training: Optional[bool] = None) -> NdArray:
-        training = nn.merge_param("training", self.training, training)
-        need_reshaping = False
-        if inputs.ndim == 3:
-            n_d1, n_d2 = inputs.shape[:2]
-            inputs = inputs.reshape(n_d1 * n_d2, -1)
-            need_reshaping = True
-        h = self.dense1(inputs)
-        h = self.bn1(h, use_running_average=not training)
-        h = self.relu1(h)
-        if self.id_map1 is not None:
-            h = h + self.id_map1(inputs)
-        h = self.dense2(h)
-        h = self.bn2(h, use_running_average=not training)
-        if need_reshaping:
-            h = h.reshape(n_d1, n_d2, -1)
-        if self.activation_fn is not None:
-            return self.activation_fn(h)
-        return h
+            h = h + Dense(self.n_hidden)(inputs)
+        h = Dense(self.n_out)(h)
+        h = nn.BatchNorm()(h, use_running_average=not training)
+        return self.output_activation(h)
 
 
-class _NormalNN(nn.Module):
+class NormalDistOutputNN(nn.Module):
+    """Fully-connected neural net parameterizing a normal distribution."""
 
     n_in: int
     n_out: int
     n_hidden: int = 128
     n_layers: int = 1
+    var_eps: float = 1e-5
     training: Optional[bool] = None
 
-    def setup(self):
-        self.hidden = ResnetFC(n_in=self.n_in, n_out=self.n_hidden, activation="relu")
-        self._mean = Dense(self.n_out)
-        self._var = nn.Sequential([Dense(self.n_out), nn.softplus])
-
-    def __call__(self, inputs: NdArray, training: Optional[bool] = None) -> Tuple[jnp.ndarray, jnp.ndarray]:
+    @nn.compact
+    def __call__(self, inputs: NdArray, training: Optional[bool] = None) -> dist.Normal:  # noqa: D102
         training = nn.merge_param("training", self.training, training)
-        if self.n_layers >= 1:
-            h = self.hidden(inputs, training=training)
-            mean = self._mean(h)
-            var = self._var(h)
-        else:
-            mean = self._mean(inputs)
-            k = mean.shape[0]
-            var = self._var[None].expand(k, -1)
-        return mean, var
-
-
-class NormalNN(nn.Module):
-    n_in: int
-    n_out: int
-    n_categories: int
-    n_hidden: int = 128
-    n_layers: int = 1
-    eps: float = 1e-5
-    training: Optional[bool] = None
-
-    def setup(self):
-        nn_kwargs = {
-            "n_in": self.n_in,
-            "n_out": self.n_out,
-            "n_hidden": self.n_hidden,
-            "n_layers": self.n_layers,
-        }
-        self.cat_modules = [_NormalNN(**nn_kwargs) for _ in range(self.n_categories)]
-
-    def __call__(
-        self, inputs: NdArray, categories: Optional[NdArray] = None, training: Optional[bool] = None
-    ) -> dist.Normal:
-        training = nn.merge_param("training", self.training, training)
-        means = []
-        vars = []
-        for module in self.cat_modules:
-            _means, _vars = module(inputs, training=training)
-            means.append(_means[..., None])
-            vars.append(_vars[..., None])
-        means = jnp.concatenate(means, axis=-1)
-        vars = jnp.concatenate(vars, axis=-1)
-        if categories is not None:
-            # categories (minibatch, 1)
-            if means.ndim == 4:
-                d1 = means.shape[0]
-                cat_ = jax.lax.transpose(jax.lax.broadcast(categories, (d1, self.n_out, 1)), (0, 3, 1, 2))
-            else:
-                cat_ = jax.lax.transpose(jax.lax.broadcast(categories, (self.n_out, 1)), (2, 0, 1))
-            means = jnp.take_along_axis(means, cat_, -1)
-            vars = jnp.take_along_axis(vars, cat_, -1)
-        means = means.squeeze(-1)
-        vars = vars.squeeze(-1)
-        return dist.Normal(means, vars + self.eps)
+        _var_nn = nn.Sequential([Dense(self.n_out), nn.softplus])
+        _mean_nn = Dense(self.n_out)
+        h = inputs
+        for _ in range(self.n_layers):
+            h = ResnetBlock(n_in=self.n_in, n_out=self.n_hidden)(h, training=training)
+        mean = _mean_nn(h)
+        var = _var_nn(h)
+        return dist.Normal(mean, var + self.var_eps)
 
 
 class ConditionalBatchNorm1d(nn.Module):
+    """Batch norm with condition-specific gamma and beta."""
 
-    num_features: int
-    num_classes: int
+    n_features: int
+    n_conditions: int
     training: Optional[bool] = None
 
     @staticmethod
-    def _get_embedding_initializer(num_features: int) -> jax.nn.initializers.Initializer:
+    def _gamma_initializer() -> jax.nn.initializers.Initializer:
         def init(key: jax.random.KeyArray, shape: tuple, dtype: Any = jnp.float_) -> jnp.ndarray:
-            weights = jnp.zeros(shape)
-            weights = weights.at[:, :num_features].set(
-                jax.random.normal(key, (shape[0], num_features), dtype) * 0.02 + 1
-            )
+            weights = jax.random.normal(key, shape, dtype) * 0.02 + 1
             return weights
 
         return init
 
-    def setup(self):
-        self.bn = nn.BatchNorm(use_bias=False, use_scale=False)
-        self.embed = nn.Embed(
-            self.num_classes, self.num_features * 2, embedding_init=self._get_embedding_initializer(self.num_features)
-        )
+    @staticmethod
+    def _beta_initializer() -> jax.nn.initializers.Initializer:
+        def init(key: jax.random.KeyArray, shape: tuple, dtype: Any = jnp.float_) -> jnp.ndarray:
+            del key
+            weights = jnp.zeros(shape, dtype=dtype)
+            return weights
 
-    def __call__(self, x: NdArray, y: NdArray, training: Optional[bool] = None) -> jnp.ndarray:
+        return init
+
+    @nn.compact
+    def __call__(self, x: NdArray, condition: NdArray, training: Optional[bool] = None) -> jnp.ndarray:  # noqa: D102
         training = nn.merge_param("training", self.training, training)
-        need_reshaping = False
-        if x.ndim == 3:
-            n_d1, n_d2 = x.shape[:2]
-            x = x.reshape(n_d1 * n_d2, -1)
-            need_reshaping = True
 
-            y = jax.lax.broadcast(y[None], (n_d1, ))
-            y = y.reshape(n_d1 * n_d2, -1)
-
-        out = self.bn(x, use_running_average=not training)
-        y_embed = self.embed(y.squeeze(-1).astype(int))
-        gamma, beta = y_embed[:, : self.num_features], y_embed[:, self.num_features :]
+        out = nn.BatchNorm(use_bias=False, use_scale=False)(x, use_running_average=not training)
+        cond_int = condition.squeeze(-1).astype(int)
+        gamma = nn.Embed(
+            self.n_conditions, self.n_features, embedding_init=self._gamma_initializer(), name="gamma_conditional"
+        )(cond_int)
+        beta = nn.Embed(
+            self.n_conditions, self.n_features, embedding_init=self._beta_initializer(), name="beta_conditional"
+        )(cond_int)
         out = gamma * out + beta
-
-        if need_reshaping:
-            out = out.reshape(n_d1, n_d2, -1)
 
         return out

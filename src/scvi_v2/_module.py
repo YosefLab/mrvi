@@ -8,7 +8,7 @@ from scvi import REGISTRY_KEYS
 from scvi.distributions import JaxNegativeBinomialMeanDisp as NegativeBinomial
 from scvi.module.base import JaxBaseModuleClass, LossOutput, flax_configure
 
-from ._components import ConditionalBatchNorm1d, Dense, NormalNN
+from ._components import ConditionalBatchNorm1d, Dense, NormalDistOutputNN
 from ._constants import MRVI_REGISTRY_KEYS
 from ._types import NdArray
 
@@ -96,7 +96,7 @@ class _DecoderUZ(nn.Module):
         if self.scaler is not None:
             sample_oh = jax.nn.one_hot(sample_index, self.n_sample)
             if u.ndim != sample_oh.ndim:
-                sample_oh = jax.lax.broadcast(sample_oh, (u.shape[0], ))
+                sample_oh = jax.lax.broadcast(sample_oh, (u.shape[0],))
             inputs = jnp.concatenate([jax.lax.stop_gradient(u), sample_oh], axis=-1)
             delta = delta * self.scaler(inputs)
         return u + delta
@@ -118,7 +118,7 @@ class MrVAE(JaxBaseModuleClass):
     pz_kwargs: Optional[dict] = None
     training: bool = True
 
-    def setup(self): # noqa: D102
+    def setup(self):  # noqa: D102
         px_kwargs = DEFAULT_PX_KWARGS.copy()
         if self.px_kwargs is not None:
             px_kwargs.update(self.px_kwargs)
@@ -127,7 +127,9 @@ class MrVAE(JaxBaseModuleClass):
             pz_kwargs.update(self.pz_kwargs)
 
         assert self.n_latent_sample != 0
-        self.sample_embeddings = nn.Embed(self.n_sample, self.n_latent_sample)
+        self.sample_embeddings = nn.Embed(
+            self.n_sample, self.n_latent_sample, embedding_init=jax.nn.initializers.normal()
+        )
         n_nuisance = sum(self.n_cats_per_nuisance_keys)
 
         # Generative model
@@ -150,7 +152,7 @@ class MrVAE(JaxBaseModuleClass):
         self.bnn = ConditionalBatchNorm1d(self.encoder_n_hidden, self.n_sample)
         self.x_featurizer2 = nn.Sequential([Dense(self.encoder_n_hidden), nn.relu])
         self.bnn2 = ConditionalBatchNorm1d(self.encoder_n_hidden, self.n_sample)
-        self.qu = NormalNN(self.encoder_n_hidden + self.n_latent_sample, self.n_latent, n_categories=1)
+        self.qu = NormalDistOutputNN(self.encoder_n_hidden + self.n_latent_sample, self.n_latent)
 
     @property
     def required_rngs(self):  # noqa: D102
@@ -163,6 +165,7 @@ class MrVAE(JaxBaseModuleClass):
         return {"x": x, "sample_index": sample_index, "categorical_nuisance_keys": categorical_nuisance_keys}
 
     def inference(self, x, sample_index, categorical_nuisance_keys, mc_samples=1, cf_sample=None, use_mean=False):
+        """Latent variable inference."""
         x_ = jnp.log1p(x)
 
         sample_index_cf = sample_index if cf_sample is None else cf_sample
@@ -186,8 +189,8 @@ class MrVAE(JaxBaseModuleClass):
         x_feat = self.x_featurizer2(x_feat)
         x_feat = self.bnn2(x_feat, sample_index, training=self.training)
         if x_.ndim != zsample_.ndim:
-            x_feat_ = jax.lax.broadcast(x_feat, (mc_samples, ))
-            nuisance_oh = jax.lax.broadcast(nuisance_oh, (mc_samples, ))
+            x_feat_ = jax.lax.broadcast(x_feat, (mc_samples,))
+            nuisance_oh = jax.lax.broadcast(nuisance_oh, (mc_samples,))
         else:
             x_feat_ = x_feat
 
@@ -218,6 +221,7 @@ class MrVAE(JaxBaseModuleClass):
         return {"z": z, "library": library, "nuisance_oh": nuisance_oh}
 
     def generative(self, z, library, nuisance_oh):
+        """Generative model."""
         inputs = jnp.concatenate([z, nuisance_oh], axis=-1)
         px = self.px(inputs, size_factor=jnp.exp(library), training=self.training)
         h = px.mean / jnp.exp(library)
@@ -232,7 +236,7 @@ class MrVAE(JaxBaseModuleClass):
         generative_outputs: Dict[str, Any],
         kl_weight: float = 1.0,
     ) -> jnp.ndarray:
-
+        """Compute the loss function value."""
         reconstruction_loss = -generative_outputs["px"].log_prob(tensors[REGISTRY_KEYS.X_KEY]).sum(-1)
         kl_u = dist.kl_divergence(inference_outputs["qu"], generative_outputs["pu"]).sum(-1)
 

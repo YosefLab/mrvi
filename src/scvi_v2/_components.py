@@ -9,6 +9,10 @@ from flax.linen.initializers import variance_scaling
 from ._types import NdArray
 
 
+def standard_normal_init(key: jax.random.KeyArray, shape: tuple, dtype: Any = jnp.float_) -> jnp.ndarray:
+    return jax.random.normal(key, shape, dtype)
+
+
 class Dense(nn.Dense):
     """Jax dense layer."""
 

@@ -24,11 +24,12 @@ DEFAULT_TRAIN_KWARGS = {
     "check_val_every_n_epoch": 1,
     "batch_size": 256,
     "train_size": 0.9,
-    "plan_kwargs": {"lr": 1e-3, "n_epochs_kl_warmup": 20},
+    "plan_kwargs": {"lr": 1e-2, "n_epochs_kl_warmup": 20},
 }
 
 
 class MrVI(JaxTrainingMixin, BaseModelClass):
+    version = 1
     """
     Multi-resolution Variational Inference (MrVI).
 

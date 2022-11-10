@@ -8,7 +8,7 @@ from scvi import REGISTRY_KEYS
 from scvi.distributions import JaxNegativeBinomialMeanDisp as NegativeBinomial
 from scvi.module.base import JaxBaseModuleClass, LossOutput, flax_configure
 
-from ._components import ConditionalBatchNorm1d, Dense, NormalNN
+from ._components import ConditionalBatchNorm1d, Dense, NormalNN, standard_normal_init
 from ._constants import MRVI_REGISTRY_KEYS
 from ._types import NdArray
 
@@ -96,7 +96,7 @@ class _DecoderUZ(nn.Module):
         if self.scaler is not None:
             sample_oh = jax.nn.one_hot(sample_index, self.n_sample)
             if u.ndim != sample_oh.ndim:
-                sample_oh = jax.lax.broadcast(sample_oh, (u.shape[0], ))
+                sample_oh = jax.lax.broadcast(sample_oh, (u.shape[0],))
             inputs = jnp.concatenate([jax.lax.stop_gradient(u), sample_oh], axis=-1)
             delta = delta * self.scaler(inputs)
         return u + delta
@@ -118,7 +118,7 @@ class MrVAE(JaxBaseModuleClass):
     pz_kwargs: Optional[dict] = None
     training: bool = True
 
-    def setup(self): # noqa: D102
+    def setup(self):  # noqa: D102
         px_kwargs = DEFAULT_PX_KWARGS.copy()
         if self.px_kwargs is not None:
             px_kwargs.update(self.px_kwargs)
@@ -127,7 +127,7 @@ class MrVAE(JaxBaseModuleClass):
             pz_kwargs.update(self.pz_kwargs)
 
         assert self.n_latent_sample != 0
-        self.sample_embeddings = nn.Embed(self.n_sample, self.n_latent_sample)
+        self.sample_embeddings = nn.Embed(self.n_sample, self.n_latent_sample, embedding_init=standard_normal_init)
         n_nuisance = sum(self.n_cats_per_nuisance_keys)
 
         # Generative model
@@ -186,8 +186,8 @@ class MrVAE(JaxBaseModuleClass):
         x_feat = self.x_featurizer2(x_feat)
         x_feat = self.bnn2(x_feat, sample_index, training=self.training)
         if x_.ndim != zsample_.ndim:
-            x_feat_ = jax.lax.broadcast(x_feat, (mc_samples, ))
-            nuisance_oh = jax.lax.broadcast(nuisance_oh, (mc_samples, ))
+            x_feat_ = jax.lax.broadcast(x_feat, (mc_samples,))
+            nuisance_oh = jax.lax.broadcast(nuisance_oh, (mc_samples,))
         else:
             x_feat_ = x_feat
 

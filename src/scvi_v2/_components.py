@@ -31,10 +31,10 @@ class ResnetFC(nn.Module):
 
     def setup(self):
         self.dense1 = Dense(self.n_hidden)
-        self.bn1 = nn.BatchNorm()
+        self.bn1 = nn.BatchNorm(momentum=0.9)
         self.relu1 = nn.relu
         self.dense2 = Dense(self.n_out)
-        self.bn2 = nn.BatchNorm()
+        self.bn2 = nn.BatchNorm(momentum=0.9)
         if self.n_in != self.n_hidden:
             self.id_map1 = Dense(self.n_hidden)
         else:
@@ -157,7 +157,7 @@ class ConditionalBatchNorm1d(nn.Module):
         return init
 
     def setup(self):
-        self.bn = nn.BatchNorm(use_bias=False, use_scale=False)
+        self.bn = nn.BatchNorm(use_bias=False, use_scale=False, momentum=0.9)
         self.embed = nn.Embed(
             self.num_classes, self.num_features * 2, embedding_init=self._get_embedding_initializer(self.num_features)
         )
@@ -170,7 +170,7 @@ class ConditionalBatchNorm1d(nn.Module):
             x = x.reshape(n_d1 * n_d2, -1)
             need_reshaping = True
 
-            y = jax.lax.broadcast(y[None], (n_d1, ))
+            y = jax.lax.broadcast(y[None], (n_d1,))
             y = y.reshape(n_d1 * n_d2, -1)
 
         out = self.bn(x, use_running_average=not training)

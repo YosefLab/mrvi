@@ -413,7 +413,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         adj_dists = jnp.stack(adj_dists, axis=0).mean(0)
         return dict(
             distance_matrix=pd.DataFrame(
-                adj_dists, index=observed_samples.astype(str), columns=observed_samples.astype(str)
+                np.array(adj_dists), index=observed_samples.astype(str), columns=observed_samples.astype(str)
             ),
             cell_sample_probs=np.array(cell_sample_probs),
             cell_cell_probs=np.array(cell_scores),

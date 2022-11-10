@@ -13,6 +13,7 @@ from scvi.model.base import BaseModelClass, JaxTrainingMixin
 from sklearn.metrics import pairwise_distances
 from tqdm import tqdm
 import numpyro.distributions as dist
+import pandas as pd
 
 from ._constants import MRVI_REGISTRY_KEYS
 from ._module import MrVAE
@@ -372,11 +373,17 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             batch_size=batch_size,
         )
 
-        sample_assignments = adata.obs["_scvi_sample"].values
+        sampleid_assignments = adata.obs["_scvi_sample"]
+        sample_keys = adata.obs.loc[
+            :, ["_scvi_sample", self.adata_manager.get_state_registry(MRVI_REGISTRY_KEYS.SAMPLE_KEY)["original_key"]]
+        ]
+        sample_keys = sample_keys[lambda x: ~x.duplicated(keep="first")].set_index("_scvi_sample").squeeze()
         cell_sample_probs = []
         cpus = jax.devices("cpu")
-        for i in range(self.summary_stats.n_sample):
-            cell_in_s = sample_assignments == i
+        observed_sampleids = sampleid_assignments.unique()
+        observed_samples = sample_keys.loc[observed_sampleids].values
+        for i in observed_sampleids:
+            cell_in_s = sampleid_assignments.values == i
             cell_sample_probs.append(cell_scores[:, cell_in_s].max(-1)[:, None])
         cell_sample_probs = jax.device_put(jnp.concatenate(cell_sample_probs, axis=1), cpus[0])
 
@@ -385,6 +392,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             adata=adata, batch_size=batch_size, mc_samples=mc_samples, return_distances=False
         )
         local_reps = jax.device_put(local_reps, cpus[0])
+        local_reps = local_reps[:, observed_sampleids]
 
         # weightings
         def compute_local_distance(rep, sample_probs):
@@ -404,7 +412,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         adj_dists = [compute_local_distance(local_reps[i], cell_sample_probs[i]) for i in range(local_reps.shape[0])]
         adj_dists = jnp.stack(adj_dists, axis=0).mean(0)
         return dict(
-            distance_matrix=np.array(adj_dists),
+            distance_matrix=pd.DataFrame(adj_dists, index=observed_samples, columns=observed_samples),
             cell_sample_probs=np.array(cell_sample_probs),
             cell_cell_probs=np.array(cell_scores),
+            observed_samples=observed_samples,
         )

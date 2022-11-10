@@ -400,9 +400,11 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             adj_dist = cos_dist * (1.0 - ood_mask) + (2.0 * ood_mask)
             return adj_dist
 
-        adj_dists = jax.vmap(compute_local_distance, (0, 0), 0)(local_reps, cell_sample_probs)
+        # adj_dists = jax.vmap(compute_local_distance, (0, 0), 0)(local_reps, cell_sample_probs)
+        adj_dists = [compute_local_distance(local_reps[i], cell_sample_probs[i]) for i in range(local_reps.shape[0])]
+        adj_dists = jnp.stack(adj_dists, axis=0).mean(0)
         return dict(
-            distance_matrix=np.array(adj_dists.mean(0)),
+            distance_matrix=np.array(adj_dists),
             cell_sample_probs=np.array(cell_sample_probs),
             cell_cell_probs=np.array(cell_scores),
         )

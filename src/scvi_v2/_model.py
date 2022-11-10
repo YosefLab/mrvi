@@ -411,9 +411,11 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         # adj_dists = jax.vmap(compute_local_distance, (0, 0), 0)(local_reps, cell_sample_probs)
         adj_dists = [compute_local_distance(local_reps[i], cell_sample_probs[i]) for i in range(local_reps.shape[0])]
         adj_dists = jnp.stack(adj_dists, axis=0).mean(0)
+        dists = np.array(adj_dists)
+        dists = (dists + dists.T) / 2.0
         return dict(
             distance_matrix=pd.DataFrame(
-                np.array(adj_dists), index=observed_samples.astype(str), columns=observed_samples.astype(str)
+                dists, index=observed_samples.astype(str), columns=observed_samples.astype(str)
             ),
             cell_sample_probs=np.array(cell_sample_probs),
             cell_cell_probs=np.array(cell_scores),

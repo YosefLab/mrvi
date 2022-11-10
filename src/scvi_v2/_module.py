@@ -127,7 +127,9 @@ class MrVAE(JaxBaseModuleClass):
             pz_kwargs.update(self.pz_kwargs)
 
         assert self.n_latent_sample != 0
-        self.sample_embeddings = nn.Embed(self.n_sample, self.n_latent_sample)
+        self.sample_embeddings = nn.Embed(
+            self.n_sample, self.n_latent_sample, embedding_init=jax.nn.initializers.normal()
+        )
         n_nuisance = sum(self.n_cats_per_nuisance_keys)
 
         # Generative model

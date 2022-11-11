@@ -40,15 +40,14 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         Dimensionality of the latent space.
     n_latent_donor
         Dimensionality of the latent space for sample embeddings.
-    uz_scaler
-        Whether to incorporate a learned scaler term in the decoder from u to z.
-    uz_scaler_n_hidden
-        The number of hidden units in the neural network used to produce the scaler term
-        in decoder from u to z.
+    encoder_n_hidden
+        Number of nodes per hidden layer in the encoder.
     px_kwargs
-        Keyword args for :class:`~mrvi.components.DecoderZX`.
+        Keyword args for :class:`~mrvi.DecoderZX`.
     pz_kwargs
-        Keyword args for :class:`~mrvi.components.DecoderUZ`.
+        Keyword args for :class:`~mrvi.DecoderUZ`.
+    qu_kwargs
+        Keyword args for :class:`~mrvi.EncoderXU`.
     """
 
     def __init__(
@@ -243,7 +242,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         def inference_fn(
             x,
             sample_index,
-            categorical_nuisance_keys,
             cf_sample,
         ):
             return self.module.apply(
@@ -252,7 +250,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 method=self.module.inference,
                 x=x,
                 sample_index=sample_index,
-                categorical_nuisance_keys=categorical_nuisance_keys,
                 cf_sample=cf_sample,
                 mc_samples=mc_samples,
             )["z"].mean(0)
@@ -261,14 +258,12 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         def vmapped_inference_fn(
             x,
             sample_index,
-            categorical_nuisance_keys,
             cf_sample,
         ):
 
-            return jax.vmap(inference_fn, in_axes=(None, None, None, 0), out_axes=-2)(
+            return jax.vmap(inference_fn, in_axes=(None, None, 0), out_axes=-2)(
                 x,
                 sample_index,
-                categorical_nuisance_keys,
                 cf_sample,
             )
 
@@ -282,7 +277,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             zs = vmapped_inference_fn(
                 x=jnp.array(inputs["x"]),
                 sample_index=jnp.array(inputs["sample_index"]),
-                categorical_nuisance_keys=jnp.array(inputs["categorical_nuisance_keys"]),
                 cf_sample=jnp.array(cf_sample),
             )
             reps.append(zs)

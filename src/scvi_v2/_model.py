@@ -433,6 +433,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         distance_matrix = distance_matrix / count_matrix
         distance_matrix = distance_matrix + distance_matrix.T
         distance_matrix = distance_matrix / 2.0
+        distance_matrix = np.array(distance_matrix)
         return dict(
             distance_matrix=pd.DataFrame(
                 distance_matrix, index=observed_samples.astype(str), columns=observed_samples.astype(str)

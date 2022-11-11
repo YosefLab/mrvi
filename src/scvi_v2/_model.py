@@ -296,17 +296,11 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
         return reps
 
-    def get_cell_scores(
+    def get_latent_distributions(
         self,
         adata=None,
         batch_size=256,
     ):
-        """Computes cell overlap probability score square matrix.
-
-        For each pair of cells, the score corresponds to the minimum value alpha s.t.
-        n belongs in the alpha-confidence ellipse of np (symmetrized).
-        """
-
         adata = self.adata if adata is None else adata
         self._check_if_trained(warn=False)
         adata = self._validate_anndata(adata)
@@ -330,7 +324,12 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 sample_index=sample_index,
                 categorical_nuisance_keys=categorical_nuisance_keys,
             )
-            return outs["qu"].loc, outs["qu"].scale
+            qloc = outs["qu"].loc
+            qstd = outs["qu"].scale
+            if qloc.ndim == 3:
+                qloc = qloc.mean(0)
+                qstd = qstd.mean(0)
+            return qloc, qstd
 
         qu_m = []
         qu_std = []
@@ -347,6 +346,20 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             qu_std.append(_qu_std)
         qu_m = jax.device_put(jnp.concatenate(qu_m, axis=0), cpus[0])
         qu_std = jax.device_put(jnp.concatenate(qu_std, axis=0), cpus[0])
+        return qu_m, qu_std
+
+    def get_cell_scores(
+        self,
+        adata=None,
+        batch_size=256,
+    ):
+        """Computes cell overlap probability score square matrix.
+
+        For each pair of cells, the score corresponds to the minimum value alpha s.t.
+        n belongs in the alpha-confidence ellipse of np (symmetrized).
+        """
+
+        qu_m, qu_std = self.get_latent_distributions(adata=adata, batch_size=batch_size)
 
         n_latent = qu_m.shape[-1]
         base_dist = dist.Chi2(df=n_latent)

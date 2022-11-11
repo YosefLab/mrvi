@@ -1,4 +1,4 @@
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 import flax.linen as nn
 import jax
@@ -23,43 +23,32 @@ class _DecoderZX(nn.Module):
     n_in: int
     n_out: int
     n_hidden: int = 128
-    activation: str = "softplus"
+    activation: Callable = nn.softplus
     dropout_rate: float = 0.1
     training: Optional[bool] = None
 
-    def setup(self):
-        if self.activation == "softmax":
-            self.activation_fn = nn.softmax
-        elif self.activation == "softplus":
-            self.activation_fn = nn.softplus
-        elif self.activation == "exp":
-            self.activation_fn = jnp.exp
-        else:
-            raise ValueError(f"Invalid activation {self.activation}")
-
-        self.amat = Dense(self.n_out, use_bias=False, name="amat")
-        self.amat_site = nn.DenseGeneral(
+    @nn.compact
+    def __call__(
+        self, z: NdArray, nuisance_oh: NdArray, size_factor: NdArray, training: Optional[bool] = None
+    ) -> NegativeBinomial:
+        h1 = Dense(self.n_out, use_bias=False, name="amat")(z)
+        z_drop = nn.Dropout(self.dropout_rate)(jax.lax.stop_gradient(z), deterministic=not training)
+        # cells by n_out by n_latent (n_in)
+        A_b = nn.DenseGeneral(
             (self.n_out, self.n_in),
             use_bias=False,
             kernel_init=variance_scaling(1 / 3, "fan_in", "uniform"),
             name="amat_site",
+        )(nuisance_oh)
+        if z_drop.ndim == 3:
+            h2 = jnp.einsum("cgl,bcl->bcg", A_b, z_drop)
+        else:
+            h2 = jnp.einsum("cgl,cl->cg", A_b, z_drop)
+        h3 = Dense(self.n_out)(nuisance_oh)
+        mu = self.activation(h1 + h2 + h3)
+        return NegativeBinomial(
+            mean=mu * size_factor, inverse_dispersion=jnp.exp(self.param("px_r", jax.random.normal, (self.n_out,)))
         )
-        self.offset = Dense(self.n_out)
-        self.z_dropout = nn.Dropout(self.dropout_rate)
-        self.px_r = self.param("px_r", jax.random.normal, (self.n_out,))
-
-    def __call__(
-        self, z: NdArray, nuisance_oh: NdArray, size_factor: NdArray, training: Optional[bool] = None
-    ) -> NegativeBinomial:
-        training = nn.merge_param("training", self.training, training)
-        h1 = self.amat(z)
-        z_drop = self.z_dropout(jax.lax.stop_gradient(z), deterministic=not training)
-        # cells by n_out by n_latent (n_in)
-        A_b = self.amat_site(nuisance_oh)
-        h2 = jnp.einsum("cgl,cl->cg", A_b, z_drop)
-        h3 = self.offset(nuisance_oh)
-        mu = self.activation_fn(h1 + h2 + h3)
-        return NegativeBinomial(mean=mu * size_factor, inverse_dispersion=jnp.exp(self.px_r))
 
 
 class _DecoderUZ(nn.Module):
@@ -68,26 +57,22 @@ class _DecoderUZ(nn.Module):
     dropout_rate: float = 0.0
     training: Optional[bool] = None
 
-    def setup(self):
-        self.amat_sample = nn.DenseGeneral(
+    @nn.compact
+    def __call__(self, u: NdArray, sample_covariate: NdArray, training: Optional[bool] = None) -> jnp.ndarray:
+        training = nn.merge_param("training", self.training, training)
+        u_drop = nn.Dropout(self.dropout_rate)(jax.lax.stop_gradient(u), deterministic=not training)
+        # cells by n_out by n_latent
+        A_s = nn.DenseGeneral(
             (self.n_latent, self.n_latent),
             use_bias=False,
             kernel_init=variance_scaling(1 / 3, "fan_in", "uniform"),
             name="amat_sample",
-        )
-        self.dropout_u = nn.Dropout(self.dropout_rate)
-        self.offset = Dense(self.n_latent)
-
-    def __call__(self, u: NdArray, sample_covariate: NdArray, training: Optional[bool] = None) -> jnp.ndarray:
-        training = nn.merge_param("training", self.training, training)
-        u_drop = self.dropout_u(jax.lax.stop_gradient(u), deterministic=not training)
-        # cells by n_out by n_latent
-        A_s = self.amat_sample(sample_covariate)
+        )(sample_covariate)
         if u_drop.ndim == 3:
             h2 = jnp.einsum("cgl,bcl->bcg", A_s, u_drop)
         else:
             h2 = jnp.einsum("cgl,cl->cg", A_s, u_drop)
-        h3 = self.offset(sample_covariate)
+        h3 = Dense(self.n_latent)(sample_covariate)
         delta = h2 + h3
         return u + delta
 
@@ -100,35 +85,22 @@ class _EncoderXU(nn.Module):
     n_hidden: int
     training: Optional[bool] = None
 
-    def setup(self):
-        self.sample_embeddings = nn.Embed(
-            self.n_sample, self.n_latent_sample, embedding_init=jax.nn.initializers.normal()
-        )
-        self.x_featurizer = nn.Sequential([Dense(self.n_hidden), nn.relu])
-        self.bnn = ConditionalBatchNorm1d(self.n_hidden, self.n_sample)
-        self.x_featurizer2 = nn.Sequential([Dense(self.n_hidden), nn.relu])
-        self.bnn2 = ConditionalBatchNorm1d(self.n_hidden, self.n_sample)
-        self.qu = NormalDistOutputNN(self.n_hidden + self.n_latent_sample, self.n_latent)
-
-    def __call__(
-        self, x: NdArray, sample_covariate: NdArray, mc_samples: int = 1, training: Optional[bool] = None
-    ) -> dist.Normal:
+    @nn.compact
+    def __call__(self, x: NdArray, sample_covariate: NdArray, training: Optional[bool] = None) -> dist.Normal:
         training = nn.merge_param("training", self.training, training)
         x_ = jnp.log1p(x)
-        zsample = self.sample_embeddings(sample_covariate.squeeze(-1).astype(int))
+        zsample = nn.Embed(self.n_sample, self.n_latent_sample, embedding_init=jax.nn.initializers.normal())(
+            sample_covariate.squeeze(-1).astype(int)
+        )
         zsample_ = zsample
-        if mc_samples >= 2:
-            zsample_ = jax.lax.broadcast(zsample, (mc_samples,))
 
-        x_feat = self.x_featurizer(x_)
-        x_feat = self.bnn(x_feat, sample_covariate, training=training)
-        x_feat = self.x_featurizer2(x_feat)
-        x_feat = self.bnn2(x_feat, sample_covariate, training=training)
-        if mc_samples >= 2:
-            x_feat = jax.lax.broadcast(x_feat, (mc_samples,))
+        x_feat = nn.Sequential([Dense(self.n_hidden), nn.relu])(x_)
+        x_feat = ConditionalBatchNorm1d(self.n_hidden, self.n_sample)(x_feat, sample_covariate, training=training)
+        x_feat = nn.Sequential([Dense(self.n_hidden), nn.relu])(x_feat)
+        x_feat = ConditionalBatchNorm1d(self.n_hidden, self.n_sample)(x_feat, sample_covariate, training=training)
 
         inputs = jnp.concatenate([x_feat, zsample_], axis=-1)
-        return self.qu(inputs, training=training)
+        return NormalDistOutputNN(self.n_hidden + self.n_latent_sample, self.n_latent)(inputs, training=training)
 
 
 @flax_configure
@@ -191,12 +163,12 @@ class MrVAE(JaxBaseModuleClass):
 
     def inference(self, x, sample_index, mc_samples=1, cf_sample=None, use_mean=False):
         """Latent variable inference."""
-        qu = self.qu(x, sample_index, mc_samples=mc_samples, training=self.training)
+        qu = self.qu(x, sample_index, training=self.training)
         if use_mean:
             u = qu.mean
         else:
             u_rng = self.make_rng("u")
-            u = qu.rsample(u_rng)
+            u = qu.rsample(u_rng, sample_shape=(mc_samples,))
 
         sample_index_cf = sample_index if cf_sample is None else cf_sample
         z = self.pz(u, sample_index_cf, training=self.training)
@@ -226,8 +198,6 @@ class MrVAE(JaxBaseModuleClass):
                 )
             )
         nuisance_oh = jnp.concatenate(nuisance_oh, axis=-1)
-        if z.ndim != nuisance_oh.ndim:
-            nuisance_oh = jax.lax.broadcast(nuisance_oh, (z.shape[0],))
 
         px = self.px(z, nuisance_oh, size_factor=jnp.exp(library), training=self.training)
         h = px.mean / jnp.exp(library)

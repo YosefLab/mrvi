@@ -174,7 +174,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
             u = outputs["u"]
             z = outputs["z"]
-            if use_mean is False and mc_samples > 1:
+            if use_mean is False:
                 u = u.mean(0)
                 z = z.mean(0)
             us.append(u)

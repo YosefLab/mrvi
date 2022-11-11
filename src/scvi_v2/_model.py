@@ -430,7 +430,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             count_matrix = count_matrix.at[sample_ids_].set(new_counts)
             count_matrix = count_matrix.at[:, sample_ids_].set(new_counts)
 
-        distance_matrix = distance_matrix / count_matrix
+        distance_matrix = distance_matrix / jnp.maximum(1.0, count_matrix)
         distance_matrix = distance_matrix + distance_matrix.T
         distance_matrix = distance_matrix / 2.0
         distance_matrix = np.array(distance_matrix)

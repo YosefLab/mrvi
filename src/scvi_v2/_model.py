@@ -12,7 +12,7 @@ from scvi.data.fields import CategoricalJointObsField, CategoricalObsField, Laye
 from scvi.model.base import BaseModelClass, JaxTrainingMixin
 from sklearn.metrics import pairwise_distances
 from tqdm import tqdm
-import numpyro.distributions as dist
+import numpyro.distributions as db
 import pandas as pd
 
 from ._constants import MRVI_REGISTRY_KEYS
@@ -348,7 +348,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         qu_std = jax.device_put(jnp.concatenate(qu_std, axis=0), cpus[0])
         return qu_m, qu_std
 
-    def get_cell_scores(
+    def get_propensity_scores(
         self,
         adata=None,
         batch_size=256,
@@ -360,45 +360,46 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         """
 
         qu_m, qu_std = self.get_latent_distributions(adata=adata, batch_size=batch_size)
+        observed_sampleids = adata.obs["_scvi_sample"].unique()
 
-        n_latent = qu_m.shape[-1]
-        base_dist = dist.Chi2(df=n_latent)
+        log_ps = []
+        for sample in tqdm(observed_sampleids):
+            where_sample = (adata.obs["_scvi_sample"] == sample).values
+            n_samples = where_sample.sum()
+            uz_m_sample, uz_std_sample = qu_m[where_sample], qu_std[where_sample]
+            sections = 1 + (qu_m.shape[0] // 512)
+            log_p_sample = []
+            for _uz_m in jnp.array_split(qu_m, sections):
+                log_p = db.Normal(uz_m_sample[:, None], uz_std_sample[:, None]).log_prob(_uz_m).sum(-1)
+                log_p = jax.scipy.special.logsumexp(log_p, axis=0)
+                log_p = log_p - jnp.log(n_samples)
+                log_p_sample.append(log_p)
+            log_p_sample = jnp.concatenate(log_p_sample)[:, None]
+            log_ps.append(log_p_sample)
+        log_ps = jnp.concatenate(log_ps, 1)
+        log_probs = log_ps - jnp.log(1.0 / log_ps.shape[1])
+        map_ = pd.Series(observed_sampleids).to_frame("_scvi_sample").reset_index().set_index("_scvi_sample")
+        sample_ids = map_.loc[adata.obs["_scvi_sample"].values]["index"].values
 
-        def compute_ccdf(qu_m, qu_mb, qu_mb_std):
-            delta = qu_m - qu_mb
-            prec = qu_mb_std**-2
-            t = ((delta**2) * prec).sum(-1)
-            tail_prob = 1.0 - base_dist.cdf(t)
-            return tail_prob
+        log_probs_orig = log_probs[jnp.arange(log_probs.shape[0]), sample_ids]
+        log_denom = jnp.logaddexp(log_probs, log_probs_orig[:, None])
 
-        qu_m1 = qu_m.copy()
-        qu_m2 = qu_m.copy()
-        tail_probs = jax.vmap(compute_ccdf, (None, 0, 0), -1)(qu_m1, qu_m2, qu_std)
+        e_scores = jnp.exp(log_probs - log_denom)
+        return e_scores, observed_sampleids, sample_ids
 
-        scores = jnp.maximum(tail_probs, tail_probs.T)
-        return scores
-
-    def get_aggregated_distance_mat(self, adata, batch_size=256, mc_samples: int = 10, proba_threshold=0.01):
+    def get_aggregated_distance_mat(self, adata, batch_size=256, mc_samples: int = 10, proba_threshold=0.0):
         assert adata is not None
         # get uncertainty masks
-        cell_scores = self.get_cell_scores(
+        e_scores, observed_sampleids, sample_ids = self.get_propensity_scores(
             adata=adata,
             batch_size=batch_size,
         )
-
-        sampleid_assignments = adata.obs["_scvi_sample"]
         sample_keys = adata.obs.loc[
             :, ["_scvi_sample", self.adata_manager.get_state_registry(MRVI_REGISTRY_KEYS.SAMPLE_KEY)["original_key"]]
         ]
         sample_keys = sample_keys[lambda x: ~x.duplicated(keep="first")].set_index("_scvi_sample").squeeze()
-        cell_sample_probs = []
         cpus = jax.devices("cpu")
-        observed_sampleids = sampleid_assignments.unique()
         observed_samples = sample_keys.loc[observed_sampleids].values
-        for i in observed_sampleids:
-            cell_in_s = sampleid_assignments.values == i
-            cell_sample_probs.append(cell_scores[:, cell_in_s].max(-1)[:, None])
-        cell_sample_probs = jax.device_put(jnp.concatenate(cell_sample_probs, axis=1), cpus[0])
 
         # local reps
         local_reps = self.get_local_sample_representation(
@@ -408,29 +409,34 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         local_reps = local_reps[:, observed_sampleids]
 
         # weightings
-        def compute_local_distance(rep, sample_probs):
-            rep_norm = (rep**2).sum(-1, keepdims=True)
-            rep_norm = jnp.sqrt(rep_norm)
-            reps_ = rep / rep_norm
-            cos_sim = (reps_[None, :] * reps_[:, None]).sum(-1)
-            cos_dist = 1 - cos_sim
+        n_samples = local_reps.shape[1]
+        distance_matrix = jnp.zeros((n_samples, n_samples))
+        count_matrix = jnp.zeros((n_samples, n_samples))
+        for i in range(local_reps.shape[0]):
+            local_rep_ = local_reps[i]
+            e_scores_ = e_scores[i]
+            sample_ids_ = sample_ids[i]
 
-            ood_sample = (sample_probs < proba_threshold).astype(float)
-            ood_mask = ood_sample[:, None] * ood_sample[None, :]
+            good_d = (e_scores_ <= 1.0 - proba_threshold) & (e_scores_ >= proba_threshold)
+            dists = (local_rep_ - local_rep_[sample_ids_]) ** 2
+            dists = jnp.sqrt(dists.sum(-1))
+            dists = dists * good_d
 
-            adj_dist = cos_dist * (1.0 - ood_mask) + (2.0 * ood_mask)
-            return adj_dist
+            new_counts = (jnp.ones_like(dists) * good_d) + count_matrix[sample_ids_]
+            new_dists = dists + distance_matrix[sample_ids_]
 
-        # adj_dists = jax.vmap(compute_local_distance, (0, 0), 0)(local_reps, cell_sample_probs)
-        adj_dists = [compute_local_distance(local_reps[i], cell_sample_probs[i]) for i in range(local_reps.shape[0])]
-        adj_dists = jnp.stack(adj_dists, axis=0).mean(0)
-        dists = np.array(adj_dists)
-        dists = (dists + dists.T) / 2.0
+            distance_matrix = distance_matrix.at[sample_ids_].set(new_dists)
+            distance_matrix = distance_matrix.at[:, sample_ids_].set(new_dists)
+            count_matrix = count_matrix.at[sample_ids_].set(new_counts)
+            count_matrix = count_matrix.at[:, sample_ids_].set(new_counts)
+
+        distance_matrix = distance_matrix / count_matrix
+        distance_matrix = distance_matrix + distance_matrix.T
+        distance_matrix = distance_matrix / 2.0
         return dict(
             distance_matrix=pd.DataFrame(
-                dists, index=observed_samples.astype(str), columns=observed_samples.astype(str)
+                distance_matrix, index=observed_samples.astype(str), columns=observed_samples.astype(str)
             ),
-            cell_sample_probs=np.array(cell_sample_probs),
-            cell_cell_probs=np.array(cell_scores),
+            e_scores=np.array(e_scores),
             observed_samples=observed_samples,
         )

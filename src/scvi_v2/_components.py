@@ -9,7 +9,7 @@ from flax.linen.initializers import variance_scaling
 from ._types import NdArray
 
 
-class Dense(nn.Dense):
+class Dense(nn.DenseGeneral):
     """Jax dense layer."""
 
     def __init__(self, *args, **kwargs):

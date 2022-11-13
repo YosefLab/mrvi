@@ -4,7 +4,6 @@ import flax.linen as nn
 import jax
 import jax.numpy as jnp
 import numpyro.distributions as dist
-from flax.linen.initializers import variance_scaling
 from scvi import REGISTRY_KEYS
 from scvi.distributions import JaxNegativeBinomialMeanDisp as NegativeBinomial
 from scvi.module.base import JaxBaseModuleClass, LossOutput, flax_configure
@@ -34,10 +33,9 @@ class _DecoderZX(nn.Module):
         h1 = Dense(self.n_out, use_bias=False, name="amat")(z)
         z_drop = nn.Dropout(self.dropout_rate)(jax.lax.stop_gradient(z), deterministic=not training)
         # cells by n_out by n_latent (n_in)
-        A_b = nn.DenseGeneral(
+        A_b = Dense(
             (self.n_out, self.n_in),
             use_bias=False,
-            kernel_init=variance_scaling(1 / 3, "fan_in", "uniform"),
             name="amat_site",
         )(nuisance_oh)
         if z_drop.ndim == 3:
@@ -62,22 +60,16 @@ class _DecoderUZ(nn.Module):
     def __call__(self, u: NdArray, sample_covariate: NdArray, training: Optional[bool] = None) -> jnp.ndarray:
         training = nn.merge_param("training", self.training, training)
         u_drop = nn.Dropout(self.dropout_rate)(jax.lax.stop_gradient(u), deterministic=not training)
-        sample_oh = jax.nn.one_hot(
-            sample_covariate.squeeze().astype(int),
-            self.n_sample,
+        sample_covariate = sample_covariate.astype(int).flatten()
+        # cells by n_latent by n_latent
+        A_s = nn.Embed(self.n_sample, self.n_latent * self.n_latent)(sample_covariate).reshape(
+            sample_covariate.shape[0], self.n_latent, self.n_latent
         )
-        # cells by n_out by n_latent
-        A_s = nn.DenseGeneral(
-            (self.n_latent, self.n_latent),
-            use_bias=False,
-            kernel_init=variance_scaling(1 / 3, "fan_in", "uniform"),
-            name="amat_sample",
-        )(sample_oh)
         if u_drop.ndim == 3:
             h2 = jnp.einsum("cgl,bcl->bcg", A_s, u_drop)
         else:
             h2 = jnp.einsum("cgl,cl->cg", A_s, u_drop)
-        h3 = Dense(self.n_latent)(sample_oh)
+        h3 = nn.Embed(self.n_sample, self.n_latent)(sample_covariate)
         delta = h2 + h3
         return u + delta
 

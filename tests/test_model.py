@@ -7,7 +7,7 @@ from scvi_v2 import MrVI
 def test_mrvi():
     adata = synthetic_iid()
     adata.obs["sample"] = np.random.choice(15, size=adata.shape[0])
-    MrVI.setup_anndata(adata, sample_key="sample", categorical_nuisance_keys=["batch"])
+    MrVI.setup_anndata(adata, sample_key="sample", batch_key="batch")
     model = MrVI(
         adata,
         n_latent_sample=5,

@@ -21,6 +21,7 @@ class _DecoderZX(nn.Module):
 
     n_in: int
     n_out: int
+    n_batch: int
     n_hidden: int = 128
     activation: Callable = nn.softplus
     dropout_rate: float = 0.1
@@ -28,21 +29,20 @@ class _DecoderZX(nn.Module):
 
     @nn.compact
     def __call__(
-        self, z: NdArray, nuisance_oh: NdArray, size_factor: NdArray, training: Optional[bool] = None
+        self, z: NdArray, batch_covariate: NdArray, size_factor: NdArray, training: Optional[bool] = None
     ) -> NegativeBinomial:
         h1 = Dense(self.n_out, use_bias=False, name="amat")(z)
         z_drop = nn.Dropout(self.dropout_rate)(jax.lax.stop_gradient(z), deterministic=not training)
+        batch_covariate = batch_covariate.astype(int).flatten()
         # cells by n_out by n_latent (n_in)
-        A_b = Dense(
-            (self.n_out, self.n_in),
-            use_bias=False,
-            name="amat_site",
-        )(nuisance_oh)
+        A_b = nn.Embed(self.n_batch, self.n_out * self.n_in)(batch_covariate).reshape(
+            batch_covariate.shape[0], self.n_out, self.n_in
+        )
         if z_drop.ndim == 3:
             h2 = jnp.einsum("cgl,bcl->bcg", A_b, z_drop)
         else:
             h2 = jnp.einsum("cgl,cl->cg", A_b, z_drop)
-        h3 = Dense(self.n_out)(nuisance_oh)
+        h3 = nn.Embed(self.n_batch, self.n_out)(batch_covariate)
         mu = self.activation(h1 + h2 + h3)
         return NegativeBinomial(
             mean=mu * size_factor, inverse_dispersion=jnp.exp(self.param("px_r", jax.random.normal, (self.n_out,)))
@@ -106,8 +106,7 @@ class MrVAE(JaxBaseModuleClass):
 
     n_input: int
     n_sample: int
-    n_obs_per_sample: NdArray
-    n_cats_per_nuisance_keys: NdArray
+    n_batch: int
     n_latent: int = 10
     n_latent_sample: int = 2
     encoder_n_hidden: int = 128
@@ -133,6 +132,7 @@ class MrVAE(JaxBaseModuleClass):
         self.px = _DecoderZX(
             self.n_latent,
             self.n_input,
+            self.n_batch,
             **px_kwargs,
         )
         self.pz = _DecoderUZ(
@@ -182,26 +182,16 @@ class MrVAE(JaxBaseModuleClass):
     def _get_generative_input(self, tensors: Dict[str, NdArray], inference_outputs: Dict[str, Any]) -> Dict[str, Any]:
         z = inference_outputs["z"]
         library = inference_outputs["library"]
-        categorical_nuisance_keys = tensors[MRVI_REGISTRY_KEYS.CATEGORICAL_NUISANCE_KEYS]
-        return {"z": z, "library": library, "categorical_nuisance_keys": categorical_nuisance_keys}
+        batch_index = tensors[REGISTRY_KEYS.BATCH_KEY]
+        return {"z": z, "library": library, "batch_index": batch_index}
 
-    def generative(self, z, library, categorical_nuisance_keys):
+    def generative(self, z, library, batch_index):
         """Generative model."""
-        nuisance_oh = []
-        for dim in range(categorical_nuisance_keys.shape[-1]):
-            nuisance_oh.append(
-                jax.nn.one_hot(
-                    categorical_nuisance_keys[:, dim],
-                    self.n_cats_per_nuisance_keys[dim],
-                )
-            )
-        nuisance_oh = jnp.concatenate(nuisance_oh, axis=-1)
-
-        px = self.px(z, nuisance_oh, size_factor=jnp.exp(library), training=self.training)
+        px = self.px(z, batch_index, size_factor=jnp.exp(library), training=self.training)
         h = px.mean / jnp.exp(library)
 
         pu = dist.Normal(0, 1)
-        return {"px": px, "pu": pu, "h": h, "nuisance_oh": nuisance_oh}
+        return {"px": px, "pu": pu, "h": h}
 
     def loss(
         self,

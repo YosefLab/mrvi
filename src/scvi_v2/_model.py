@@ -412,7 +412,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         n_samples = local_reps.shape[1]
         distance_matrix = jnp.zeros((n_samples, n_samples))
         count_matrix = jnp.zeros((n_samples, n_samples))
-        for i in range(local_reps.shape[0]):
+        for i in tqdm(range(local_reps.shape[0])):
             local_rep_ = local_reps[i]
             e_scores_ = e_scores[i]
             sample_ids_ = sample_ids[i]
@@ -434,10 +434,11 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         distance_matrix = distance_matrix + distance_matrix.T
         distance_matrix = distance_matrix / 2.0
         distance_matrix = np.array(distance_matrix)
+        e_scores = np.array(e_scores)
         return dict(
             distance_matrix=pd.DataFrame(
                 distance_matrix, index=observed_samples.astype(str), columns=observed_samples.astype(str)
             ),
-            e_scores=np.array(e_scores),
+            e_scores=pd.DataFrame(e_scores, index=observed_samples.astype(str), columns=observed_samples.astype(str)),
             observed_samples=observed_samples,
         )

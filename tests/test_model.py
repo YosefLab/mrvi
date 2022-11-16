@@ -18,11 +18,23 @@ def test_mrvi():
     assert model.get_latent_representation().shape == (adata.shape[0], 10)
     assert model.get_latent_representation(use_mean=False, mc_samples=2).shape == (adata.shape[0], 10)
     assert model.get_latent_representation(use_mean=False, mc_samples=1).shape == (adata.shape[0], 10)
-    assert model.get_local_sample_representation().shape == (adata.shape[0], 15, 10)
-    assert model.get_local_sample_representation(return_distances=True).shape == (
+    local_vmap = model.get_local_sample_representation()
+    assert local_vmap.shape == (adata.shape[0], 15, 10)
+    local_dist_vmap = model.get_local_sample_representation(return_distances=True)
+    assert local_dist_vmap.shape == (
         adata.shape[0],
         15,
         15,
     )
+    local_map = model.get_local_sample_representation(use_vmap=False)
+    local_dist_map = model.get_local_sample_representation(return_distances=True, use_vmap=False)
+    assert local_map.shape == (adata.shape[0], 15, 10)
+    assert local_dist_map.shape == (
+        adata.shape[0],
+        15,
+        15,
+    )
+    assert np.allclose(local_map, local_vmap, atol=1e-6)
+    assert np.allclose(local_dist_map, local_dist_vmap, atol=1e-6)
     # tests __repr__
     print(model)

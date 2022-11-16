@@ -197,8 +197,10 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         self,
         adata=None,
         batch_size=256,
+        use_mean: bool = True,
         mc_samples: int = 10,
         return_distances=False,
+        use_vmap=True,
     ):
         """
         Computes the local sample representation of the cells in the adata object.
@@ -211,11 +213,17 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             AnnData object to use for computing the local sample representation.
         batch_size
             Batch size to use for computing the local sample representation.
+        use_mean
+            Whether to use the mean of the posterior in the computation of the latent. If False,
+            `mc_samples` samples from the posterior are used.
         mc_samples
             Number of Monte Carlo samples to use for computing the local sample representation.
         return_distances
             If ``return_distances`` is ``True``, returns a distance matrix of
             size (n_sample, n_sample) for each cell.
+        use_vmap
+            Whether to use vmap for computing the local sample representation.
+            Disabling vmap can be useful if running out of memory on a GPU.
         """
         adata = self.adata if adata is None else adata
         self._check_if_trained(warn=False)
@@ -232,7 +240,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             sample_index,
             cf_sample,
         ):
-            return self.module.apply(
+            z = self.module.apply(
                 vars_in,
                 rngs=rngs,
                 method=self.module.inference,
@@ -240,20 +248,27 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 sample_index=sample_index,
                 cf_sample=cf_sample,
                 mc_samples=mc_samples,
-            )["z"].mean(0)
+                use_mean=use_mean,
+            )["z"]
+            if not use_mean and mc_samples > 1:
+                z = z.mean(0)
+            return z
 
         @jax.jit
-        def vmapped_inference_fn(
+        def mapped_inference_fn(
             x,
             sample_index,
             cf_sample,
         ):
-
-            return jax.vmap(inference_fn, in_axes=(None, None, 0), out_axes=-2)(
-                x,
-                sample_index,
-                cf_sample,
-            )
+            if use_vmap:
+                return jax.vmap(inference_fn, in_axes=(None, None, 0), out_axes=-2)(
+                    x,
+                    sample_index,
+                    cf_sample,
+                )
+            else:
+                per_sample_inference_fn = lambda cf_sample: inference_fn(x, sample_index, cf_sample)
+                return jax.lax.transpose(jax.lax.map(per_sample_inference_fn, cf_sample), (1, 0, 2))
 
         reps = []
         for array_dict in tqdm(scdl):
@@ -262,7 +277,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             inputs = self.module._get_inference_input(
                 array_dict,
             )
-            zs = vmapped_inference_fn(
+            zs = mapped_inference_fn(
                 x=jnp.array(inputs["x"]),
                 sample_index=jnp.array(inputs["sample_index"]),
                 cf_sample=jnp.array(cf_sample),

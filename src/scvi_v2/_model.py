@@ -439,6 +439,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             distance_matrix=pd.DataFrame(
                 distance_matrix, index=observed_samples.astype(str), columns=observed_samples.astype(str)
             ),
-            e_scores=pd.DataFrame(e_scores, index=observed_samples.astype(str), columns=observed_samples.astype(str)),
+            e_scores=pd.DataFrame(e_scores, index=adata.obs.index, columns=observed_samples.astype(str)),
             observed_samples=observed_samples,
         )

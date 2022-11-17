@@ -1,6 +1,6 @@
 import logging
 from copy import deepcopy
-from typing import List, Optional, Union
+from typing import Optional, Union
 
 import jax
 import jax.numpy as jnp
@@ -8,7 +8,7 @@ import numpy as np
 from anndata import AnnData
 from scvi import REGISTRY_KEYS
 from scvi.data import AnnDataManager
-from scvi.data.fields import CategoricalJointObsField, CategoricalObsField, LayerField
+from scvi.data.fields import CategoricalObsField, LayerField
 from scvi.model.base import BaseModelClass, JaxTrainingMixin
 from sklearn.metrics import pairwise_distances
 from tqdm import tqdm
@@ -26,7 +26,7 @@ DEFAULT_TRAIN_KWARGS = {
     "check_val_every_n_epoch": 1,
     "batch_size": 256,
     "train_size": 0.9,
-    "plan_kwargs": {"lr": 1e-3, "n_epochs_kl_warmup": 20},
+    "plan_kwargs": {"lr": 1e-2, "n_epochs_kl_warmup": 20},
 }
 
 
@@ -42,15 +42,14 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         Dimensionality of the latent space.
     n_latent_donor
         Dimensionality of the latent space for sample embeddings.
-    uz_scaler
-        Whether to incorporate a learned scaler term in the decoder from u to z.
-    uz_scaler_n_hidden
-        The number of hidden units in the neural network used to produce the scaler term
-        in decoder from u to z.
+    encoder_n_hidden
+        Number of nodes per hidden layer in the encoder.
     px_kwargs
-        Keyword args for :class:`~mrvi.components.DecoderZX`.
+        Keyword args for :class:`~mrvi.DecoderZX`.
     pz_kwargs
-        Keyword args for :class:`~mrvi.components.DecoderUZ`.
+        Keyword args for :class:`~mrvi.DecoderUZ`.
+    qu_kwargs
+        Keyword args for :class:`~mrvi.EncoderXU`.
     """
 
     def __init__(
@@ -59,25 +58,14 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         **model_kwargs,
     ):
         super().__init__(adata)
-        n_cats_per_nuisance_keys = (
-            self.adata_manager.get_state_registry(MRVI_REGISTRY_KEYS.CATEGORICAL_NUISANCE_KEYS).n_cats_per_key
-            if MRVI_REGISTRY_KEYS.CATEGORICAL_NUISANCE_KEYS in self.adata_manager.data_registry
-            else []
-        )
 
         n_sample = self.summary_stats.n_sample
-        n_obs_per_sample = (
-            adata.obs.groupby(self.adata_manager.get_state_registry(MRVI_REGISTRY_KEYS.SAMPLE_KEY)["original_key"])
-            .size()
-            .loc[self.adata_manager.get_state_registry(MRVI_REGISTRY_KEYS.SAMPLE_KEY)["categorical_mapping"]]
-            .values
-        )
+        n_batch = self.summary_stats.n_batch
         self.data_splitter = None
         self.module = MrVAE(
             n_input=self.summary_stats.n_vars,
             n_sample=n_sample,
-            n_obs_per_sample=n_obs_per_sample,
-            n_cats_per_nuisance_keys=n_cats_per_nuisance_keys,
+            n_batch=n_batch,
             **model_kwargs,
         )
         self.init_params_ = self._get_init_params(locals())
@@ -92,15 +80,14 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         adata: AnnData,
         layer: Optional[str] = None,
         sample_key: Optional[str] = None,
-        categorical_nuisance_keys: Optional[List[str]] = None,
+        batch_key: Optional[str] = None,
         **kwargs,
     ):
         setup_method_args = cls._get_setup_method_args(**locals())
         anndata_fields = [
             LayerField(REGISTRY_KEYS.X_KEY, layer, is_count_data=True),
             CategoricalObsField(MRVI_REGISTRY_KEYS.SAMPLE_KEY, sample_key),
-            CategoricalObsField(REGISTRY_KEYS.LABELS_KEY, None),
-            CategoricalJointObsField(MRVI_REGISTRY_KEYS.CATEGORICAL_NUISANCE_KEYS, categorical_nuisance_keys),
+            CategoricalObsField(REGISTRY_KEYS.BATCH_KEY, batch_key),
         ]
         adata_manager = AnnDataManager(fields=anndata_fields, setup_method_args=setup_method_args)
         adata_manager.register_fields(adata, **kwargs)
@@ -135,8 +122,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         self,
         adata: Optional[AnnData] = None,
         indices=None,
-        use_mean: bool = True,
-        mc_samples: int = 5000,
         batch_size: Optional[int] = None,
         give_z: bool = False,
     ) -> np.ndarray:
@@ -149,11 +134,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             AnnData object to use. Defaults to the AnnData object used to initialize the model.
         indices
             Indices of cells to use.
-        use_mean
-            Whether to use the mean of the posterior in the computation of the latent. If False,
-            `mc_samples` samples from the posterior are used.
-        mc_samples
-            Number of Monte Carlo samples to use for computing the latent representation.
         batch_size
             Batch size to use for computing the latent representation.
         give_z
@@ -169,19 +149,12 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
         us = []
         zs = []
-        jit_inference_fn = self.module.get_jit_inference_fn(
-            inference_kwargs={"use_mean": use_mean, "mc_samples": mc_samples if not use_mean else 1}
-        )
+        jit_inference_fn = self.module.get_jit_inference_fn(inference_kwargs={"use_mean": True})
         for array_dict in tqdm(scdl):
             outputs = jit_inference_fn(self.module.rngs, array_dict)
 
-            u = outputs["u"]
-            z = outputs["z"]
-            if use_mean is False and mc_samples > 1:
-                u = u.mean(0)
-                z = z.mean(0)
-            us.append(u)
-            zs.append(z)
+            us.append(outputs["u"])
+            zs.append(outputs["z"])
 
         u = np.array(jax.device_get(jnp.concatenate(us, axis=0)))
         z = np.array(jax.device_get(jnp.concatenate(zs, axis=0)))
@@ -213,8 +186,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         adata=None,
         indices=None,
         batch_size=256,
-        mc_samples: int = 10,
         return_distances=False,
+        use_vmap=True,
     ):
         """
         Computes the local sample representation of the cells in the adata object.
@@ -227,11 +200,12 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             AnnData object to use for computing the local sample representation.
         batch_size
             Batch size to use for computing the local sample representation.
-        mc_samples
-            Number of Monte Carlo samples to use for computing the local sample representation.
         return_distances
             If ``return_distances`` is ``True``, returns a distance matrix of
             size (n_sample, n_sample) for each cell.
+        use_vmap
+            Whether to use vmap for computing the local sample representation.
+            Disabling vmap can be useful if running out of memory on a GPU.
         """
         adata = self.adata if adata is None else adata
         self._check_if_trained(warn=False)
@@ -246,7 +220,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         def inference_fn(
             x,
             sample_index,
-            categorical_nuisance_keys,
             cf_sample,
         ):
             return self.module.apply(
@@ -255,25 +228,25 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 method=self.module.inference,
                 x=x,
                 sample_index=sample_index,
-                categorical_nuisance_keys=categorical_nuisance_keys,
                 cf_sample=cf_sample,
-                mc_samples=mc_samples,
-            )["z"].mean(0)
+                use_mean=True,
+            )["z"]
 
         @jax.jit
-        def vmapped_inference_fn(
+        def mapped_inference_fn(
             x,
             sample_index,
-            categorical_nuisance_keys,
             cf_sample,
         ):
-
-            return jax.vmap(inference_fn, in_axes=(None, None, None, 0), out_axes=-2)(
-                x,
-                sample_index,
-                categorical_nuisance_keys,
-                cf_sample,
-            )
+            if use_vmap:
+                return jax.vmap(inference_fn, in_axes=(None, None, 0), out_axes=-2)(
+                    x,
+                    sample_index,
+                    cf_sample,
+                )
+            else:
+                per_sample_inference_fn = lambda cf_sample: inference_fn(x, sample_index, cf_sample)
+                return jax.lax.transpose(jax.lax.map(per_sample_inference_fn, cf_sample), (1, 0, 2))
 
         reps = []
         for array_dict in tqdm(scdl):
@@ -282,10 +255,9 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             inputs = self.module._get_inference_input(
                 array_dict,
             )
-            zs = vmapped_inference_fn(
+            zs = mapped_inference_fn(
                 x=jnp.array(inputs["x"]),
                 sample_index=jnp.array(inputs["sample_index"]),
-                categorical_nuisance_keys=jnp.array(inputs["categorical_nuisance_keys"]),
                 cf_sample=jnp.array(cf_sample),
             )
             reps.append(zs)

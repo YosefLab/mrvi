@@ -1,7 +1,12 @@
 import jax
 import jax.numpy as jnp
 
-from scvi_v2._components import ConditionalBatchNorm1d, Dense, NormalNN, ResnetFC
+from scvi_v2._components import (
+    ConditionalBatchNorm1d,
+    Dense,
+    NormalDistOutputNN,
+    ResnetBlock,
+)
 
 
 def test_dense():
@@ -12,22 +17,21 @@ def test_dense():
     dense.apply(params, x)
 
 
-def test_resnetfc():
+def test_resnetblock():
     key = jax.random.PRNGKey(0)
     x = jnp.ones((20, 10))
-    resnetfc = ResnetFC(10, 30, training=True)
-    params = resnetfc.init(key, x)
-    resnetfc.apply(params, x, mutable=["batch_stats"])
+    block = ResnetBlock(10, 30, training=True)
+    params = block.init(key, x)
+    block.apply(params, x, mutable=["batch_stats"])
 
 
 def test_normalnn():
     key = jax.random.PRNGKey(0)
     key, subkey = jax.random.split(key)
     x = jnp.ones((20, 10))
-    cats = jax.random.choice(subkey, 3, (20,))
-    normalnn = NormalNN(10, 30, 3, training=True)
-    params = normalnn.init(key, x, cats)
-    normalnn.apply(params, x, cats, mutable=["batch_stats"])
+    nn = NormalDistOutputNN(10, 30, 3, training=True)
+    params = nn.init(key, x)
+    nn.apply(params, x, mutable=["batch_stats"])
 
 
 def test_conditionalbatchnorm1d():

@@ -120,8 +120,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         self,
         adata: Optional[AnnData] = None,
         indices=None,
-        use_mean: bool = True,
-        mc_samples: int = 5000,
         batch_size: Optional[int] = None,
         give_z: bool = False,
     ) -> np.ndarray:
@@ -134,11 +132,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             AnnData object to use. Defaults to the AnnData object used to initialize the model.
         indices
             Indices of cells to use.
-        use_mean
-            Whether to use the mean of the posterior in the computation of the latent. If False,
-            `mc_samples` samples from the posterior are used.
-        mc_samples
-            Number of Monte Carlo samples to use for computing the latent representation.
         batch_size
             Batch size to use for computing the latent representation.
         give_z
@@ -154,19 +147,12 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
         us = []
         zs = []
-        jit_inference_fn = self.module.get_jit_inference_fn(
-            inference_kwargs={"use_mean": use_mean, "mc_samples": mc_samples if not use_mean else 1}
-        )
+        jit_inference_fn = self.module.get_jit_inference_fn(inference_kwargs={"use_mean": True})
         for array_dict in tqdm(scdl):
             outputs = jit_inference_fn(self.module.rngs, array_dict)
 
-            u = outputs["u"]
-            z = outputs["z"]
-            if use_mean is False:
-                u = u.mean(0)
-                z = z.mean(0)
-            us.append(u)
-            zs.append(z)
+            us.append(outputs["u"])
+            zs.append(outputs["z"])
 
         u = np.array(jax.device_get(jnp.concatenate(us, axis=0)))
         z = np.array(jax.device_get(jnp.concatenate(zs, axis=0)))
@@ -197,8 +183,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         self,
         adata=None,
         batch_size=256,
-        use_mean: bool = True,
-        mc_samples: int = 10,
         return_distances=False,
         use_vmap=True,
     ):
@@ -213,11 +197,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             AnnData object to use for computing the local sample representation.
         batch_size
             Batch size to use for computing the local sample representation.
-        use_mean
-            Whether to use the mean of the posterior in the computation of the latent. If False,
-            `mc_samples` samples from the posterior are used.
-        mc_samples
-            Number of Monte Carlo samples to use for computing the local sample representation.
         return_distances
             If ``return_distances`` is ``True``, returns a distance matrix of
             size (n_sample, n_sample) for each cell.
@@ -240,19 +219,15 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             sample_index,
             cf_sample,
         ):
-            z = self.module.apply(
+            return self.module.apply(
                 vars_in,
                 rngs=rngs,
                 method=self.module.inference,
                 x=x,
                 sample_index=sample_index,
                 cf_sample=cf_sample,
-                mc_samples=mc_samples,
-                use_mean=use_mean,
+                use_mean=True,
             )["z"]
-            if not use_mean and mc_samples > 1:
-                z = z.mean(0)
-            return z
 
         @jax.jit
         def mapped_inference_fn(

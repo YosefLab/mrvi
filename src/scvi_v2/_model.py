@@ -120,8 +120,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         self,
         adata: Optional[AnnData] = None,
         indices=None,
-        use_mean: bool = True,
-        mc_samples: int = 5000,
         batch_size: Optional[int] = None,
         give_z: bool = False,
     ) -> np.ndarray:
@@ -134,11 +132,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             AnnData object to use. Defaults to the AnnData object used to initialize the model.
         indices
             Indices of cells to use.
-        use_mean
-            Whether to use the mean of the posterior in the computation of the latent. If False,
-            `mc_samples` samples from the posterior are used.
-        mc_samples
-            Number of Monte Carlo samples to use for computing the latent representation.
         batch_size
             Batch size to use for computing the latent representation.
         give_z
@@ -154,19 +147,12 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
         us = []
         zs = []
-        jit_inference_fn = self.module.get_jit_inference_fn(
-            inference_kwargs={"use_mean": use_mean, "mc_samples": mc_samples if not use_mean else 1}
-        )
+        jit_inference_fn = self.module.get_jit_inference_fn(inference_kwargs={"use_mean": True})
         for array_dict in tqdm(scdl):
             outputs = jit_inference_fn(self.module.rngs, array_dict)
 
-            u = outputs["u"]
-            z = outputs["z"]
-            if use_mean is False:
-                u = u.mean(0)
-                z = z.mean(0)
-            us.append(u)
-            zs.append(z)
+            us.append(outputs["u"])
+            zs.append(outputs["z"])
 
         u = np.array(jax.device_get(jnp.concatenate(us, axis=0)))
         z = np.array(jax.device_get(jnp.concatenate(zs, axis=0)))
@@ -197,8 +183,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         self,
         adata=None,
         batch_size=256,
-        mc_samples: int = 10,
         return_distances=False,
+        use_vmap=True,
     ):
         """
         Computes the local sample representation of the cells in the adata object.
@@ -211,11 +197,12 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             AnnData object to use for computing the local sample representation.
         batch_size
             Batch size to use for computing the local sample representation.
-        mc_samples
-            Number of Monte Carlo samples to use for computing the local sample representation.
         return_distances
             If ``return_distances`` is ``True``, returns a distance matrix of
             size (n_sample, n_sample) for each cell.
+        use_vmap
+            Whether to use vmap for computing the local sample representation.
+            Disabling vmap can be useful if running out of memory on a GPU.
         """
         adata = self.adata if adata is None else adata
         self._check_if_trained(warn=False)
@@ -239,21 +226,24 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 x=x,
                 sample_index=sample_index,
                 cf_sample=cf_sample,
-                mc_samples=mc_samples,
-            )["z"].mean(0)
+                use_mean=True,
+            )["z"]
 
         @jax.jit
-        def vmapped_inference_fn(
+        def mapped_inference_fn(
             x,
             sample_index,
             cf_sample,
         ):
-
-            return jax.vmap(inference_fn, in_axes=(None, None, 0), out_axes=-2)(
-                x,
-                sample_index,
-                cf_sample,
-            )
+            if use_vmap:
+                return jax.vmap(inference_fn, in_axes=(None, None, 0), out_axes=-2)(
+                    x,
+                    sample_index,
+                    cf_sample,
+                )
+            else:
+                per_sample_inference_fn = lambda cf_sample: inference_fn(x, sample_index, cf_sample)
+                return jax.lax.transpose(jax.lax.map(per_sample_inference_fn, cf_sample), (1, 0, 2))
 
         reps = []
         for array_dict in tqdm(scdl):
@@ -262,7 +252,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             inputs = self.module._get_inference_input(
                 array_dict,
             )
-            zs = vmapped_inference_fn(
+            zs = mapped_inference_fn(
                 x=jnp.array(inputs["x"]),
                 sample_index=jnp.array(inputs["sample_index"]),
                 cf_sample=jnp.array(cf_sample),

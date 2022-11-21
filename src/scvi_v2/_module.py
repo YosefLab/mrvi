@@ -159,18 +159,19 @@ class MrVAE(JaxBaseModuleClass):
         sample_index = tensors[MRVI_REGISTRY_KEYS.SAMPLE_KEY]
         return {"x": x, "sample_index": sample_index}
 
-    def inference(self, x, sample_index, mc_samples=1, cf_sample=None, use_mean=False):
+    def inference(self, x, sample_index, mc_samples=None, cf_sample=None, use_mean=False):
         """Latent variable inference."""
         qu = self.qu(x, sample_index, training=self.training)
         if use_mean:
             u = qu.mean
         else:
             u_rng = self.make_rng("u")
-            u = qu.rsample(u_rng, sample_shape=(mc_samples,))
+            sample_shape = (mc_samples,) if mc_samples is not None else ()
+            u = qu.rsample(u_rng, sample_shape=sample_shape)
 
         sample_index_cf = sample_index if cf_sample is None else cf_sample
         z = self.pz(u, sample_index_cf, training=self.training)
-        library = jnp.expand_dims(jnp.log(x.sum(1)), 1)
+        library = jnp.log(x.sum(1, keepdims=True))
 
         return {
             "qu": qu,
@@ -187,8 +188,9 @@ class MrVAE(JaxBaseModuleClass):
 
     def generative(self, z, library, batch_index):
         """Generative model."""
-        px = self.px(z, batch_index, size_factor=jnp.exp(library), training=self.training)
-        h = px.mean / jnp.exp(library)
+        library_exp = jnp.exp(library)
+        px = self.px(z, batch_index, size_factor=library_exp, training=self.training)
+        h = px.mean / library_exp
 
         pu = dist.Normal(0, 1)
         return {"px": px, "pu": pu, "h": h}

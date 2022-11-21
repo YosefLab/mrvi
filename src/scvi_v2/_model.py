@@ -22,7 +22,7 @@ DEFAULT_TRAIN_KWARGS = {
     "early_stopping": True,
     "early_stopping_patience": 15,
     "check_val_every_n_epoch": 1,
-    "batch_size": 256,
+    "batch_size": 128,
     "train_size": 0.9,
     "plan_kwargs": {"lr": 1e-2, "n_epochs_kl_warmup": 20},
 }

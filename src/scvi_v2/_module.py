@@ -16,7 +16,8 @@ DEFAULT_PX_KWARGS = {"n_hidden": 32}
 DEFAULT_PZ_KWARGS = {}
 DEFAULT_QU_KWARGS = {}
 
-_normal_initializer = jax.random.normal
+# Lower stddev leads to better initial loss values
+_normal_initializer = jax.nn.initializers.normal(stddev=0.1)
 
 
 class _DecoderZX(nn.Module):
@@ -91,14 +92,13 @@ class _EncoderXU(nn.Module):
         zsample = nn.Embed(self.n_sample, self.n_latent_sample, embedding_init=_normal_initializer)(
             sample_covariate.squeeze(-1).astype(int)
         )
-        zsample_ = zsample
 
         x_feat = nn.Sequential([Dense(self.n_hidden), nn.relu])(x_)
         x_feat = ConditionalBatchNorm1d(self.n_hidden, self.n_sample)(x_feat, sample_covariate, training=training)
         x_feat = nn.Sequential([Dense(self.n_hidden), nn.relu])(x_feat)
         x_feat = ConditionalBatchNorm1d(self.n_hidden, self.n_sample)(x_feat, sample_covariate, training=training)
 
-        inputs = jnp.concatenate([x_feat, zsample_], axis=-1)
+        inputs = jnp.concatenate([x_feat, zsample], axis=-1)
         return NormalDistOutputNN(self.n_hidden + self.n_latent_sample, self.n_latent)(inputs, training=training)
 
 
@@ -112,6 +112,8 @@ class MrVAE(JaxBaseModuleClass):
     n_latent: int = 10
     n_latent_sample: int = 2
     encoder_n_hidden: int = 128
+    z_u_prior: bool = True
+    z_u_prior_scale: float = 1.0
     px_kwargs: Optional[dict] = None
     pz_kwargs: Optional[dict] = None
     qu_kwargs: Optional[dict] = None
@@ -207,8 +209,11 @@ class MrVAE(JaxBaseModuleClass):
         """Compute the loss function value."""
         reconstruction_loss = -generative_outputs["px"].log_prob(tensors[REGISTRY_KEYS.X_KEY]).sum(-1)
         kl_u = dist.kl_divergence(inference_outputs["qu"], generative_outputs["pu"]).sum(-1)
-
-        weighted_kl_local = kl_weight * kl_u
+        if self.z_u_prior:
+            kl_z = -dist.Normal(inference_outputs["u"], self.z_u_prior_scale).log_prob(inference_outputs["z"]).sum(-1)
+        else:
+            kl_z = 0
+        weighted_kl_local = kl_weight * (kl_u + kl_z)
         loss = jnp.mean(reconstruction_loss + weighted_kl_local)
 
         return LossOutput(

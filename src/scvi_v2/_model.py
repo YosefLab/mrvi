@@ -286,7 +286,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         def inference_fn(
             x,
             sample_index,
-            categorical_nuisance_keys,
         ):
             outs = self.module.apply(
                 vars_in,
@@ -294,7 +293,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 method=self.module.inference,
                 x=x,
                 sample_index=sample_index,
-                categorical_nuisance_keys=categorical_nuisance_keys,
             )
             qloc = outs["qu"].loc
             qstd = outs["qu"].scale
@@ -312,7 +310,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             _qu_m, _qu_std = inference_fn(
                 x=jnp.array(inputs["x"]),
                 sample_index=jnp.array(inputs["sample_index"]),
-                categorical_nuisance_keys=jnp.array(inputs["categorical_nuisance_keys"]),
             )
             qu_m.append(_qu_m)
             qu_std.append(_qu_std)
@@ -374,9 +371,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         observed_samples = sample_keys.loc[observed_sampleids].values
 
         # local reps
-        local_reps = self.get_local_sample_representation(
-            adata=adata, batch_size=batch_size, mc_samples=mc_samples, return_distances=False
-        )
+        local_reps = self.get_local_sample_representation(adata=adata, batch_size=batch_size, return_distances=False)
         local_reps = jax.device_put(local_reps, cpus[0])
         local_reps = local_reps[:, observed_sampleids]
 
@@ -414,3 +409,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             e_scores=pd.DataFrame(e_scores, index=adata.obs.index, columns=observed_samples.astype(str)),
             observed_samples=observed_samples,
         )
+
+    def get_de_genes(self, adata, batch_size=256, mc_samples: int = 10, proba_threshold=0.0):
+        pass

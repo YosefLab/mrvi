@@ -1,6 +1,6 @@
 import logging
 from copy import deepcopy
-from typing import Optional, Union
+from typing import List, Optional, Union
 
 import jax
 import jax.numpy as jnp
@@ -8,7 +8,7 @@ import numpy as np
 from anndata import AnnData
 from scvi import REGISTRY_KEYS
 from scvi.data import AnnDataManager
-from scvi.data.fields import CategoricalObsField, LayerField
+from scvi.data.fields import CategoricalObsField, LayerField, NumericalJointObsField
 from scvi.model.base import BaseModelClass, JaxTrainingMixin
 from sklearn.metrics import pairwise_distances
 from tqdm import tqdm
@@ -59,11 +59,14 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
         n_sample = self.summary_stats.n_sample
         n_batch = self.summary_stats.n_batch
+        n_continuous_cov = self.summary_stats.get("n_extra_continuous_covs", 0)
+
         self.data_splitter = None
         self.module = MrVAE(
             n_input=self.summary_stats.n_vars,
             n_sample=n_sample,
             n_batch=n_batch,
+            n_continuous_cov=n_continuous_cov,
             **model_kwargs,
         )
         self.init_params_ = self._get_init_params(locals())
@@ -79,6 +82,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         layer: Optional[str] = None,
         sample_key: Optional[str] = None,
         batch_key: Optional[str] = None,
+        continuous_covariate_keys: Optional[List[str]] = None,
         **kwargs,
     ):
         setup_method_args = cls._get_setup_method_args(**locals())
@@ -86,6 +90,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             LayerField(REGISTRY_KEYS.X_KEY, layer, is_count_data=True),
             CategoricalObsField(MRVI_REGISTRY_KEYS.SAMPLE_KEY, sample_key),
             CategoricalObsField(REGISTRY_KEYS.BATCH_KEY, batch_key),
+            NumericalJointObsField(REGISTRY_KEYS.CONT_COVS_KEY, continuous_covariate_keys),
         ]
         adata_manager = AnnDataManager(fields=anndata_fields, setup_method_args=setup_method_args)
         adata_manager.register_fields(adata, **kwargs)

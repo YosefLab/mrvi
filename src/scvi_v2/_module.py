@@ -29,7 +29,12 @@ class _DecoderZX(nn.Module):
 
     @nn.compact
     def __call__(
-        self, z: NdArray, batch_covariate: NdArray, size_factor: NdArray, training: Optional[bool] = None
+        self,
+        z: NdArray,
+        batch_covariate: NdArray,
+        size_factor: NdArray,
+        continuous_covariates: Optional[NdArray],
+        training: Optional[bool] = None,
     ) -> NegativeBinomial:
         h1 = Dense(self.n_out, use_bias=False, name="amat")(z)
         z_drop = nn.Dropout(self.dropout_rate)(jax.lax.stop_gradient(z), deterministic=not training)
@@ -43,7 +48,11 @@ class _DecoderZX(nn.Module):
         else:
             h2 = jnp.einsum("cgl,cl->cg", A_b, z_drop)
         h3 = nn.Embed(self.n_batch, self.n_out)(batch_covariate)
-        mu = self.activation(h1 + h2 + h3)
+        h = h1 + h2 + h3
+        if continuous_covariates is not None:
+            h4 = Dense(self.n_out, name="cont_covs_term")(continuous_covariates)
+            h += h4
+        mu = self.activation(h)
         return NegativeBinomial(
             mean=mu * size_factor, inverse_dispersion=jnp.exp(self.param("px_r", jax.random.normal, (self.n_out,)))
         )
@@ -107,6 +116,7 @@ class MrVAE(JaxBaseModuleClass):
     n_input: int
     n_sample: int
     n_batch: int
+    n_continuous_cov: int
     n_latent: int = 10
     n_latent_sample: int = 2
     encoder_n_hidden: int = 128
@@ -183,11 +193,14 @@ class MrVAE(JaxBaseModuleClass):
         z = inference_outputs["z"]
         library = inference_outputs["library"]
         batch_index = tensors[REGISTRY_KEYS.BATCH_KEY]
-        return {"z": z, "library": library, "batch_index": batch_index}
+        continuous_covs = tensors.get(REGISTRY_KEYS.CONT_COVS_KEY, None)
+        return {"z": z, "library": library, "batch_index": batch_index, "continuous_covs": continuous_covs}
 
-    def generative(self, z, library, batch_index):
+    def generative(self, z, library, batch_index, continuous_covs):
         """Generative model."""
-        px = self.px(z, batch_index, size_factor=jnp.exp(library), training=self.training)
+        px = self.px(
+            z, batch_index, size_factor=jnp.exp(library), continuous_covariates=continuous_covs, training=self.training
+        )
         h = px.mean / jnp.exp(library)
 
         pu = dist.Normal(0, 1)

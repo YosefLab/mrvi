@@ -7,7 +7,8 @@ from scvi_v2 import MrVI
 def test_mrvi():
     adata = synthetic_iid()
     adata.obs["sample"] = np.random.choice(15, size=adata.shape[0])
-    MrVI.setup_anndata(adata, sample_key="sample", batch_key="batch")
+    adata.obs["cont_cov"] = np.random.normal(0, 1, size=adata.shape[0])
+    MrVI.setup_anndata(adata, sample_key="sample", batch_key="batch", continuous_covariate_keys=["cont_cov"])
     model = MrVI(
         adata,
         n_latent_sample=5,

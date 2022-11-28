@@ -7,11 +7,20 @@ from scvi_v2 import MrVI
 def test_mrvi():
     adata = synthetic_iid()
     adata.obs["sample"] = np.random.choice(15, size=adata.shape[0])
+    random_binary_covariate = np.random.choice([0, 1], size=15)
+    adata.obs["random_binary_covariate"] = random_binary_covariate[adata.obs["sample"].values]
+
+    n_genes = adata.shape[1]
     MrVI.setup_anndata(adata, sample_key="sample", batch_key="batch")
     model = MrVI(
         adata,
         n_latent_sample=5,
     )
+
+    donor_info = model.donor_info
+    assert donor_info.shape[0] == 15
+    assert (donor_info.index == np.arange(15)).all()
+
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)
     model.is_trained_ = True
     model.history
@@ -36,3 +45,7 @@ def test_mrvi():
     assert np.allclose(local_dist_map, local_dist_vmap, atol=1e-6)
     # tests __repr__
     print(model)
+
+    lfc_mean = model.get_local_sample_representation(return_lfcs=True)
+    assert lfc_mean.shape == (15, 15, n_genes)
+    model.compute_degs_from_lfcs(lfc_mean, "random_binary_covariate")

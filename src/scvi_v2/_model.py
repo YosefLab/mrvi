@@ -5,6 +5,7 @@ from typing import Optional, Union
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pandas as pd
 from anndata import AnnData
 from scvi import REGISTRY_KEYS
 from scvi.data import AnnDataManager
@@ -67,6 +68,10 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             **model_kwargs,
         )
         self.init_params_ = self._get_init_params(locals())
+
+        obs_df = adata.obs.copy()
+        obs_df = obs_df.loc[~obs_df._scvi_sample.duplicated("first")]
+        self.donor_info = obs_df.set_index("_scvi_sample").sort_index()
 
     def to_device(self, device):  # noqa: #D102
         # TODO(jhong): remove this once we have a better way to handle device.
@@ -179,11 +184,65 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             pairwise_dists[i, :, :] = d_
         return pairwise_dists
 
+    def compute_lfcs_from_representations(
+        self,
+        representations: np.ndarray,
+        batch_size: Optional[int] = 16,
+    ):
+        """Computes n_samples x n_samples x n_genes mean LFC matrix"""
+        n_cells, n_samples, _ = representations.shape
+        n_batches = self.summary_stats.n_batch
+        n_passes = int(np.ceil(n_cells / batch_size))
+        vars_in = {"params": self.module.params, **self.module.state}
+        rngs = self.module.rngs
+        cpu_device = jax.devices("cpu")[0]
+
+        @jax.jit
+        def decode(z, library, batch_index):
+            return self.module.apply(
+                vars_in,
+                rngs=rngs,
+                method=self.module.generative,
+                z=z,
+                library=library,
+                batch_index=batch_index,
+            )["h"]
+
+        parallel_decode = jax.jit(jax.vmap(decode, in_axes=(1, None, None)))
+
+        n_genes = self.summary_stats.n_vars
+        # Initialize first and second LFC moments to 0
+        lfcs_m1 = jax.device_put(jnp.zeros((n_samples, n_samples, n_genes)), device=cpu_device)
+        lfcs_m2 = jax.device_put(jnp.zeros((n_samples, n_samples, n_genes)), device=cpu_device)
+        for cell_reps in np.array_split(representations, n_passes):
+            cell_reps_ = jnp.array(cell_reps)
+            libraries = jnp.ones((cell_reps_.shape[0], 1))
+
+            hs_all = []
+            for batch in range(n_batches):
+                # nuisance_factors = jnp.zeros((cell_reps_.shape[0], n_batches))
+                # nuisance_factors = nuisance_factors.at[:, batch].set(1.0)
+                nuisance_factors = jnp.ones((cell_reps_.shape[0], 1))
+                nuisance_factors *= batch
+                hs = parallel_decode(cell_reps_, libraries, nuisance_factors)  # shape (n_bio_samples, n_cells, n_genes)
+                hs_all.append(hs[None])
+            # shape (n_batches, n_bio_samples, n_cells, n_genes)
+            hs_all = jnp.concatenate(hs_all, axis=0)
+            hs_all = jnp.log(hs_all)
+            lfcs = hs_all[:, None] - hs_all[:, :, None]
+            lfcs = jnp.mean(lfcs, axis=0)
+            # shape (n_samples, n_samples, n_cells, n_genes)
+            lfcs_m1 += jnp.sum(lfcs, axis=2) / n_cells
+            lfcs_m2 += jnp.sum(lfcs**2, axis=2) / (n_cells - 1)
+        lfcs_std = jnp.sqrt(lfcs_m2 - (lfcs_m1**2))
+        return lfcs_m1, lfcs_std
+
     def get_local_sample_representation(
         self,
         adata=None,
         batch_size=256,
         return_distances=False,
+        return_lfcs=False,
         use_vmap=True,
     ):
         """
@@ -260,7 +319,45 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             reps.append(zs)
         reps = np.array(jax.device_get(jnp.concatenate(reps, axis=0)))
 
+        # reps have shape (n_cells, n_sample, n_features)
         if return_distances:
             return self.compute_distance_matrix_from_representations(reps)
-
+        if return_lfcs:
+            # Initialize first and second LFC moments to 0
+            lfcs_mean, _ = self.compute_lfcs_from_representations(reps)
+            return lfcs_mean
         return reps
+
+    def compute_degs_from_lfcs(self, lfcs, binary_donor_key):
+        n_sample = self.summary_stats.n_sample
+        n_genes = self.summary_stats.n_vars
+        assert lfcs.shape == (n_sample, n_sample, n_genes)
+
+        sample_cats = self.adata.obs[binary_donor_key]
+        if sample_cats.nunique() != 2:
+            raise ValueError("Binary donor key must have exactly two categories.")
+        sample_cats = pd.Categorical(sample_cats)
+        sample_cats = sample_cats.codes
+        where_pop1 = (sample_cats == 0).astype(int)
+        where_pop1 -= np.diag(np.diag(where_pop1))
+        where_pop1 = where_pop1.reshape(-1)
+        where_pop2 = (sample_cats == 1).astype(int)
+        where_pop2 -= np.diag(np.diag(where_pop2))
+        where_pop2 = where_pop2.reshape(-1)
+
+        lfcs_1d = lfcs.reshape(-1, n_genes)
+        lfcs_pop1 = lfcs_1d[where_pop1].mean(0)
+        lfcs_pop2 = lfcs_1d[where_pop2].mean(0)
+
+        lfc = lfcs_pop1 - lfcs_pop2
+        res = (
+            pd.DataFrame(
+                dict(
+                    gene_name=self.adata.var_names,
+                    lfc=lfc,
+                )
+            )
+            .assign(abs_lfc=lambda x: x.lfc.abs())
+            .sort_values("abs_lfc", ascending=False)
+        )
+        return res

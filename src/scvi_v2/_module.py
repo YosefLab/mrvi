@@ -50,7 +50,7 @@ class _DecoderZX(nn.Module):
         h3 = nn.Embed(self.n_batch, self.n_out)(batch_covariate)
         h = h1 + h2 + h3
         if continuous_covariates is not None:
-            h4 = Dense(self.n_out, name="cont_covs_term")(continuous_covariates)
+            h4 = Dense(self.n_out, use_bias=False, name="cont_covs_term")(continuous_covariates)
             h += h4
         mu = self.activation(h)
         return NegativeBinomial(

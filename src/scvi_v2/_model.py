@@ -189,12 +189,18 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         representations: np.ndarray,
         batch_size: Optional[int] = 16,
     ):
-        """Computes n_samples x n_samples x n_genes mean LFC matrix"""
+        """Computes n_samples x n_samples x n_genes mean and variance LFC matrices
+
+        Element ijg of the matrix computes the average LFC of gene g between sample i and sample j.
+        This tensor can then be used to compute the average LFC between two groups of
+        samples.
+        """
         n_cells, n_samples, _ = representations.shape
         n_batches = self.summary_stats.n_batch
         n_passes = int(np.ceil(n_cells / batch_size))
         vars_in = {"params": self.module.params, **self.module.state}
         rngs = self.module.rngs
+        # Storing the genes by genes matrices on the GPU may be too expensive
         cpu_device = jax.devices("cpu")[0]
 
         @jax.jit
@@ -208,6 +214,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 batch_index=batch_index,
             )["h"]
 
+        # this function decodes all counterfactual latents z at once
         parallel_decode = jax.jit(jax.vmap(decode, in_axes=(1, None, None)))
 
         n_genes = self.summary_stats.n_vars
@@ -216,12 +223,11 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         lfcs_m2 = jax.device_put(jnp.zeros((n_samples, n_samples, n_genes)), device=cpu_device)
         for cell_reps in np.array_split(representations, n_passes):
             cell_reps_ = jnp.array(cell_reps)
-            libraries = jnp.ones((cell_reps_.shape[0], 1))
+            # the libraries are not used to compute hs but we need placeholders.
+            libraries = 5 * jnp.ones((cell_reps_.shape[0], 1))
 
             hs_all = []
             for batch in range(n_batches):
-                # nuisance_factors = jnp.zeros((cell_reps_.shape[0], n_batches))
-                # nuisance_factors = nuisance_factors.at[:, batch].set(1.0)
                 nuisance_factors = jnp.ones((cell_reps_.shape[0], 1))
                 nuisance_factors *= batch
                 hs = parallel_decode(cell_reps_, libraries, nuisance_factors)  # shape (n_bio_samples, n_cells, n_genes)
@@ -323,38 +329,41 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         if return_distances:
             return self.compute_distance_matrix_from_representations(reps)
         if return_lfcs:
-            # Initialize first and second LFC moments to 0
             lfcs_mean, _ = self.compute_lfcs_from_representations(reps)
             return lfcs_mean
         return reps
 
     def compute_degs_from_lfcs(self, lfcs, binary_donor_key):
+        """Rank genes by LFCs from pairwise LFCs.
+
+        This LFC is defined as
+        LFC_g
+        = Average(Expression_g for donors in group 2) - Average(Expression_g for donors in group 1)
+        = Average(LFC_g^ij, i being a sample from group 2 and j being a sample from group 1)
+        """
         n_sample = self.summary_stats.n_sample
         n_genes = self.summary_stats.n_vars
         assert lfcs.shape == (n_sample, n_sample, n_genes)
 
-        sample_cats = self.adata.obs[binary_donor_key]
+        sample_cats = self.donor_info[binary_donor_key]
         if sample_cats.nunique() != 2:
             raise ValueError("Binary donor key must have exactly two categories.")
         sample_cats = pd.Categorical(sample_cats)
         sample_cats = sample_cats.codes
-        where_pop1 = (sample_cats == 0).astype(int)
-        where_pop1 -= np.diag(np.diag(where_pop1))
-        where_pop1 = where_pop1.reshape(-1)
-        where_pop2 = (sample_cats == 1).astype(int)
-        where_pop2 -= np.diag(np.diag(where_pop2))
-        where_pop2 = where_pop2.reshape(-1)
 
-        lfcs_1d = lfcs.reshape(-1, n_genes)
-        lfcs_pop1 = lfcs_1d[where_pop1].mean(0)
-        lfcs_pop2 = lfcs_1d[where_pop2].mean(0)
+        groups_mat = sample_cats[:, None] - sample_cats[None, :]
+        # groups_mat[i, j] = 1 iff sample i is in group 1 and sample j is in group 0
 
-        lfc = lfcs_pop1 - lfcs_pop2
+        selected_pairs = (groups_mat == 1).reshape(-1)
+        lfcs_1d = lfcs.reshape((n_sample * n_sample, n_genes))
+        lfcs_1d = lfcs_1d[selected_pairs, :].mean(0)
+        # selected_lfcs =
+
         res = (
             pd.DataFrame(
                 dict(
                     gene_name=self.adata.var_names,
-                    lfc=lfc,
+                    lfc=np.array(lfcs_1d),
                 )
             )
             .assign(abs_lfc=lambda x: x.lfc.abs())

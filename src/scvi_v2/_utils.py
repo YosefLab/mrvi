@@ -2,6 +2,7 @@ import jax
 import jax.numpy as jnp
 
 
+@jax.jit
 def geary_c(
     w: jnp.ndarray,
     x: jnp.ndarray,
@@ -19,6 +20,7 @@ def geary_c(
     return num.sum() / denom
 
 
+@jax.jit
 def nn_statistic(
     w: jnp.ndarray,
     x: jnp.ndarray,
@@ -61,6 +63,7 @@ def permutation_test(distances, node_colors, statistic="geary", n_mc_samples=100
 
     keys = jax.random.split(key, n_mc_samples)
 
+    @jax.jit
     def permute_compute(w, x, key):
         x_ = jax.random.permutation(key, x)
         return stat_fn(w, x_)

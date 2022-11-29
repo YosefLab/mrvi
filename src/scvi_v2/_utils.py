@@ -20,7 +20,7 @@ def geary_c(
     return num.sum() / denom
 
 
-@jax.jit
+# @jax.jit
 def nn_statistic(
     w: jnp.ndarray,
     x: jnp.ndarray,
@@ -30,14 +30,17 @@ def nn_statistic(
 
     processed_mat1 = groups_mat - jnp.diag(groups_mat.diagonal())
     is_diff_group_or_id = processed_mat1 == 0
+    # above matrix masks samples with different group or id, and diagonal elements
     penalties1 = jnp.zeros(w.shape)
-    penalties1 += is_diff_group_or_id * jnp.inf
+    penalties1 += is_diff_group_or_id * 1e6
     d1 = w + penalties1
     distances_to_same = d1.min(axis=1)
 
-    is_same_group = processed_mat1 > 0
+    processed_mat2 = groups_mat
+    is_same_group = processed_mat2 > 0
+    # above matrix masks samples with same group (including the diagonal)
     penalties2 = jnp.zeros(w.shape)
-    penalties2 += is_same_group * jnp.inf
+    penalties2 += is_same_group * 1e6
     d2 = w + penalties2
     distances_to_diff = d2.min(axis=1)
 

@@ -16,6 +16,9 @@ DEFAULT_PX_KWARGS = {"n_hidden": 32}
 DEFAULT_PZ_KWARGS = {}
 DEFAULT_QU_KWARGS = {}
 
+# Lower stddev leads to better initial loss values
+_normal_initializer = jax.nn.initializers.normal(stddev=0.1)
+
 
 class _DecoderZX(nn.Module):
 
@@ -23,7 +26,7 @@ class _DecoderZX(nn.Module):
     n_out: int
     n_batch: int
     n_hidden: int = 128
-    activation: Callable = nn.softplus
+    activation: Callable = nn.softmax
     dropout_rate: float = 0.1
     training: Optional[bool] = None
 
@@ -40,14 +43,14 @@ class _DecoderZX(nn.Module):
         z_drop = nn.Dropout(self.dropout_rate)(jax.lax.stop_gradient(z), deterministic=not training)
         batch_covariate = batch_covariate.astype(int).flatten()
         # cells by n_out by n_latent (n_in)
-        A_b = nn.Embed(self.n_batch, self.n_out * self.n_in)(batch_covariate).reshape(
-            batch_covariate.shape[0], self.n_out, self.n_in
-        )
+        A_b = nn.Embed(self.n_batch, self.n_out * self.n_in, embedding_init=_normal_initializer)(
+            batch_covariate
+        ).reshape(batch_covariate.shape[0], self.n_out, self.n_in)
         if z_drop.ndim == 3:
             h2 = jnp.einsum("cgl,bcl->bcg", A_b, z_drop)
         else:
             h2 = jnp.einsum("cgl,cl->cg", A_b, z_drop)
-        h3 = nn.Embed(self.n_batch, self.n_out)(batch_covariate)
+        h3 = nn.Embed(self.n_batch, self.n_out, embedding_init=_normal_initializer)(batch_covariate)
         h = h1 + h2 + h3
         if continuous_covariates is not None:
             h4 = Dense(self.n_out, use_bias=False, name="cont_covs_term")(continuous_covariates)
@@ -71,14 +74,14 @@ class _DecoderUZ(nn.Module):
         u_drop = nn.Dropout(self.dropout_rate)(jax.lax.stop_gradient(u), deterministic=not training)
         sample_covariate = sample_covariate.astype(int).flatten()
         # cells by n_latent by n_latent
-        A_s = nn.Embed(self.n_sample, self.n_latent * self.n_latent)(sample_covariate).reshape(
-            sample_covariate.shape[0], self.n_latent, self.n_latent
-        )
+        A_s = nn.Embed(self.n_sample, self.n_latent * self.n_latent, embedding_init=_normal_initializer)(
+            sample_covariate
+        ).reshape(sample_covariate.shape[0], self.n_latent, self.n_latent)
         if u_drop.ndim == 3:
             h2 = jnp.einsum("cgl,bcl->bcg", A_s, u_drop)
         else:
             h2 = jnp.einsum("cgl,cl->cg", A_s, u_drop)
-        h3 = nn.Embed(self.n_sample, self.n_latent)(sample_covariate)
+        h3 = nn.Embed(self.n_sample, self.n_latent, embedding_init=_normal_initializer)(sample_covariate)
         delta = h2 + h3
         return u + delta
 
@@ -95,17 +98,16 @@ class _EncoderXU(nn.Module):
     def __call__(self, x: NdArray, sample_covariate: NdArray, training: Optional[bool] = None) -> dist.Normal:
         training = nn.merge_param("training", self.training, training)
         x_ = jnp.log1p(x)
-        zsample = nn.Embed(self.n_sample, self.n_latent_sample, embedding_init=jax.nn.initializers.normal())(
+        zsample = nn.Embed(self.n_sample, self.n_latent_sample, embedding_init=_normal_initializer)(
             sample_covariate.squeeze(-1).astype(int)
         )
-        zsample_ = zsample
 
         x_feat = nn.Sequential([Dense(self.n_hidden), nn.relu])(x_)
         x_feat = ConditionalBatchNorm1d(self.n_hidden, self.n_sample)(x_feat, sample_covariate, training=training)
         x_feat = nn.Sequential([Dense(self.n_hidden), nn.relu])(x_feat)
         x_feat = ConditionalBatchNorm1d(self.n_hidden, self.n_sample)(x_feat, sample_covariate, training=training)
 
-        inputs = jnp.concatenate([x_feat, zsample_], axis=-1)
+        inputs = jnp.concatenate([x_feat, zsample], axis=-1)
         return NormalDistOutputNN(self.n_hidden + self.n_latent_sample, self.n_latent)(inputs, training=training)
 
 
@@ -120,6 +122,8 @@ class MrVAE(JaxBaseModuleClass):
     n_latent: int = 10
     n_latent_sample: int = 2
     encoder_n_hidden: int = 128
+    z_u_prior: bool = True
+    z_u_prior_scale: float = 1.0
     px_kwargs: Optional[dict] = None
     pz_kwargs: Optional[dict] = None
     qu_kwargs: Optional[dict] = None
@@ -169,18 +173,19 @@ class MrVAE(JaxBaseModuleClass):
         sample_index = tensors[MRVI_REGISTRY_KEYS.SAMPLE_KEY]
         return {"x": x, "sample_index": sample_index}
 
-    def inference(self, x, sample_index, mc_samples=1, cf_sample=None, use_mean=False):
+    def inference(self, x, sample_index, mc_samples=None, cf_sample=None, use_mean=False):
         """Latent variable inference."""
         qu = self.qu(x, sample_index, training=self.training)
         if use_mean:
             u = qu.mean
         else:
             u_rng = self.make_rng("u")
-            u = qu.rsample(u_rng, sample_shape=(mc_samples,))
+            sample_shape = (mc_samples,) if mc_samples is not None else ()
+            u = qu.rsample(u_rng, sample_shape=sample_shape)
 
         sample_index_cf = sample_index if cf_sample is None else cf_sample
         z = self.pz(u, sample_index_cf, training=self.training)
-        library = jnp.expand_dims(jnp.log(x.sum(1)), 1)
+        library = jnp.log(x.sum(1, keepdims=True))
 
         return {
             "qu": qu,
@@ -198,10 +203,9 @@ class MrVAE(JaxBaseModuleClass):
 
     def generative(self, z, library, batch_index, continuous_covs):
         """Generative model."""
-        px = self.px(
-            z, batch_index, size_factor=jnp.exp(library), continuous_covariates=continuous_covs, training=self.training
-        )
-        h = px.mean / jnp.exp(library)
+        library_exp = jnp.exp(library)
+        px = self.px(z, batch_index, size_factor=library_exp, continuous_covariates=continuous_covs, training=self.training)
+        h = px.mean / library_exp
 
         pu = dist.Normal(0, 1)
         return {"px": px, "pu": pu, "h": h}
@@ -216,8 +220,11 @@ class MrVAE(JaxBaseModuleClass):
         """Compute the loss function value."""
         reconstruction_loss = -generative_outputs["px"].log_prob(tensors[REGISTRY_KEYS.X_KEY]).sum(-1)
         kl_u = dist.kl_divergence(inference_outputs["qu"], generative_outputs["pu"]).sum(-1)
-
-        weighted_kl_local = kl_weight * kl_u
+        if self.z_u_prior:
+            kl_z = -dist.Normal(inference_outputs["u"], self.z_u_prior_scale).log_prob(inference_outputs["z"]).sum(-1)
+        else:
+            kl_z = 0
+        weighted_kl_local = kl_weight * (kl_u + kl_z)
         loss = jnp.mean(reconstruction_loss + weighted_kl_local)
 
         return LossOutput(

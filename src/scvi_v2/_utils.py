@@ -1,5 +1,8 @@
+from typing import Union
+
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 
 @jax.jit
@@ -7,10 +10,12 @@ def geary_c(
     w: jnp.ndarray,
     x: jnp.ndarray,
 ):
-    """Geary's C statistic.
+    """Computes Geary's C statistic from a distance matrix and a vector of values.
 
-    x: array of shape (n,)
-    w: array of shape (n, n)
+    Parameters
+    ----------
+    w : distance matrix
+    x : vector of continuous values
     """
 
     num = x[:, None] - x[None, :]
@@ -25,6 +30,13 @@ def nn_statistic(
     w: jnp.ndarray,
     x: jnp.ndarray,
 ):
+    """Computes differences of distances to nearest neighbor from the same group and from different groups.
+
+    Parameters
+    ----------
+    w : distance matrix
+    x : vector of discrete values
+    """
     groups_mat = x[:, None] - x[None, :]
     groups_mat = (groups_mat == 0).astype(int)
 
@@ -48,8 +60,23 @@ def nn_statistic(
     return delta.mean()
 
 
-def permutation_test(distances, node_colors, statistic="geary", n_mc_samples=1000, alternative="less"):
-    """Permutation test for guided analyses."""
+def permutation_test(
+    distances: Union[np.ndarray, jnp.ndarray],
+    node_colors: Union[np.ndarray, jnp.ndarray],
+    statistic: str = "geary",
+    n_mc_samples: int = 1000,
+    alternative: str = "less",
+):
+    """Permutation test for guided analyses.
+
+    Parameters
+    ----------
+    distances : square distance matrix between all observations
+    node_colors : observed covariate values for each observation
+    statistic : one of "geary" or "nn"
+    n_mc_samples : number of Monte Carlo samples for the permutation test
+    alternative : one of "less", "greater", to specify the alternative hypothesis
+    """
 
     distances_ = jnp.array(distances)
     node_colors_ = jnp.array(node_colors)

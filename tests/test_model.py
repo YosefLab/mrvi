@@ -10,9 +10,12 @@ def test_mrvi():
     meta1 = np.random.randint(0, 2, size=15)
     adata.obs["meta1"] = meta1[adata.obs["sample"].values]
 
+
     meta2 = np.random.randn(15)
     adata.obs["meta2"] = meta2[adata.obs["sample"].values]
     MrVI.setup_anndata(adata, sample_key="sample", batch_key="batch")
+    adata.obs["cont_cov"] = np.random.normal(0, 1, size=adata.shape[0])
+    MrVI.setup_anndata(adata, sample_key="sample", batch_key="batch", continuous_covariate_keys=["cont_cov"])
     model = MrVI(
         adata,
         n_latent_sample=5,

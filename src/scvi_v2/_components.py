@@ -50,7 +50,7 @@ class NormalDistOutputNN(nn.Module):
     n_out: int
     n_hidden: int = 128
     n_layers: int = 1
-    var_eps: float = 1e-5
+    scale_eps: float = 1e-5
     training: Optional[bool] = None
 
     @nn.compact
@@ -60,8 +60,8 @@ class NormalDistOutputNN(nn.Module):
         for _ in range(self.n_layers):
             h = ResnetBlock(n_in=self.n_in, n_out=self.n_hidden)(h, training=training)
         mean = Dense(self.n_out)(h)
-        var = nn.Sequential([Dense(self.n_out), nn.softplus])(h)
-        return dist.Normal(mean, var + self.var_eps)
+        scale = nn.Sequential([Dense(self.n_out), nn.softplus])(h)
+        return dist.Normal(mean, scale + self.scale_eps)
 
 
 class ConditionalBatchNorm1d(nn.Module):

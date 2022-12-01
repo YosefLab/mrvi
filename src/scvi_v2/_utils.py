@@ -65,7 +65,7 @@ def permutation_test(
     node_colors: Union[np.ndarray, jnp.ndarray],
     statistic: str = "geary",
     n_mc_samples: int = 1000,
-    alternative: str = "less",
+    alternative: str = "greater",
 ):
     """Permutation test for guided analyses.
 

@@ -313,13 +313,14 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         vars_in = {"params": self.module.params, **self.module.state}
         rngs = self.module.rngs
 
-        sample_covariates = []
+        sample_covariates_values = []
         for sample_covariate_key, sample_covariate_test in donor_keys:
             x = self.donor_info[sample_covariate_key].values
             if sample_covariate_test == "nn":
                 x = pd.Categorical(x).codes
             x = jnp.array(x)
-            sample_covariates.append(x)
+            sample_covariates_values.append(x)
+        sample_covariate_tests = [key[1] for key in donor_keys]
 
         def inference_fn(
             x,
@@ -378,7 +379,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             )
 
             all_pvals = []
-            for x in sample_covariates:
+            for x, sample_covariate_test in zip(sample_covariates_values, sample_covariate_tests):
                 pvals = _get_scores(dists, x, sample_covariate_test)
                 all_pvals.append(pvals)
             all_pvals = jnp.stack(all_pvals, axis=-1)

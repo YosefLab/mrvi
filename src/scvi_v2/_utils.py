@@ -21,6 +21,7 @@ def geary_c(
     """
     # spatial weights are higher for closer points
     w_ = 1.0 / (w + 1e-6)
+    w_ -= jnp.diag(jnp.diag(w_))
     num = x[:, None] - x[None, :]
     num = (num**2) * w_
     num = num / (2 * w_.sum())
@@ -119,7 +120,6 @@ def permutation_test(
     random_seed
         seed used to compute random sample permutations
     """
-
     distances_ = jnp.array(distances)
     node_colors_ = jnp.array(node_colors)
     key = jax.random.PRNGKey(random_seed)

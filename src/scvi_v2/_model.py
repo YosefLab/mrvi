@@ -12,9 +12,11 @@ from scvi.data.fields import CategoricalObsField, LayerField
 from scvi.model.base import BaseModelClass, JaxTrainingMixin
 from sklearn.metrics import pairwise_distances
 from tqdm import tqdm
+import pandas as pd
 
 from ._constants import MRVI_REGISTRY_KEYS
 from ._module import MrVAE
+from ._utils import permutation_test, compute_statistic
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +69,10 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             **model_kwargs,
         )
         self.init_params_ = self._get_init_params(locals())
+
+        obs_df = adata.obs.copy()
+        obs_df = obs_df.loc[~obs_df._scvi_sample.duplicated("first")]
+        self.donor_info = obs_df.set_index("_scvi_sample").sort_index()
 
     def to_device(self, device):  # noqa: #D102
         # TODO(jhong): remove this once we have a better way to handle device.
@@ -264,3 +270,116 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             return self.compute_distance_matrix_from_representations(reps)
 
         return reps
+
+    def compute_cell_scores(
+        self,
+        donor_keys: list,
+        adata=None,
+        batch_size=256,
+        use_vmap=True,
+        n_mc_samples=200,
+        compute_pval=True,
+    ):
+        """Computes for each cell a statistic (effect size or p-value)
+
+        Parameters
+        ----------
+        donor_keys :
+            List of tuples, where the first element is the sample key and
+            the second element is the statistic to be computed
+        adata :
+            AnnData object to use for computing the local sample representation.
+        batch_size :
+            Batch size to use for computing the local sample representation.
+        use_vmap : bool, optional
+            Whether to use vmap for computing the local sample representation.
+            Disabling vmap can be useful if running out of memory on a GPU.
+        n_mc_samples :
+            Number of Monte Carlo trials to use for computing the p-values (if `compute_pval` is True).
+        compute_pval :
+            Whether to compute p-values or effect sizes.
+        """
+        adata = self.adata if adata is None else adata
+        self._check_if_trained(warn=False)
+        adata = self._validate_anndata(adata)
+        scdl = self._make_data_loader(adata=adata, indices=None, batch_size=batch_size, iter_ndarray=True)
+        n_sample = self.summary_stats.n_sample
+
+        vars_in = {"params": self.module.params, **self.module.state}
+        rngs = self.module.rngs
+
+        sample_covariates = []
+        for sample_covariate_key, sample_covariate_test in donor_keys:
+            x = self.donor_info[sample_covariate_key].values
+            if sample_covariate_test == "nn":
+                x = pd.Categorical(x).codes
+            x = jnp.array(x)
+            sample_covariates.append(x)
+
+        def inference_fn(
+            x,
+            sample_index,
+            cf_sample,
+        ):
+            return self.module.apply(
+                vars_in,
+                rngs=rngs,
+                method=self.module.inference,
+                x=x,
+                sample_index=sample_index,
+                cf_sample=cf_sample,
+                use_mean=True,
+            )["z"]
+
+        @jax.jit
+        def mapped_inference_fn(
+            x,
+            sample_index,
+            cf_sample,
+        ):
+            if use_vmap:
+                reps = jax.vmap(inference_fn, in_axes=(None, None, 0), out_axes=-2)(
+                    x,
+                    sample_index,
+                    cf_sample,
+                )
+            else:
+                per_sample_inference_fn = lambda cf_sample: inference_fn(x, sample_index, cf_sample)
+                reps = jax.lax.transpose(jax.lax.map(per_sample_inference_fn, cf_sample), (1, 0, 2))
+
+            euclid_d = lambda x: jnp.sqrt(((x[:, None] - x[None, :]) ** 2).sum(-1))
+            dists = jax.vmap(euclid_d, in_axes=0)(reps)
+            return dists
+
+        # not jitted because the statistic arg is causing troubles
+        def _get_scores(w, x, statistic):
+            if compute_pval:
+                fn = lambda w, x: permutation_test(w, x, statistic=statistic, n_mc_samples=n_mc_samples)
+            else:
+                fn = lambda w, x: compute_statistic(w, x, statistic=statistic)
+            return jax.vmap(fn, in_axes=(0, None))(w, x)
+
+        sigs = []
+        for array_dict in tqdm(scdl):
+            n_cells = array_dict[REGISTRY_KEYS.X_KEY].shape[0]
+            cf_sample = np.broadcast_to(np.arange(n_sample)[:, None, None], (n_sample, n_cells, 1))
+            inputs = self.module._get_inference_input(
+                array_dict,
+            )
+            dists = mapped_inference_fn(
+                x=jnp.array(inputs["x"]),
+                sample_index=jnp.array(inputs["sample_index"]),
+                cf_sample=jnp.array(cf_sample),
+            )
+
+            all_pvals = []
+            for x in sample_covariates:
+                pvals = _get_scores(dists, x, sample_covariate_test)
+                all_pvals.append(pvals)
+            all_pvals = jnp.stack(all_pvals, axis=-1)
+            sigs.append(np.array(jax.device_get(all_pvals)))
+        sigs = np.concatenate(sigs, axis=0)
+        prepand = "pval_" if compute_pval else "effect_size_"
+        columns = [prepand + key[0] for key in donor_keys]
+        sigs = pd.DataFrame(sigs, columns=columns)
+        return sigs

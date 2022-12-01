@@ -10,7 +10,6 @@ def test_mrvi():
     meta1 = np.random.randint(0, 2, size=15)
     adata.obs["meta1"] = meta1[adata.obs["sample"].values]
 
-
     meta2 = np.random.randn(15)
     adata.obs["meta2"] = meta2[adata.obs["sample"].values]
     MrVI.setup_anndata(adata, sample_key="sample", batch_key="batch")

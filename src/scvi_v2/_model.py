@@ -5,6 +5,7 @@ from typing import List, Optional, Union
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pandas as pd
 from anndata import AnnData
 from scvi import REGISTRY_KEYS
 from scvi.data import AnnDataManager
@@ -12,11 +13,10 @@ from scvi.data.fields import CategoricalObsField, LayerField, NumericalJointObsF
 from scvi.model.base import BaseModelClass, JaxTrainingMixin
 from sklearn.metrics import pairwise_distances
 from tqdm import tqdm
-import pandas as pd
 
 from ._constants import MRVI_REGISTRY_KEYS
 from ._module import MrVAE
-from ._utils import permutation_test, compute_statistic
+from ._utils import compute_statistic, permutation_test
 
 logger = logging.getLogger(__name__)
 

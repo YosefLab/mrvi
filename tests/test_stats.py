@@ -1,6 +1,7 @@
 import numpy as np
-from scvi_v2._utils import permutation_test, compute_statistic
 from sklearn.metrics import pairwise_distances
+
+from scvi_v2._utils import compute_statistic, permutation_test
 
 
 def test_geary():

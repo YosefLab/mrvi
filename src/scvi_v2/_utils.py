@@ -65,6 +65,35 @@ def nn_statistic(
     return delta.mean()
 
 
+def compute_statistic(
+    distances: Union[np.ndarray, jnp.ndarray],
+    node_colors: Union[np.ndarray, jnp.ndarray],
+    statistic: str = "geary",
+):
+    """Computes a statistic for guided analyses.
+
+    Parameters
+    ----------
+    distances :
+        square distance matrix between all observations
+    node_colors :
+        observed covariate values for each observation
+    statistic :
+        one of "geary" or "nn"
+    """
+    distances_ = jnp.array(distances)
+    node_colors_ = jnp.array(node_colors)
+
+    if statistic == "geary":
+        stat_fn = geary_c
+    elif statistic == "nn":
+        stat_fn = nn_statistic
+    assert stat_fn is not None
+
+    t_obs = stat_fn(distances_, node_colors_)
+    return t_obs
+
+
 def permutation_test(
     distances: Union[np.ndarray, jnp.ndarray],
     node_colors: Union[np.ndarray, jnp.ndarray],
@@ -101,7 +130,7 @@ def permutation_test(
         stat_fn = nn_statistic
     assert stat_fn is not None
 
-    t_obs = stat_fn(distances, node_colors)
+    t_obs = stat_fn(distances, node_colors_)
     t_perm = []
 
     keys = jax.random.split(key, n_mc_samples)

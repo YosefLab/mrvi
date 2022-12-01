@@ -1,5 +1,5 @@
 import numpy as np
-from scvi_v2._utils import permutation_test
+from scvi_v2._utils import permutation_test, compute_statistic
 from sklearn.metrics import pairwise_distances
 
 
@@ -9,6 +9,8 @@ def test_geary():
     pos = np.random.randn(100, 2)
     w = pairwise_distances(pos)
     x = pos[:, 0]
+
+    assert compute_statistic(w, x, statistic="geary") < 1
     assert permutation_test(w, x, selected_tail="greater") < 0.05
 
     # case without expected
@@ -28,6 +30,7 @@ def test_nn():
     w = pairwise_distances(pos)
     x = pos[:, 0] >= 0
     x = x.astype(int)
+    assert compute_statistic(w, x, statistic="nn") < 0
     assert permutation_test(w, x, statistic="nn", selected_tail="greater") < 0.05
 
     # case without expected

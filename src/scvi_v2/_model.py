@@ -276,27 +276,27 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         donor_keys: list,
         adata=None,
         batch_size=256,
-        use_vmap=True,
-        n_mc_samples=200,
-        compute_pval=True,
+        use_vmap: bool = True,
+        n_mc_samples: int = 200,
+        compute_pval: bool = True,
     ):
         """Computes for each cell a statistic (effect size or p-value)
 
         Parameters
         ----------
-        donor_keys :
+        donor_keys
             List of tuples, where the first element is the sample key and
             the second element is the statistic to be computed
-        adata :
+        adata
             AnnData object to use for computing the local sample representation.
-        batch_size :
+        batch_size
             Batch size to use for computing the local sample representation.
-        use_vmap : bool, optional
+        use_vmap
             Whether to use vmap for computing the local sample representation.
             Disabling vmap can be useful if running out of memory on a GPU.
-        n_mc_samples :
+        n_mc_samples
             Number of Monte Carlo trials to use for computing the p-values (if `compute_pval` is True).
-        compute_pval :
+        compute_pval
             Whether to compute p-values or effect sizes.
         """
         adata = self.adata if adata is None else adata

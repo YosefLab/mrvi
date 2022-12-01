@@ -74,11 +74,11 @@ def compute_statistic(
 
     Parameters
     ----------
-    distances :
+    distances
         square distance matrix between all observations
-    node_colors :
+    node_colors
         observed covariate values for each observation
-    statistic :
+    statistic
         one of "geary" or "nn"
     """
     distances_ = jnp.array(distances)

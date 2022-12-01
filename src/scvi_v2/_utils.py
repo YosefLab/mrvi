@@ -19,10 +19,11 @@ def geary_c(
     x
         vector of continuous values
     """
-
+    # spatial weights are higher for closer points
+    w_ = 1.0 / (w + 1e-6)
     num = x[:, None] - x[None, :]
-    num = (num**2) * w
-    num = num / (2 * w.sum())
+    num = (num**2) * w_
+    num = num / (2 * w_.sum())
     denom = x.var()
     return num.sum() / denom
 
@@ -69,7 +70,8 @@ def permutation_test(
     node_colors: Union[np.ndarray, jnp.ndarray],
     statistic: str = "geary",
     n_mc_samples: int = 1000,
-    alternative: str = "greater",
+    selected_tail: str = "greater",
+    random_seed: int = 0,
 ):
     """Permutation test for guided analyses.
 
@@ -83,13 +85,15 @@ def permutation_test(
         one of "geary" or "nn"
     n_mc_samples
         number of Monte Carlo samples for the permutation test
-    alternative
-        one of "less", "greater", to specify the alternative hypothesis
+    selected_tail
+        one of "less", "greater", to specify how to compute pvalues
+    random_seed
+        seed used to compute random sample permutations
     """
 
     distances_ = jnp.array(distances)
     node_colors_ = jnp.array(node_colors)
-    key = jax.random.PRNGKey(0)
+    key = jax.random.PRNGKey(random_seed)
 
     if statistic == "geary":
         stat_fn = geary_c
@@ -109,9 +113,9 @@ def permutation_test(
 
     t_perm = jax.vmap(permute_compute, in_axes=(None, None, 0), out_axes=0)(distances_, node_colors_, keys)
 
-    if alternative == "greater":
+    if selected_tail == "greater":
         cdt = t_obs > t_perm
-    elif alternative == "less":
+    elif selected_tail == "less":
         cdt = t_obs < t_perm
     else:
         raise ValueError("alternative must be 'greater' or 'less'")

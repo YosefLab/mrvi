@@ -14,8 +14,10 @@ def geary_c(
 
     Parameters
     ----------
-    w : distance matrix
-    x : vector of continuous values
+    w
+        distance matrix
+    x
+        vector of continuous values
     """
 
     num = x[:, None] - x[None, :]
@@ -34,8 +36,10 @@ def nn_statistic(
 
     Parameters
     ----------
-    w : distance matrix
-    x : vector of discrete values
+    w
+        distance matrix
+    x
+        vector of discrete values
     """
     groups_mat = x[:, None] - x[None, :]
     groups_mat = (groups_mat == 0).astype(int)
@@ -71,11 +75,16 @@ def permutation_test(
 
     Parameters
     ----------
-    distances : square distance matrix between all observations
-    node_colors : observed covariate values for each observation
-    statistic : one of "geary" or "nn"
-    n_mc_samples : number of Monte Carlo samples for the permutation test
-    alternative : one of "less", "greater", to specify the alternative hypothesis
+    distances
+        square distance matrix between all observations
+    node_colors
+        observed covariate values for each observation
+    statistic
+        one of "geary" or "nn"
+    n_mc_samples
+        number of Monte Carlo samples for the permutation test
+    alternative
+        one of "less", "greater", to specify the alternative hypothesis
     """
 
     distances_ = jnp.array(distances)

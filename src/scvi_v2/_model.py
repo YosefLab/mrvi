@@ -5,6 +5,7 @@ from typing import List, Optional, Union
 import jax
 import jax.numpy as jnp
 import numpy as np
+import xarray as xr
 from anndata import AnnData
 from scvi import REGISTRY_KEYS
 from scvi.data import AnnDataManager
@@ -165,8 +166,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
     @staticmethod
     def compute_distance_matrix_from_representations(
-        representations: np.ndarray, metric: str = "euclidean"
-    ) -> np.ndarray:
+        representations: xr.DataArray, metric: str = "euclidean"
+    ) -> xr.DataArray:
         """
         Compute distance matrices from counterfactual sample representations.
 
@@ -182,7 +183,13 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         for i, cell_rep in enumerate(representations):
             d_ = pairwise_distances(cell_rep, metric=metric)
             pairwise_dists[i, :, :] = d_
-        return pairwise_dists
+        dists_data_array = xr.DataArray(
+            pairwise_dists,
+            dims=["obs_name", "sample", "sample"],
+            coords=representations.coords,
+            name="sample_distances",
+        )
+        return dists_data_array
 
     def get_local_sample_representation(
         self,
@@ -190,7 +197,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         batch_size=256,
         return_distances=False,
         use_vmap=True,
-    ):
+    ) -> xr.DataArray:
         """
         Computes the local sample representation of the cells in the adata object.
 
@@ -264,8 +271,15 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             )
             reps.append(zs)
         reps = np.array(jax.device_get(jnp.concatenate(reps, axis=0)))
+        sample_order = self.adata_manager.get_state_registry(MRVI_REGISTRY_KEYS.SAMPLE_KEY).categorical_mapping
+        reps_data_array = xr.DataArray(
+            reps,
+            dims=["obs_name", "sample", "latent_dim"],
+            coords={"obs_name": adata.obs_names, "sample": sample_order},
+            name="sample_representation",
+        )
 
         if return_distances:
-            return self.compute_distance_matrix_from_representations(reps)
+            return self.compute_distance_matrix_from_representations(reps_data_array)
 
-        return reps
+        return reps_data_array

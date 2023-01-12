@@ -1,12 +1,16 @@
+import dataclasses
 from typing import Any, Callable, Optional
 
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
 import numpyro.distributions as dist
+from flax.linen.dtypes import promote_dtype
 from flax.linen.initializers import variance_scaling
 
-from ._types import NdArray
+from ._types import Array, Dtype, NdArray, PRNGKey, Shape
+
+_normal_initializer = jax.nn.initializers.normal(stddev=0.1)
 
 
 class Dense(nn.DenseGeneral):
@@ -103,3 +107,80 @@ class ConditionalBatchNorm1d(nn.Module):
         out = gamma * out + beta
 
         return out
+
+
+class FactorizedEmbedding(nn.Module):
+    """
+    Factorized Embedding Module.
+
+    A parameterized function from integers [0, n) to d-dimensional vectors;
+    however, the d-dimensional vectors are parameterized with a matrix factorization.
+
+    Attributes
+    ----------
+    num_embeddings
+        number of embeddings.
+    features
+        number of feature dimensions for each embedding.
+    dtype
+        the dtype of the embedding vectors (default: same as embedding).
+    param_dtype
+        the dtype passed to parameter initializers (default: float32).
+    embedding_init
+        embedding initializer.
+    """
+
+    num_embeddings: int
+    features: int
+    dtype: Optional[Dtype] = None
+    param_dtype: Dtype = jnp.float32
+    embedding_init: Callable[[PRNGKey, Shape, Dtype], Array] = _normal_initializer
+
+    embedding: NdArray = dataclasses.field(init=False)
+
+    def setup(self):
+        """Initialize the embedding matrix."""
+        self.embedding = self.param(
+            "embedding", self.embedding_init, (self.num_embeddings, self.features), self.param_dtype
+        )
+
+    def __call__(self, inputs: NdArray) -> NdArray:
+        """
+        Embeds the inputs along the last dimension.
+
+        Parameters
+        ----------
+        inputs
+            input data, all dimensions are considered batch dimensions.
+
+        Returns
+        -------
+        Output which is embedded input data.  The output shape follows the input,
+        with an additional `features` dimension appended.
+        """
+        if not jnp.issubdtype(inputs.dtype, jnp.integer):
+            raise ValueError("Input type must be an integer or unsigned integer.")
+        # Use take because fancy indexing numpy arrays with JAX indices does not
+        # work correctly.
+        (embedding,) = promote_dtype(self.embedding, dtype=self.dtype, inexact=False)
+        return jnp.take(embedding, inputs, axis=0)
+
+    def attend(self, query: NdArray) -> NdArray:
+        """
+        Attend over the embedding using a query array.
+
+        Parameters
+        ----------
+        query
+            array with last dimension equal the feature depth `features` of the
+            embedding.
+
+        Returns
+        -------
+        An array with final dim `num_embeddings` corresponding to the batched
+        inner-product of the array of query vectors against each embedding.
+        Commonly used for weight-sharing between embeddings and logit transform
+        in NLP models.
+        """
+        query, embedding = promote_dtype(query, self.embedding, dtype=self.dtype)
+        return jnp.dot(query, embedding.T)

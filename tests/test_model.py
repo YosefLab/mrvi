@@ -1,3 +1,5 @@
+import pdb
+
 import numpy as np
 from scvi.data import synthetic_iid
 
@@ -19,14 +21,14 @@ def test_mrvi():
     assert model.get_latent_representation().shape == (adata.shape[0], 10)
     local_vmap = model.get_local_sample_representation()
     assert local_vmap.shape == (adata.shape[0], 15, 10)
-    local_dist_vmap = model.get_local_sample_representation(return_distances=True)
+    local_dist_vmap = model.get_local_sample_distances()
     assert local_dist_vmap.shape == (
         adata.shape[0],
         15,
         15,
     )
     local_map = model.get_local_sample_representation(use_vmap=False)
-    local_dist_map = model.get_local_sample_representation(return_distances=True, use_vmap=False)
+    local_dist_map = model.get_local_sample_distances(use_vmap=False)
     assert local_map.shape == (adata.shape[0], 15, 10)
     assert local_dist_map.shape == (
         adata.shape[0],
@@ -35,5 +37,13 @@ def test_mrvi():
     )
     assert np.allclose(local_map, local_vmap, atol=1e-6)
     assert np.allclose(local_dist_map, local_dist_vmap, atol=1e-6)
+
+    local_normalized_dists = model.get_local_sample_distances(normalize_distances=True)
+    assert local_normalized_dists.shape == (
+        adata.shape[0],
+        15,
+        15,
+    )
     # tests __repr__
     print(model)
+    pdb.set_trace()

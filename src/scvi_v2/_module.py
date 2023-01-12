@@ -43,7 +43,7 @@ class _DecoderZX(nn.Module):
         z_drop = nn.Dropout(self.dropout_rate)(jax.lax.stop_gradient(z), deterministic=not training)
         batch_covariate = batch_covariate.astype(int).flatten()
         # cells by n_out by n_latent (n_in)
-        A_b = nn.Embed(self.n_batch, self.n_out * self.n_in, embedding_init=_normal_initializer)(
+        A_b = nn.Embed(self.n_batch, self.n_out * self.n_in, embedding_init=_normal_initializer, name="A_b")(
             batch_covariate
         ).reshape(batch_covariate.shape[0], self.n_out, self.n_in)
         if z_drop.ndim == 3:
@@ -74,7 +74,7 @@ class _DecoderUZ(nn.Module):
         u_drop = nn.Dropout(self.dropout_rate)(jax.lax.stop_gradient(u), deterministic=not training)
         sample_covariate = sample_covariate.astype(int).flatten()
         # cells by n_latent by n_latent
-        A_s = nn.Embed(self.n_sample, self.n_latent * self.n_latent, embedding_init=_normal_initializer)(
+        A_s = nn.Embed(self.n_sample, self.n_latent * self.n_latent, embedding_init=_normal_initializer, name="A_s")(
             sample_covariate
         ).reshape(sample_covariate.shape[0], self.n_latent, self.n_latent)
         if u_drop.ndim == 3:
@@ -204,7 +204,9 @@ class MrVAE(JaxBaseModuleClass):
     def generative(self, z, library, batch_index, continuous_covs):
         """Generative model."""
         library_exp = jnp.exp(library)
-        px = self.px(z, batch_index, size_factor=library_exp, continuous_covariates=continuous_covs, training=self.training)
+        px = self.px(
+            z, batch_index, size_factor=library_exp, continuous_covariates=continuous_covs, training=self.training
+        )
         h = px.mean / library_exp
 
         pu = dist.Normal(0, 1)

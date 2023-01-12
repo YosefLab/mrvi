@@ -1,5 +1,4 @@
 import logging
-import pdb
 from copy import deepcopy
 from typing import List, Optional, Tuple, Union
 
@@ -314,7 +313,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             dists_data_array = np.clip(dists_data_array - local_baseline_means, a_min=0, a_max=None) / (
                 local_baseline_vars**0.5
             )
-            pdb.set_trace()
 
         return dists_data_array
 

@@ -1,5 +1,3 @@
-import pdb
-
 import numpy as np
 from scvi.data import synthetic_iid
 
@@ -46,4 +44,3 @@ def test_mrvi():
     )
     # tests __repr__
     print(model)
-    pdb.set_trace()

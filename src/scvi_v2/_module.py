@@ -8,7 +8,12 @@ from scvi import REGISTRY_KEYS
 from scvi.distributions import JaxNegativeBinomialMeanDisp as NegativeBinomial
 from scvi.module.base import JaxBaseModuleClass, LossOutput, flax_configure
 
-from ._components import ConditionalBatchNorm1d, Dense, NormalDistOutputNN
+from ._components import (
+    ConditionalBatchNorm1d,
+    Dense,
+    FactorizedEmbedding,
+    NormalDistOutputNN,
+)
 from ._constants import MRVI_REGISTRY_KEYS
 from ._types import NdArray
 
@@ -65,6 +70,7 @@ class _DecoderUZ(nn.Module):
 
     n_latent: int
     n_sample: int
+    n_factorized_embed_dims: Optional[int] = None
     dropout_rate: float = 0.0
     training: Optional[bool] = None
 
@@ -74,9 +80,19 @@ class _DecoderUZ(nn.Module):
         u_drop = nn.Dropout(self.dropout_rate)(jax.lax.stop_gradient(u), deterministic=not training)
         sample_covariate = sample_covariate.astype(int).flatten()
         # cells by n_latent by n_latent
-        A_s = nn.Embed(self.n_sample, self.n_latent * self.n_latent, embedding_init=_normal_initializer)(
-            sample_covariate
-        ).reshape(sample_covariate.shape[0], self.n_latent, self.n_latent)
+        if self.n_factorized_embed_dims is None:
+            A_s = nn.Embed(
+                self.n_sample, self.n_latent * self.n_latent, embedding_init=_normal_initializer, name="A_s"
+            )(sample_covariate)
+        else:
+            A_s = FactorizedEmbedding(
+                self.n_sample,
+                self.n_latent * self.n_latent,
+                self.n_factorized_embed_dims,
+                embedding_init=_normal_initializer,
+                name="A_s",
+            )(sample_covariate)
+        A_s = A_s.reshape(sample_covariate.shape[0], self.n_latent, self.n_latent)
         if u_drop.ndim == 3:
             h2 = jnp.einsum("cgl,bcl->bcg", A_s, u_drop)
         else:
@@ -121,6 +137,7 @@ class MrVAE(JaxBaseModuleClass):
     n_continuous_cov: int
     n_latent: int = 10
     n_latent_sample: int = 2
+    n_factorized_embed_dims: Optional[int] = None
     encoder_n_hidden: int = 128
     z_u_prior: bool = True
     z_u_prior_scale: float = 1.0
@@ -152,6 +169,7 @@ class MrVAE(JaxBaseModuleClass):
         self.pz = _DecoderUZ(
             self.n_latent,
             self.n_sample,
+            self.n_factorized_embed_dims,
             **pz_kwargs,
         )
 
@@ -204,7 +222,9 @@ class MrVAE(JaxBaseModuleClass):
     def generative(self, z, library, batch_index, continuous_covs):
         """Generative model."""
         library_exp = jnp.exp(library)
-        px = self.px(z, batch_index, size_factor=library_exp, continuous_covariates=continuous_covs, training=self.training)
+        px = self.px(
+            z, batch_index, size_factor=library_exp, continuous_covariates=continuous_covs, training=self.training
+        )
         h = px.mean / library_exp
 
         pu = dist.Normal(0, 1)
@@ -230,5 +250,5 @@ class MrVAE(JaxBaseModuleClass):
         return LossOutput(
             loss=loss,
             reconstruction_loss=reconstruction_loss,
-            kl_local=kl_u,
+            kl_local=(kl_u + kl_z),
         )

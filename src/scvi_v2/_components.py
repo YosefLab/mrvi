@@ -142,7 +142,18 @@ class FactorizedEmbedding(nn.Module):
 
     embedding: NdArray = dataclasses.field(init=False)
 
-    @nn.compact
+    def setup(self) -> None:
+        """Initialize the embedding matrix."""
+        self.embedding = self.param(
+            "embedding", self.embedding_init, (self.num_embeddings, self.factorized_features), self.param_dtype
+        )
+        self.factor_tensor = self.param(
+            "factor_tensor",
+            self.embedding_init,
+            (self.factorized_features, self.features),
+            self.param_dtype,
+        )
+
     def __call__(self, inputs: NdArray) -> NdArray:
         """
         Embeds the inputs along the last dimension.
@@ -157,15 +168,6 @@ class FactorizedEmbedding(nn.Module):
         Output which is embedded input data.  The output shape follows the input,
         with an additional `features` dimension appended.
         """
-        self.embedding = self.param(
-            "embedding", self.embedding_init, (self.num_embeddings, self.factorized_features), self.param_dtype
-        )
-        self.factor_tensor = self.param(
-            "factor_tensor",
-            self.embedding_init,
-            (self.factorized_features, self.features),
-            self.param_dtype,
-        )
         if not jnp.issubdtype(inputs.dtype, jnp.integer):
             raise ValueError("Input type must be an integer or unsigned integer.")
         # Use take because fancy indexing numpy arrays with JAX indices does not

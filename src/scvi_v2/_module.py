@@ -81,15 +81,16 @@ class _DecoderUZ(nn.Module):
         sample_covariate = sample_covariate.astype(int).flatten()
         # cells by n_latent by n_latent
         if self.n_factorized_embed_dims is None:
-            A_s = nn.Embed(self.n_sample, self.n_latent * self.n_latent, embedding_init=_normal_initializer)(
-                sample_covariate
-            )
+            A_s = nn.Embed(
+                self.n_sample, self.n_latent * self.n_latent, embedding_init=_normal_initializer, name="A_s"
+            )(sample_covariate)
         else:
             A_s = FactorizedEmbedding(
                 self.n_sample,
                 self.n_latent * self.n_latent,
                 self.n_factorized_embed_dims,
                 embedding_init=_normal_initializer,
+                name="A_s",
             )(sample_covariate)
         A_s = A_s.reshape(sample_covariate.shape[0], self.n_latent, self.n_latent)
         if u_drop.ndim == 3:

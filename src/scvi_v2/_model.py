@@ -319,6 +319,23 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
     def _compute_local_baseline_dists(
         self, adata: Optional[AnnData], mc_samples: int = 1000, batch_size: int = 256
     ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Approximate the distributions used as baselines for normalizing the local sample distances.
+
+        Approximates the means and variances of the Euclidean distance between two samples of
+        the z latent representation for the original sample for each cell in ``adata``.
+
+        Reference: https://www.overleaf.com/read/mhdxcrknzxpm.
+
+        Parameters
+        ----------
+        adata
+            AnnData object to use for computing the local baseline distributions.
+        mc_samples
+            Number of Monte Carlo samples to use for computing the local baseline distributions.
+        batch_size
+            Batch size to use for computing the local baseline distributions.
+        """
         adata = self.adata if adata is None else adata
         self._check_if_trained(warn=False)
         adata = self._validate_anndata(adata)
@@ -347,7 +364,11 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
             sample_index = self.module._get_inference_input(array_dict)["sample_index"]
             A_s = apply_get_A_s(sample_index)
-            squared_l2_sigma = 2 * jnp.einsum("cji, cjk, ckl -> cil", A_s, qu_vars_diag, A_s)
+            squared_l2_sigma = 2 * jnp.einsum(
+                "cij, cjk, clk -> cil", A_s, qu_vars_diag, A_s
+            )  # A_s @ qu_vars_diag @ A_s.T
+            # Resymmetrize squared_l2_sigma to avoid numerical errors
+            squared_l2_sigma = (squared_l2_sigma + jnp.transpose(squared_l2_sigma, axes=(0, 2, 1))) / 2
             eigvals = jax.vmap(jnp.linalg.eig)(squared_l2_sigma)[0].astype(float)
             _ = self.module.rngs  # Regenerate seed_rng
             normal_samples = jax.random.normal(

@@ -1,5 +1,5 @@
 import dataclasses
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Literal, Optional
 
 import flax.linen as nn
 import jax
@@ -75,6 +75,8 @@ class ConditionalNormalization(nn.Module):
 
     n_features: int
     n_conditions: int
+    training: Optional[bool] = None
+    normalization_type: Literal["batch", "layer"] = "layer"
 
     @staticmethod
     def _gamma_initializer() -> jax.nn.initializers.Initializer:
@@ -94,8 +96,14 @@ class ConditionalNormalization(nn.Module):
         return init
 
     @nn.compact
-    def __call__(self, x: NdArray, condition: NdArray) -> jnp.ndarray:  # noqa: D102
-        x = nn.LayerNorm(use_bias=False, use_scale=False)(x)
+    def __call__(self, x: NdArray, condition: NdArray, training: Optional[bool] = None) -> jnp.ndarray:  # noqa: D102
+        training = nn.merge_param("training", self.training, training)
+        if self.normalization_type == "batch":
+            x = nn.BatchNorm(use_bias=False, use_scale=False)(x, use_running_average=not training)
+        elif self.normalization_type == "layer":
+            x = nn.LayerNorm(use_bias=False, use_scale=False)(x)
+        else:
+            raise ValueError(f"normalization_type must be one of ['batch', 'layer'], not {self.normalization_type}")
         cond_int = condition.squeeze(-1).astype(int)
         gamma = nn.Embed(
             self.n_conditions, self.n_features, embedding_init=self._gamma_initializer(), name="gamma_conditional"

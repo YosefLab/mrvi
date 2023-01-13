@@ -117,7 +117,7 @@ class _EncoderXU(nn.Module):
         x_feat = jnp.log1p(x)
         for _ in range(2):
             x_feat = Dense(self.n_hidden)(x_feat)
-            x_feat = ConditionalNormalization(self.n_hidden, self.n_sample)(x_feat, sample_covariate)
+            x_feat = ConditionalNormalization(self.n_hidden, self.n_sample)(x_feat, sample_covariate, training=training)
             x_feat = self.activation(x_feat)
         sample_effect = nn.Embed(self.n_sample, self.n_hidden, embedding_init=_normal_initializer)(
             sample_covariate.squeeze(-1).astype(int)

@@ -5,6 +5,7 @@ from typing import List, Optional, Tuple, Union
 import jax
 import jax.numpy as jnp
 import numpy as np
+import xarray as xr
 import pandas as pd
 from anndata import AnnData
 from scvi import REGISTRY_KEYS
@@ -171,8 +172,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
     @staticmethod
     def compute_distance_matrix_from_representations(
-        representations: np.ndarray, metric: str = "euclidean"
-    ) -> np.ndarray:
+        representations: xr.DataArray, metric: str = "euclidean"
+    ) -> xr.DataArray:
         """
         Compute distance matrices from counterfactual sample representations.
 
@@ -188,15 +189,20 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         for i, cell_rep in enumerate(representations):
             d_ = pairwise_distances(cell_rep, metric=metric)
             pairwise_dists[i, :, :] = d_
-        return pairwise_dists
+        dists_data_array = xr.DataArray(
+            pairwise_dists,
+            dims=["obs_name", "sample", "sample"],
+            coords=representations.coords,
+            name="sample_distances",
+        )
+        return dists_data_array
 
     def get_local_sample_representation(
         self,
-        adata=None,
-        batch_size=256,
-        return_distances=False,
-        use_vmap=True,
-    ):
+        adata: Optional[AnnData] = None,
+        batch_size: int = 256,
+        use_vmap: bool = True,
+    ) -> xr.DataArray:
         """
         Computes the local sample representation of the cells in the adata object.
 
@@ -208,9 +214,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             AnnData object to use for computing the local sample representation.
         batch_size
             Batch size to use for computing the local sample representation.
-        return_distances
-            If ``return_distances`` is ``True``, returns a distance matrix of
-            size (n_sample, n_sample) for each cell.
         use_vmap
             Whether to use vmap for computing the local sample representation.
             Disabling vmap can be useful if running out of memory on a GPU.
@@ -269,12 +272,119 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 cf_sample=jnp.array(cf_sample),
             )
             reps.append(zs)
+
         reps = np.array(jax.device_get(jnp.concatenate(reps, axis=0)))
+        sample_order = self.adata_manager.get_state_registry(MRVI_REGISTRY_KEYS.SAMPLE_KEY).categorical_mapping
+        reps_data_array = xr.DataArray(
+            reps,
+            dims=["obs_name", "sample", "latent_dim"],
+            coords={"obs_name": adata.obs_names, "sample": sample_order},
+            name="sample_representation",
+        )
 
-        if return_distances:
-            return self.compute_distance_matrix_from_representations(reps)
+        return reps_data_array
 
-        return reps
+    def get_local_sample_distances(
+        self,
+        adata: Optional[AnnData] = None,
+        batch_size: int = 256,
+        normalize_distances: bool = False,
+        use_vmap: bool = True,
+    ) -> xr.DataArray:
+        """
+        Computes the local sample distances of the cells in the adata object.
+
+        For each cell, it returns a matrix of size (n_sample, n_sample).
+
+        Parameters
+        ----------
+        adata
+            AnnData object to use for computing the local sample representation.
+        batch_size
+            Batch size to use for computing the local sample representation.
+        normalize_distances
+            Whether to normalize the local sample distances. Normalizes by
+            the standard deviation of the original intra-sample distances.
+        use_vmap
+            Whether to use vmap for computing the local sample representation.
+            Disabling vmap can be useful if running out of memory on a GPU.
+        """
+        reps_data_array = self.get_local_sample_representation(adata=adata, batch_size=batch_size, use_vmap=use_vmap)
+        dists_data_array = self.compute_distance_matrix_from_representations(reps_data_array)
+
+        if normalize_distances:
+            local_baseline_means, local_baseline_vars = self._compute_local_baseline_dists(adata)
+            local_baseline_means = local_baseline_means.reshape(-1, 1, 1)
+            local_baseline_vars = local_baseline_vars.reshape(-1, 1, 1)
+            dists_data_array = np.clip(dists_data_array - local_baseline_means, a_min=0, a_max=None) / (
+                local_baseline_vars**0.5
+            )
+
+        return dists_data_array
+
+    def _compute_local_baseline_dists(
+        self, adata: Optional[AnnData], mc_samples: int = 1000, batch_size: int = 256
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Approximate the distributions used as baselines for normalizing the local sample distances.
+
+        Approximates the means and variances of the Euclidean distance between two samples of
+        the z latent representation for the original sample for each cell in ``adata``.
+
+        Reference: https://www.overleaf.com/read/mhdxcrknzxpm.
+
+        Parameters
+        ----------
+        adata
+            AnnData object to use for computing the local baseline distributions.
+        mc_samples
+            Number of Monte Carlo samples to use for computing the local baseline distributions.
+        batch_size
+            Batch size to use for computing the local baseline distributions.
+        """
+        adata = self.adata if adata is None else adata
+        self._check_if_trained(warn=False)
+        adata = self._validate_anndata(adata)
+        scdl = self._make_data_loader(adata=adata, indices=None, batch_size=batch_size, iter_ndarray=True)
+
+        jit_inference_fn = self.module.get_jit_inference_fn()
+
+        def get_A_s(module, sample_index):
+            A_s_embed = module.pz.get_variable("params", "A_s")["embedding"]
+            sample_index = sample_index.astype(int).flatten()
+            return jnp.take(A_s_embed, sample_index, axis=0)
+
+        def apply_get_A_s(sample_index):
+            vars_in = {"params": self.module.params, **self.module.state}
+            rngs = self.module.rngs
+            A_s = self.module.apply(vars_in, rngs=rngs, method=get_A_s, sample_index=sample_index).reshape(
+                sample_index.shape[0], self.module.n_latent, self.module.n_latent
+            )
+            return A_s
+
+        baseline_means = []
+        baseline_vars = []
+        for array_dict in tqdm(scdl):
+            qu = jit_inference_fn(self.module.rngs, array_dict)["qu"]
+            qu_vars_diag = jax.vmap(jnp.diag)(qu.variance)
+
+            sample_index = self.module._get_inference_input(array_dict)["sample_index"]
+            A_s = apply_get_A_s(sample_index)
+            B = jnp.expand_dims(jnp.eye(A_s.shape[1]), 0) + A_s
+            squared_l2_sigma = 2 * jnp.einsum(
+                "cij, cjk, clk -> cil", B, qu_vars_diag, B
+            )  # (I + A_s) @ qu_vars_diag @ (I + A_s).T
+            eigvals = jax.vmap(jnp.linalg.eigh)(squared_l2_sigma)[0].astype(float)
+            _ = self.module.rngs  # Regenerate seed_rng
+            normal_samples = jax.random.normal(
+                self.module.seed_rng, shape=(eigvals.shape[0], mc_samples, eigvals.shape[1])
+            )
+            squared_l2_dists = jnp.sum(jnp.einsum("cij, cj -> cij", (normal_samples**2), eigvals), axis=2)
+            l2_dists = squared_l2_dists**0.5
+            baseline_means.append(jnp.mean(l2_dists, axis=1))
+            baseline_vars.append(jnp.var(l2_dists, axis=1))
+
+        return np.array(jnp.concatenate(baseline_means, axis=0)), np.array(jnp.concatenate(baseline_vars, axis=0))
 
     def compute_cell_scores(
         self,

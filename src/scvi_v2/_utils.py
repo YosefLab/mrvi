@@ -1,3 +1,4 @@
+from functools import partial
 from typing import Callable, Union
 
 import jax
@@ -10,7 +11,7 @@ def simple_reciprocal(w, eps=1e-6):
     return 1.0 / (w + eps)
 
 
-@jax.jit
+@partial(jax.jit, static_argnums=(2,))
 def geary_c(
     w: jnp.ndarray,
     x: jnp.ndarray,
@@ -28,7 +29,7 @@ def geary_c(
         function that converts distances to similarities
     """
     # spatial weights are higher for closer points
-    w_ = simple_reciprocal(w)
+    w_ = similarity_fn(w)
     w_ -= jnp.diag(jnp.diag(w_))
     num = x[:, None] - x[None, :]
     num = (num**2) * w_
@@ -112,9 +113,11 @@ def permutation_test(
     distances: Union[np.ndarray, jnp.ndarray],
     node_colors: Union[np.ndarray, jnp.ndarray],
     statistic: str = "geary",
+    similarity_fn: Callable = simple_reciprocal,
     n_mc_samples: int = 1000,
     selected_tail: str = "greater",
     random_seed: int = 0,
+    use_vmap: bool = True,
 ):
     """Permutation test for guided analyses.
 
@@ -126,34 +129,33 @@ def permutation_test(
         observed covariate values for each observation
     statistic
         one of "geary" or "nn"
+    similarity_fn
+        function used to compute spatial weights for Geary's C statistic
     n_mc_samples
         number of Monte Carlo samples for the permutation test
     selected_tail
         one of "less", "greater", to specify how to compute pvalues
     random_seed
         seed used to compute random sample permutations
+    use_vmap
+        whether or not to use vmap to compute pvalues
     """
-    distances_ = jnp.array(distances)
-    node_colors_ = jnp.array(node_colors)
-    key = jax.random.PRNGKey(random_seed)
-
-    if statistic == "geary":
-        stat_fn = geary_c
-    elif statistic == "nn":
-        stat_fn = nn_statistic
-    assert stat_fn is not None
-
-    t_obs = stat_fn(distances, node_colors_)
+    t_obs = compute_statistic(distances, node_colors, statistic=statistic, similarity_fn=similarity_fn)
     t_perm = []
 
+    key = jax.random.PRNGKey(random_seed)
     keys = jax.random.split(key, n_mc_samples)
 
     @jax.jit
     def permute_compute(w, x, key):
         x_ = jax.random.permutation(key, x)
-        return stat_fn(w, x_)
+        return compute_statistic(w, x_, statistic=statistic, similarity_fn=similarity_fn)
 
-    t_perm = jax.vmap(permute_compute, in_axes=(None, None, 0), out_axes=0)(distances_, node_colors_, keys)
+    if use_vmap:
+        t_perm = jax.vmap(permute_compute, in_axes=(None, None, 0), out_axes=0)(distances, node_colors, keys)
+    else:
+        permute_compute_bound = lambda key: permute_compute(distances, node_colors, key)
+        t_perm = jax.lax.map(permute_compute_bound, keys)
 
     if selected_tail == "greater":
         cdt = t_obs > t_perm

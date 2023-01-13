@@ -13,6 +13,7 @@ def test_geary():
 
     assert compute_statistic(w, x, statistic="geary") < 1
     assert permutation_test(w, x, selected_tail="greater") < 0.05
+    assert permutation_test(w, x, selected_tail="greater", use_vmap=False) < 0.05
 
     # case without expected
     ps = []
@@ -20,6 +21,9 @@ def test_geary():
         x = np.random.randn(100)
         p = permutation_test(w, x, selected_tail="greater")
         ps.append(p)
+        p_no_vmap = permutation_test(w, x, selected_tail="greater", use_vmap=False)
+        ps.append(p_no_vmap)
+
     ps = np.array(ps)
     assert ps.max() >= 0.3
 
@@ -33,6 +37,7 @@ def test_nn():
     x = x.astype(int)
     assert compute_statistic(w, x, statistic="nn") < 0
     assert permutation_test(w, x, statistic="nn", selected_tail="greater") < 0.05
+    assert permutation_test(w, x, statistic="nn", selected_tail="greater", use_vmap=False) < 0.05
 
     # case without expected
     ps = []
@@ -41,5 +46,7 @@ def test_nn():
         x = x.astype(int)
         p = permutation_test(w, x, statistic="nn", selected_tail="greater")
         ps.append(p)
+        p_no_vmap = permutation_test(w, x, statistic="nn", selected_tail="greater", use_vmap=False)
+        ps.append(p_no_vmap)
     ps = np.array(ps)
     assert ps.max() >= 0.3

@@ -368,9 +368,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             squared_l2_sigma = 2 * jnp.einsum(
                 "cij, cjk, clk -> cil", B, qu_vars_diag, B
             )  # (I + A_s) @ qu_vars_diag @ (I + A_s).T
-            # Resymmetrize squared_l2_sigma to avoid numerical errors
-            squared_l2_sigma = (squared_l2_sigma + jnp.transpose(squared_l2_sigma, axes=(0, 2, 1))) / 2
-            eigvals = jax.vmap(jnp.linalg.eig)(squared_l2_sigma)[0].astype(float)
+            eigvals = jax.vmap(jnp.linalg.eigh)(squared_l2_sigma)[0].astype(float)
             _ = self.module.rngs  # Regenerate seed_rng
             normal_samples = jax.random.normal(
                 self.module.seed_rng, shape=(eigvals.shape[0], mc_samples, eigvals.shape[1])

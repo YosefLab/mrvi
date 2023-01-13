@@ -38,7 +38,7 @@ def geary_c(
     return num.sum() / denom
 
 
-# @jax.jit
+@jax.jit
 def nn_statistic(
     w: jnp.ndarray,
     x: jnp.ndarray,

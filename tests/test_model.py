@@ -42,5 +42,6 @@ def test_mrvi():
         15,
         15,
     )
+    print(local_normalized_dists)
     # tests __repr__
     print(model)

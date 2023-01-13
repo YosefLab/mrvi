@@ -364,9 +364,10 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
             sample_index = self.module._get_inference_input(array_dict)["sample_index"]
             A_s = apply_get_A_s(sample_index)
+            B = jnp.expand_dims(jnp.eye(A_s.shape[1]), 0) + A_s
             squared_l2_sigma = 2 * jnp.einsum(
-                "cij, cjk, clk -> cil", A_s, qu_vars_diag, A_s
-            )  # A_s @ qu_vars_diag @ A_s.T
+                "cij, cjk, clk -> cil", B, qu_vars_diag, B
+            )  # (I + A_s) @ qu_vars_diag @ (I + A_s).T
             # Resymmetrize squared_l2_sigma to avoid numerical errors
             squared_l2_sigma = (squared_l2_sigma + jnp.transpose(squared_l2_sigma, axes=(0, 2, 1))) / 2
             eigvals = jax.vmap(jnp.linalg.eig)(squared_l2_sigma)[0].astype(float)

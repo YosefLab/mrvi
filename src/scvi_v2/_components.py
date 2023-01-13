@@ -28,9 +28,9 @@ class Dense(nn.DenseGeneral):
 class ResnetBlock(nn.Module):
     """Resnet block."""
 
-    n_in: int
     n_out: int
     n_hidden: int = 128
+    internal_activation: Callable = nn.relu
     output_activation: Callable = nn.relu
     training: Optional[bool] = None
 
@@ -38,19 +38,21 @@ class ResnetBlock(nn.Module):
     def __call__(self, inputs: NdArray, training: Optional[bool] = None) -> NdArray:  # noqa: D102
         training = nn.merge_param("training", self.training, training)
         h = Dense(self.n_hidden)(inputs)
-        h = nn.BatchNorm(momentum=0.9)(h, use_running_average=not training)
-        h = nn.relu(h)
-        if self.n_in != self.n_hidden:
+        h = nn.LayerNorm()(h)
+        h = self.internal_activation(h)
+        n_in = inputs.shape[-1]
+        if n_in != self.n_hidden:
             h = h + Dense(self.n_hidden)(inputs)
+        else:
+            h = h + inputs
         h = Dense(self.n_out)(h)
-        h = nn.BatchNorm(momentum=0.9)(h, use_running_average=not training)
+        h = nn.LayerNorm()(h)
         return self.output_activation(h)
 
 
 class NormalDistOutputNN(nn.Module):
     """Fully-connected neural net parameterizing a normal distribution."""
 
-    n_in: int
     n_out: int
     n_hidden: int = 128
     n_layers: int = 1
@@ -62,18 +64,17 @@ class NormalDistOutputNN(nn.Module):
         training = nn.merge_param("training", self.training, training)
         h = inputs
         for _ in range(self.n_layers):
-            h = ResnetBlock(n_in=self.n_in, n_out=self.n_hidden)(h, training=training)
+            h = ResnetBlock(n_out=self.n_hidden)(h, training=training)
         mean = Dense(self.n_out)(h)
         scale = nn.Sequential([Dense(self.n_out), nn.softplus])(h)
         return dist.Normal(mean, scale + self.scale_eps)
 
 
-class ConditionalBatchNorm1d(nn.Module):
-    """Batch norm with condition-specific gamma and beta."""
+class ConditionalNormalization(nn.Module):
+    """Condition-specific normalization."""
 
     n_features: int
     n_conditions: int
-    training: Optional[bool] = None
 
     @staticmethod
     def _gamma_initializer() -> jax.nn.initializers.Initializer:
@@ -93,10 +94,8 @@ class ConditionalBatchNorm1d(nn.Module):
         return init
 
     @nn.compact
-    def __call__(self, x: NdArray, condition: NdArray, training: Optional[bool] = None) -> jnp.ndarray:  # noqa: D102
-        training = nn.merge_param("training", self.training, training)
-
-        out = nn.BatchNorm(momentum=0.9, use_bias=False, use_scale=False)(x, use_running_average=not training)
+    def __call__(self, x: NdArray, condition: NdArray) -> jnp.ndarray:  # noqa: D102
+        x = nn.LayerNorm(use_bias=False, use_scale=False)(x)
         cond_int = condition.squeeze(-1).astype(int)
         gamma = nn.Embed(
             self.n_conditions, self.n_features, embedding_init=self._gamma_initializer(), name="gamma_conditional"
@@ -104,7 +103,7 @@ class ConditionalBatchNorm1d(nn.Module):
         beta = nn.Embed(
             self.n_conditions, self.n_features, embedding_init=self._beta_initializer(), name="beta_conditional"
         )(cond_int)
-        out = gamma * out + beta
+        out = gamma * x + beta
 
         return out
 

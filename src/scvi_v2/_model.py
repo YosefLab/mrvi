@@ -1,6 +1,6 @@
 import logging
 from copy import deepcopy
-from typing import List, Optional, Union
+from typing import List, Optional, Tuple, Union
 
 import jax
 import jax.numpy as jnp
@@ -278,7 +278,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
     def compute_cell_scores(
         self,
-        donor_keys: list,
+        donor_keys: List[Tuple],
         adata=None,
         batch_size=256,
         use_vmap: bool = True,

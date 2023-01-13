@@ -1,14 +1,20 @@
-from typing import Union
+from typing import Callable, Union
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 
 
+def simple_reciprocal(w, eps=1e-6):
+    """Convert distances to similarities via a reciprocal."""
+    return 1.0 / (w + eps)
+
+
 @jax.jit
 def geary_c(
     w: jnp.ndarray,
     x: jnp.ndarray,
+    similarity_fn: Callable,
 ):
     """Computes Geary's C statistic from a distance matrix and a vector of values.
 
@@ -18,9 +24,11 @@ def geary_c(
         distance matrix
     x
         vector of continuous values
+    similarity_fn
+        function that converts distances to similarities
     """
     # spatial weights are higher for closer points
-    w_ = 1.0 / (w + 1e-6)
+    w_ = simple_reciprocal(w)
     w_ -= jnp.diag(jnp.diag(w_))
     num = x[:, None] - x[None, :]
     num = (num**2) * w_
@@ -70,6 +78,7 @@ def compute_statistic(
     distances: Union[np.ndarray, jnp.ndarray],
     node_colors: Union[np.ndarray, jnp.ndarray],
     statistic: str = "geary",
+    similarity_fn: Callable = simple_reciprocal,
 ):
     """Computes a statistic for guided analyses.
 
@@ -81,17 +90,21 @@ def compute_statistic(
         observed covariate values for each observation
     statistic
         one of "geary" or "nn"
+    similarity_fn
+        function used to compute spatial weights for Geary's C statistic
     """
     distances_ = jnp.array(distances)
     node_colors_ = jnp.array(node_colors)
 
+    stat_fn_kwargs = {}
     if statistic == "geary":
         stat_fn = geary_c
+        stat_fn_kwargs["similarity_fn"] = similarity_fn
     elif statistic == "nn":
         stat_fn = nn_statistic
     assert stat_fn is not None
 
-    t_obs = stat_fn(distances_, node_colors_)
+    t_obs = stat_fn(distances_, node_colors_, **stat_fn_kwargs)
     return t_obs
 
 

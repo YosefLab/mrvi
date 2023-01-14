@@ -5,8 +5,8 @@ from typing import List, Optional, Tuple, Union
 import jax
 import jax.numpy as jnp
 import numpy as np
-import xarray as xr
 import pandas as pd
+import xarray as xr
 from anndata import AnnData
 from scvi import REGISTRY_KEYS
 from scvi.data import AnnDataManager
@@ -191,8 +191,12 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             pairwise_dists[i, :, :] = d_
         dists_data_array = xr.DataArray(
             pairwise_dists,
-            dims=["obs_name", "sample", "sample"],
-            coords=representations.coords,
+            dims=["obs_name", "sample_x", "sample_y"],
+            coords={
+                "obs_name": representations.obs_name.values,
+                "sample_x": representations.sample.values,
+                "sample_y": representations.sample.values,
+            },
             name="sample_distances",
         )
         return dists_data_array
@@ -290,6 +294,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         batch_size: int = 256,
         normalize_distances: bool = False,
         use_vmap: bool = True,
+        groupby: Optional[str] = None,
     ) -> xr.DataArray:
         """
         Computes the local sample distances of the cells in the adata object.
@@ -308,9 +313,28 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         use_vmap
             Whether to use vmap for computing the local sample representation.
             Disabling vmap can be useful if running out of memory on a GPU.
+        groupby
+            If provided, computes the local sample distances for each group.
         """
-        reps_data_array = self.get_local_sample_representation(adata=adata, batch_size=batch_size, use_vmap=use_vmap)
-        dists_data_array = self.compute_distance_matrix_from_representations(reps_data_array)
+        if groupby is not None:
+            adata = self.adata if adata is None else adata
+            cell_groups = adata.obs[groupby]
+            groups = cell_groups.unique()
+            dists_data_array = []
+            for group in groups:
+                group_adata = adata[cell_groups == group]
+                group_reps = self.get_local_sample_representation(
+                    adata=group_adata, batch_size=batch_size, use_vmap=use_vmap
+                )
+                group_dists = self.compute_distance_matrix_from_representations(group_reps)
+                group_mean_dist = group_dists.mean("obs_name").expand_dims({groupby: [group]}, axis=0)
+                dists_data_array.append(group_mean_dist)
+            dists_data_array = xr.concat(dists_data_array, dim=groupby)
+        else:
+            reps_data_array = self.get_local_sample_representation(
+                adata=adata, batch_size=batch_size, use_vmap=use_vmap
+            )
+            dists_data_array = self.compute_distance_matrix_from_representations(reps_data_array)
 
         if normalize_distances:
             local_baseline_means, local_baseline_vars = self._compute_local_baseline_dists(adata)

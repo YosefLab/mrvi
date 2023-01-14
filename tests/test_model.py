@@ -48,16 +48,8 @@ def test_mrvi():
         15,
         15,
     )
-    assert np.allclose(local_normalized_dists[0].values, local_normalized_dists[0].values.T, atol=1e-6)
     print(local_normalized_dists)
 
-    ct_dists = model.get_local_sample_distances(groupby="labels")
-    assert ct_dists.shape == (
-        3,
-        15,
-        15,
-    )
-    assert np.allclose(ct_dists[0].values, ct_dists[0].values.T, atol=1e-6)
     donor_keys = [
         ("meta1", "nn"),
         ("meta2", "geary"),

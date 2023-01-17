@@ -27,7 +27,7 @@ DEFAULT_TRAIN_KWARGS = {
     "check_val_every_n_epoch": 1,
     "batch_size": 128,
     "train_size": 0.9,
-    "plan_kwargs": {"lr": 1e-2, "n_epochs_kl_warmup": 400, "max_norm": 20},
+    "plan_kwargs": {"lr": 1e-2, "n_epochs_kl_warmup": 400, "max_norm": 40, "eps": 1e-8, "weight_decay": 1e-8},
 }
 
 

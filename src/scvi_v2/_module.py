@@ -9,7 +9,7 @@ from scvi.distributions import JaxNegativeBinomialMeanDisp as NegativeBinomial
 from scvi.module.base import JaxBaseModuleClass, LossOutput, flax_configure
 
 from ._components import (
-    ConditionalBatchNorm1d,
+    ConditionalNormalization,
     Dense,
     FactorizedEmbedding,
     NormalDistOutputNN,
@@ -106,25 +106,24 @@ class _EncoderXU(nn.Module):
 
     n_latent: int
     n_sample: int
-    n_latent_sample: int
     n_hidden: int
+    n_layers: int = 1
+    activation: Callable = nn.relu
     training: Optional[bool] = None
 
     @nn.compact
     def __call__(self, x: NdArray, sample_covariate: NdArray, training: Optional[bool] = None) -> dist.Normal:
         training = nn.merge_param("training", self.training, training)
-        x_ = jnp.log1p(x)
-        zsample = nn.Embed(self.n_sample, self.n_latent_sample, embedding_init=_normal_initializer)(
+        x_feat = jnp.log1p(x)
+        for _ in range(2):
+            x_feat = Dense(self.n_hidden)(x_feat)
+            x_feat = ConditionalNormalization(self.n_hidden, self.n_sample)(x_feat, sample_covariate, training=training)
+            x_feat = self.activation(x_feat)
+        sample_effect = nn.Embed(self.n_sample, self.n_hidden, embedding_init=_normal_initializer)(
             sample_covariate.squeeze(-1).astype(int)
         )
-
-        x_feat = nn.Sequential([Dense(self.n_hidden), nn.relu])(x_)
-        x_feat = ConditionalBatchNorm1d(self.n_hidden, self.n_sample)(x_feat, sample_covariate, training=training)
-        x_feat = nn.Sequential([Dense(self.n_hidden), nn.relu])(x_feat)
-        x_feat = ConditionalBatchNorm1d(self.n_hidden, self.n_sample)(x_feat, sample_covariate, training=training)
-
-        inputs = jnp.concatenate([x_feat, zsample], axis=-1)
-        return NormalDistOutputNN(self.n_hidden + self.n_latent_sample, self.n_latent)(inputs, training=training)
+        inputs = x_feat + sample_effect
+        return NormalDistOutputNN(self.n_latent, self.n_hidden, self.n_layers)(inputs, training=training)
 
 
 @flax_configure
@@ -135,10 +134,10 @@ class MrVAE(JaxBaseModuleClass):
     n_sample: int
     n_batch: int
     n_continuous_cov: int
-    n_latent: int = 10
-    n_latent_sample: int = 2
+    n_latent: int = 20
     n_factorized_embed_dims: Optional[int] = None
     encoder_n_hidden: int = 128
+    encoder_n_layers: int = 2
     z_u_prior: bool = True
     z_u_prior_scale: float = 1.0
     px_kwargs: Optional[dict] = None
@@ -157,8 +156,6 @@ class MrVAE(JaxBaseModuleClass):
         if self.qu_kwargs is not None:
             qu_kwargs.update(self.qu_kwargs)
 
-        assert self.n_latent_sample != 0
-
         # Generative model
         self.px = _DecoderZX(
             self.n_latent,
@@ -175,10 +172,10 @@ class MrVAE(JaxBaseModuleClass):
 
         # Inference model
         self.qu = _EncoderXU(
-            self.n_latent,
-            self.n_sample,
-            self.n_latent_sample,
-            self.encoder_n_hidden,
+            n_latent=self.n_latent,
+            n_sample=self.n_sample,
+            n_hidden=self.encoder_n_hidden,
+            n_layers=self.encoder_n_layers,
             **qu_kwargs,
         )
 

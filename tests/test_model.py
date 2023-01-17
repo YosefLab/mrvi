@@ -15,16 +15,18 @@ def test_mrvi():
     MrVI.setup_anndata(adata, sample_key="sample", batch_key="batch")
     adata.obs["cont_cov"] = np.random.normal(0, 1, size=adata.shape[0])
     MrVI.setup_anndata(adata, sample_key="sample", batch_key="batch", continuous_covariate_keys=["cont_cov"])
+    n_latent = 10
     model = MrVI(
         adata,
-        n_latent_sample=5,
+        n_latent=n_latent,
     )
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)
     model.is_trained_ = True
     model.history
-    assert model.get_latent_representation().shape == (adata.shape[0], 10)
+    assert model.get_latent_representation().shape == (adata.shape[0], n_latent)
     local_vmap = model.get_local_sample_representation()
-    assert local_vmap.shape == (adata.shape[0], 15, 10)
+
+    assert local_vmap.shape == (adata.shape[0], 15, n_latent)
     local_dist_vmap = model.get_local_sample_distances()["cell"]
     assert local_dist_vmap.shape == (
         adata.shape[0],
@@ -33,7 +35,7 @@ def test_mrvi():
     )
     local_map = model.get_local_sample_representation(use_vmap=False)
     local_dist_map = model.get_local_sample_distances(use_vmap=False)["cell"]
-    assert local_map.shape == (adata.shape[0], 15, 10)
+    assert local_map.shape == (adata.shape[0], 15, n_latent)
     assert local_dist_map.shape == (
         adata.shape[0],
         15,

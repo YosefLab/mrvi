@@ -69,6 +69,14 @@ class TreeExplorer:
         In particular, maps each node id to its (x,y) coordinates in the dendogram plot.
 
         Taken from https://stackoverflow.com/questions/43513698/relation-between-dendrogram-plot-coordinates-and-clusternodes-in-scipy.
+
+        Returns
+        -------
+        dict
+            Dictionary containing the following keys:
+            - nodeids_to_coords: maps each node id to its (x,y) coordinates in the dendogram plot
+            - dend_info: `scipy`'s dendogram info, containing in particular the tree structure
+            coordinates, in `icoord` and `dcoord`.
         """
         dend_info = hc.dendrogram(self.dendogram, no_plot=True)
 

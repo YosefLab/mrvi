@@ -48,7 +48,7 @@ class _DecoderZX(nn.Module):
         z_drop = nn.Dropout(self.dropout_rate)(jax.lax.stop_gradient(z), deterministic=not training)
         batch_covariate = batch_covariate.astype(int).flatten()
         # cells by n_out by n_latent (n_in)
-        A_b = nn.Embed(self.n_batch, self.n_out * self.n_in, embedding_init=_normal_initializer)(
+        A_b = nn.Embed(self.n_batch, self.n_out * self.n_in, embedding_init=_normal_initializer, name="A_b")(
             batch_covariate
         ).reshape(batch_covariate.shape[0], self.n_out, self.n_in)
         if z_drop.ndim == 3:

@@ -28,7 +28,7 @@ DEFAULT_TRAIN_KWARGS = {
     "check_val_every_n_epoch": 1,
     "batch_size": 128,
     "train_size": 0.9,
-    "plan_kwargs": {"lr": 1e-2, "n_epochs_kl_warmup": 400, "max_norm": 20},
+    "plan_kwargs": {"lr": 1e-2, "n_epochs_kl_warmup": 400, "max_norm": 40, "eps": 1e-8, "weight_decay": 1e-8},
 }
 
 
@@ -192,8 +192,12 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             pairwise_dists[i, :, :] = d_
         dists_data_array = xr.DataArray(
             pairwise_dists,
-            dims=["obs_name", "sample", "sample"],
-            coords=representations.coords,
+            dims=["cell_name", "sample_x", "sample_y"],
+            coords={
+                "cell_name": representations.cell_name.values,
+                "sample_x": representations.sample.values,
+                "sample_y": representations.sample.values,
+            },
             name="sample_distances",
         )
         return dists_data_array
@@ -278,8 +282,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         sample_order = self.adata_manager.get_state_registry(MRVI_REGISTRY_KEYS.SAMPLE_KEY).categorical_mapping
         reps_data_array = xr.DataArray(
             reps,
-            dims=["obs_name", "sample", "latent_dim"],
-            coords={"obs_name": adata.obs_names, "sample": sample_order},
+            dims=["cell_name", "sample", "latent_dim"],
+            coords={"cell_name": adata.obs_names, "sample": sample_order},
             name="sample_representation",
         )
 
@@ -291,11 +295,15 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         batch_size: int = 256,
         normalize_distances: bool = False,
         use_vmap: bool = True,
+        groupby: Optional[Union[List[str], str]] = None,
     ) -> xr.DataArray:
         """
-        Computes the local sample distances of the cells in the adata object.
+        Computes local sample distances as `xr.DataArray` or `xr.Dataset`.
 
-        For each cell, it returns a matrix of size (n_sample, n_sample).
+        Computes cell-specific distances between samples, of size (n_sample, n_sample),
+        stored as a Dataset, with variable name `cell`, of size (n_cell, n_sample, n_sample).
+        If in addition, groupby is provided, distances are also aggregated by group.
+        In this case, the group-specific distances via group name key.
 
         Parameters
         ----------
@@ -309,19 +317,49 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         use_vmap
             Whether to use vmap for computing the local sample representation.
             Disabling vmap can be useful if running out of memory on a GPU.
+        groupby
+            List of categorical keys or single key of the anndata that is
+            used to group the cells.
         """
-        reps_data_array = self.get_local_sample_representation(adata=adata, batch_size=batch_size, use_vmap=use_vmap)
-        dists_data_array = self.compute_distance_matrix_from_representations(reps_data_array)
-
+        reps_data = self.get_local_sample_representation(adata=adata, batch_size=batch_size, use_vmap=use_vmap)
+        cell_dists_data = self.compute_distance_matrix_from_representations(reps_data)
         if normalize_distances:
             local_baseline_means, local_baseline_vars = self._compute_local_baseline_dists(adata)
             local_baseline_means = local_baseline_means.reshape(-1, 1, 1)
             local_baseline_vars = local_baseline_vars.reshape(-1, 1, 1)
-            dists_data_array = np.clip(dists_data_array - local_baseline_means, a_min=0, a_max=None) / (
+            cell_dists_data = np.clip(cell_dists_data - local_baseline_means, a_min=0, a_max=None) / (
                 local_baseline_vars**0.5
             )
+        if groupby is not None:
+            new_arrays = {}
+            if not isinstance(groupby, list):
+                groupby = [groupby]
+            for groupby_key in groupby:
+                if "cell_name" in groupby:
+                    raise ValueError("`cell_name` is an ambiguous dimension name. Please rename the dimension name.")
+                adata = self.adata if adata is None else adata
+                cell_groups = adata.obs[groupby_key]
+                groups = cell_groups.unique()
+                group_dists = []
+                new_dimension_key = (
+                    f"{groupby_key}_name"  # needs to be different from groupby_key name to construct a valid dataset
+                )
 
-        return dists_data_array
+                # Computing the mean distance matrix for each group
+                for group in groups:
+                    group_mask = (cell_groups == group).values
+                    group_dist = cell_dists_data[group_mask]
+                    group_dists.append(group_dist.mean("cell_name").expand_dims({new_dimension_key: [group]}, axis=0))
+                group_dist_data = xr.concat(group_dists, dim=new_dimension_key)
+                new_arrays[groupby_key] = group_dist_data
+        else:
+            new_arrays = {}
+        return xr.Dataset(
+            {
+                "cell": cell_dists_data,
+                **new_arrays,
+            }
+        )
 
     def _compute_local_baseline_dists(
         self, adata: Optional[AnnData], mc_samples: int = 1000, batch_size: int = 256

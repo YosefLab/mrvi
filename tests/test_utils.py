@@ -61,7 +61,7 @@ def test_hierarchy():
 
     tree_explorer = TreeExplorer(Z)
 
-    root_id = tree_explorer.get_root_id()
+    root_id = tree_explorer.root_id
     left_leaves = tree_explorer.get_left_leaves(root_id)
     right_leaves = tree_explorer.get_right_leaves(root_id)
     gt_left_leaves = {0, 1, 2}
@@ -69,3 +69,5 @@ def test_hierarchy():
     possible_cdt_1 = (set(left_leaves) == gt_left_leaves) and (set(right_leaves) == gt_right_leaves)
     possible_cdt_2 = (set(left_leaves) == gt_right_leaves) and (set(right_leaves) == gt_left_leaves)
     assert possible_cdt_1 or possible_cdt_2
+
+    tree_explorer.compute_tree_coords()

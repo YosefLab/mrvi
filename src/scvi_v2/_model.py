@@ -300,10 +300,9 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         Computes local sample distances as `xr.DataArray` or `xr.Dataset`.
 
         Computes cell-specific distances between samples, of size (n_sample, n_sample),
-        stored as a DataArray of size (n_cell, n_sample, n_sample).
+        stored as a Dataset, with variable name `cell`, of size (n_cell, n_sample, n_sample).
         If in addition, groupby is provided, distances are also aggregated by group.
-        In this case, this function returns a Dataset, and the cell-specific distances
-        (resp. group-specific distances) can be accessed via the "cell" (resp. group name) key.
+        In this case, the group-specific distances via group name key.
 
         Parameters
         ----------
@@ -330,9 +329,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             cell_dists_data = np.clip(cell_dists_data - local_baseline_means, a_min=0, a_max=None) / (
                 local_baseline_vars**0.5
             )
-        if groupby is None:
-            return cell_dists_data
-        else:
+        if groupby is not None:
             new_arrays = {}
             if not isinstance(groupby, list):
                 groupby = [groupby]
@@ -354,6 +351,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                     group_dists.append(group_dist.mean("cell_name").expand_dims({new_dimension_key: [group]}, axis=0))
                 group_dist_data = xr.concat(group_dists, dim=new_dimension_key)
                 new_arrays[groupby_key] = group_dist_data
+        else:
+            new_arrays = {}
         return xr.Dataset(
             {
                 "cell": cell_dists_data,

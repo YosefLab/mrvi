@@ -25,14 +25,14 @@ def test_mrvi():
     assert model.get_latent_representation().shape == (adata.shape[0], 10)
     local_vmap = model.get_local_sample_representation()
     assert local_vmap.shape == (adata.shape[0], 15, 10)
-    local_dist_vmap = model.get_local_sample_distances()
+    local_dist_vmap = model.get_local_sample_distances()["cell"]
     assert local_dist_vmap.shape == (
         adata.shape[0],
         15,
         15,
     )
     local_map = model.get_local_sample_representation(use_vmap=False)
-    local_dist_map = model.get_local_sample_distances(use_vmap=False)
+    local_dist_map = model.get_local_sample_distances(use_vmap=False)["cell"]
     assert local_map.shape == (adata.shape[0], 15, 10)
     assert local_dist_map.shape == (
         adata.shape[0],
@@ -42,7 +42,7 @@ def test_mrvi():
     assert np.allclose(local_map, local_vmap, atol=1e-6)
     assert np.allclose(local_dist_map, local_dist_vmap, atol=1e-6)
 
-    local_normalized_dists = model.get_local_sample_distances(normalize_distances=True)
+    local_normalized_dists = model.get_local_sample_distances(normalize_distances=True)["cell"]
     assert local_normalized_dists.shape == (
         adata.shape[0],
         15,

@@ -5,8 +5,8 @@ from typing import List, Optional, Tuple, Union
 import jax
 import jax.numpy as jnp
 import numpy as np
-import xarray as xr
 import pandas as pd
+import xarray as xr
 from anndata import AnnData
 from scvi import REGISTRY_KEYS
 from scvi.data import AnnDataManager
@@ -17,6 +17,7 @@ from tqdm import tqdm
 
 from ._constants import MRVI_REGISTRY_KEYS
 from ._module import MrVAE
+from ._tree_utils import compute_dendrogram_from_distance_matrix
 from ._utils import compute_statistic, permutation_test
 
 logger = logging.getLogger(__name__)
@@ -499,3 +500,32 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         columns = [prepand + key[0] for key in donor_keys]
         sigs = pd.DataFrame(sigs, columns=columns)
         return sigs
+
+    def compute_sample_stratification(
+        adata: AnnData,
+        distance_matrices: xr.DataArray,
+        linkage_method: str = "ward",
+        symmmetry_inconsistency_thresh: float = 0.1,
+    ):
+        """Computes sample stratification based on distance matrices.
+
+        Performs the following steps for each distance matrix:
+        1. Performs hierarchical clustering using `scipy`.
+        2. Optionally, computes top differentially expressed genes for the first tree branchings.
+        3. Optionally, plot the distance matrices and the top DE genes.
+        """
+        if distance_matrices.ndim == 2:
+            distance_matrices = distance_matrices[None, :, :]
+        for dmat in distance_matrices:
+            if dmat.shape[0] != dmat.shape[1]:
+                raise ValueError("Distance matrices must be square.")
+            sym_inconsistency = np.abs(dmat - dmat.T).max()
+            if sym_inconsistency > symmmetry_inconsistency_thresh:
+                raise ValueError(
+                    f"Distance matrix is not symmetric. Maximum symmetry inconsistency is {sym_inconsistency}."
+                )
+            compute_dendrogram_from_distance_matrix(
+                distance_matrix=dmat,
+                linkage_method=linkage_method,
+                symmetrize=True,
+            )

@@ -76,6 +76,11 @@ def test_mrvi():
     )
     assert np.allclose(ct_dists[0].values, ct_dists[0].values.T, atol=1e-6)
 
+    model.compute_sample_stratification(
+        dists,
+        var_name="label_2",
+    )
+
     donor_keys = [
         ("meta1", "nn"),
         ("meta2", "geary"),

@@ -17,7 +17,7 @@ from tqdm import tqdm
 
 from ._constants import MRVI_REGISTRY_KEYS
 from ._module import MrVAE
-from ._tree_utils import compute_dendrogram_from_distance_matrix
+from ._tree_utils import TreeExplorer, compute_dendrogram_from_distance_matrix
 from ._utils import compute_statistic, permutation_test
 
 logger = logging.getLogger(__name__)
@@ -540,9 +540,12 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         return sigs
 
     def compute_sample_stratification(
-        adata: AnnData,
-        distance_matrices: xr.DataArray,
-        linkage_method: str = "ward",
+        self,
+        distances_dataset: xr.Dataset,
+        var_name: str,
+        adata: Optional[AnnData] = None,
+        linkage_method: str = "complete",
+        n_top_branchings: int = 5,
         symmmetry_inconsistency_thresh: float = 0.1,
     ):
         """Computes sample stratification based on distance matrices.
@@ -551,19 +554,57 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         1. Performs hierarchical clustering using `scipy`.
         2. Optionally, computes top differentially expressed genes for the first tree branchings.
         3. Optionally, plot the distance matrices and the top DE genes.
+
+        Parameters
+        ----------
+        distance_dataset :
+            Dataset containing distance matrices.
+        var_name :
+            Name of the variable mapping to the distance matrices of interest.
+        adata :
+            Anndata used to compute DE genes.
+        linkage_method :
+            Linkage method used to cluster the distance matrices.
+            See `scipy.cluster.hierarchy.linkage` for more details.
+        n_top_branchings :
+            Number of top branchings to consider when computing DE genes.
+        symmmetry_inconsistency_thresh :
+            Maximum allowed symmetry inconsistency between distance matrices.
         """
-        if distance_matrices.ndim == 2:
-            distance_matrices = distance_matrices[None, :, :]
+        adata = self.adata if adata is None else adata
+
+        distance_matrices = distances_dataset[var_name]
+        assert (distance_matrices.ndim == 3) and isinstance(
+            distance_matrices, xr.DataArray
+        ), "distance_matrices must be a xr.DataArray with 3 dimensions"
+        if var_name not in adata.obs.columns:
+            raise ValueError(f"Impossible to find {var_name} in adata.obs.columns")
+
+        cell_groups = adata.obs[var_name]
         for dmat in distance_matrices:
-            if dmat.shape[0] != dmat.shape[1]:
-                raise ValueError("Distance matrices must be square.")
-            sym_inconsistency = np.abs(dmat - dmat.T).max()
-            if sym_inconsistency > symmmetry_inconsistency_thresh:
-                raise ValueError(
-                    f"Distance matrix is not symmetric. Maximum symmetry inconsistency is {sym_inconsistency}."
-                )
-            compute_dendrogram_from_distance_matrix(
+            group_name = dmat.coords[f"{var_name}_name"].item()
+            adata_sub = adata[cell_groups == group_name].copy()
+
+            _check_distance_mat_valid(dmat, symmmetry_inconsistency_thresh=symmmetry_inconsistency_thresh)
+            Z = compute_dendrogram_from_distance_matrix(
                 distance_matrix=dmat,
                 linkage_method=linkage_method,
                 symmetrize=True,
             )
+            assert (dmat.coords["sample_x"].values == dmat.coords["sample_y"].values).all()
+            leaves_labels = dmat.coords["sample_x"].values
+            treeexp = TreeExplorer(
+                dendrogram=Z,
+                leaves_labels=leaves_labels,
+            )
+            nodeid_to_samples = treeexp.get_tree_splits(max_depth=n_top_branchings)
+            for nodeid, (left_samples, right_samples) in nodeid_to_samples.items():
+                pass
+
+
+def _check_distance_mat_valid(dmat, symmmetry_inconsistency_thresh: float = 0.1):
+    if dmat.shape[0] != dmat.shape[1]:
+        raise ValueError("Distance matrices must be square.")
+    sym_inconsistency = np.abs(dmat - dmat.T).max()
+    if sym_inconsistency > symmmetry_inconsistency_thresh:
+        raise ValueError(f"Distance matrix is not symmetric. Maximum symmetry inconsistency is {sym_inconsistency}.")

@@ -1,4 +1,5 @@
 import numpy as np
+import pandas as pd
 from sklearn.metrics import pairwise_distances
 
 from scvi_v2._tree_utils import TreeExplorer, compute_dendrogram_from_distance_matrix
@@ -71,4 +72,18 @@ def test_hierarchy():
     assert possible_cdt_1 or possible_cdt_2
 
     tree_explorer.compute_tree_coords()
+    # tree_explorer.simple_plot()
+
+    leaves_colors = pd.DataFrame(
+        {
+            "color1": ["case", "case", "case", "control", "control", "control"],
+            "color2": np.random.randn(6),
+        },
+        index=leaves_names,
+    )
+    tree_explorer = TreeExplorer(
+        Z,
+        leaves_labels=leaves_names,
+        leaves_metadata=leaves_colors,
+    )
     tree_explorer.simple_plot()

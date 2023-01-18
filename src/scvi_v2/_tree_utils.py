@@ -2,7 +2,10 @@ from typing import Optional, Union
 
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import xarray as xr
+from matplotlib.colors import rgb2hex
+from matplotlib.patches import Rectangle
 from scipy.cluster import hierarchy as hc
 from scipy.spatial.distance import squareform
 
@@ -14,12 +17,19 @@ class TreeExplorer:
         self,
         dendrogram: np.ndarray,
         leaves_labels: Optional[np.ndarray] = None,
+        leaves_metadata: Optional[pd.DataFrame] = None,
     ):
         self.dendrogram = dendrogram
         self.n_points_total = dendrogram.shape[0] + 1
+
         self.leaves_labels = np.array(leaves_labels) if leaves_labels is not None else np.arange(self.n_points_total)
         self.node_labels = None
         self.init_node_labels()
+
+        self.leaves_metadata = leaves_metadata
+        self.leaves_colors = None
+        self.init_leaves_colors()
+
         self._check_dendrogram_valid()
 
     def init_node_labels(self):
@@ -36,6 +46,33 @@ class TreeExplorer:
                 ),
             ]
         )
+
+    def init_leaves_colors(self):
+        """Initializes leaves colors."""
+
+        def _get_colors_from_categorical(x):
+            return np.array([rgb2hex(plt.cm.tab10(i)) for i in x])
+
+        def _get_colors_from_continuous(x):
+            return np.array([rgb2hex(plt.cm.viridis(i)) for i in x])
+
+        if self.leaves_metadata is None:
+            return
+
+        dtypes = self.leaves_metadata.dtypes
+        self.leaves_colors = self.leaves_metadata.copy()
+        for col in self.leaves_metadata.columns:
+            if dtypes[col] == "object":
+                cats = self.leaves_metadata[col].astype("category").cat.codes
+                colors = _get_colors_from_categorical(cats)
+            elif dtypes[col] == "category":
+                colors = _get_colors_from_continuous(self.leaves_metadata[col])
+            else:
+                scales = (self.leaves_metadata[col] - self.leaves_metadata[col].min()) / (
+                    self.leaves_metadata[col].max() - self.leaves_metadata[col].min()
+                )
+                colors = _get_colors_from_continuous(scales)
+            self.leaves_colors.loc[:, col] = colors
 
     def get_children(self, node_id):
         """Computes list of leaves under a node."""
@@ -166,6 +203,9 @@ class TreeExplorer:
         """Simple plot of the dendrogram."""
         coords = self.compute_tree_coords()
         fig, ax = plt.subplots()
+        ax = plt.gca()
+        # ax.set_aspect(1.0)
+
         d_info = coords["dend_info"]
         node_coords = coords["nodeids_to_coords"]
 
@@ -185,7 +225,33 @@ class TreeExplorer:
         for node_id, (x, y) in annotated_node_coords.items():
             ax.plot(x, y, "ro")
             ax.annotate(str(node_id), (x, y), xytext=(0, -8), textcoords="offset points", va="top", ha="center")
-        plt.axis("off")
+
+        # Plotting leaves colors
+        x_square_size = 10.0
+        y_square_size = 2.5
+        ylevel = -6.0
+        if self.leaves_colors is not None:
+            annotated_node_coords = {
+                node_name: node_coord
+                for node_name, node_coord in annotated_node_coords.items()
+                if node_name in self.leaves_colors.index
+            }
+            for colorname in self.leaves_colors.columns:
+                for node_id, (x, _) in annotated_node_coords.items():
+                    node_color = self.leaves_colors.loc[node_id, colorname]
+                    xpos = x - x_square_size / 2
+                    ypos = ylevel
+                    ax.add_patch(
+                        Rectangle(
+                            xy=(xpos, ypos),
+                            width=x_square_size,
+                            height=y_square_size,
+                            facecolor=node_color,
+                            edgecolor="black",
+                        )
+                    )
+                ylevel -= y_square_size + 1.0
+        # plt.axis("off")
         return fig, ax
 
 

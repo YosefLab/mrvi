@@ -55,11 +55,11 @@ def test_nn():
 
 def test_hierarchy():
     points = np.array([-2, -2.5, -2.1, 2.51, 2.5, 3]).reshape(-1, 1)
-
     Z = compute_dendrogram_from_distance_matrix(pairwise_distances(points))
     assert Z.shape == (5, 4)
 
-    tree_explorer = TreeExplorer(Z)
+    leaves_names = [f"leaf_{i}" for i in range(6)]
+    tree_explorer = TreeExplorer(Z, leaves_labels=leaves_names)
 
     root_id = tree_explorer.root_id
     left_leaves = tree_explorer.get_left_leaves(root_id)
@@ -71,3 +71,4 @@ def test_hierarchy():
     assert possible_cdt_1 or possible_cdt_2
 
     tree_explorer.compute_tree_coords()
+    tree_explorer.simple_plot()

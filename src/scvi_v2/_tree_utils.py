@@ -1,5 +1,6 @@
-from typing import Union
+from typing import Optional, Union
 
+import matplotlib.pyplot as plt
 import numpy as np
 import xarray as xr
 from scipy.cluster import hierarchy as hc
@@ -11,11 +12,30 @@ class TreeExplorer:
 
     def __init__(
         self,
-        dendrogram,
+        dendrogram: np.ndarray,
+        leaves_labels: Optional[np.ndarray] = None,
     ):
         self.dendrogram = dendrogram
         self.n_points_total = dendrogram.shape[0] + 1
+        self.leaves_labels = np.array(leaves_labels) if leaves_labels is not None else np.arange(self.n_points_total)
+        self.node_labels = None
+        self.init_node_labels()
         self._check_dendrogram_valid()
+
+    def init_node_labels(self):
+        """Initializes node labels."""
+        assert self.leaves_labels.shape[0] == self.n_points_total
+        self.node_labels = np.concatenate(
+            [
+                self.leaves_labels,
+                np.array(
+                    [
+                        f"node_{i}"
+                        for i in range(self.n_points_total, self.dendrogram.shape[0] + self.n_points_total + 1)
+                    ]
+                ),
+            ]
+        )
 
     def get_children(self, node_id):
         """Computes list of leaves under a node."""
@@ -26,13 +46,21 @@ class TreeExplorer:
         right_children = self.dendrogram[im, 1]
         return self.get_children(left_children) + self.get_children(right_children)
 
+    def get_partial_leaves(self, node_id, which):
+        """Computes list of leaves under the left or right child of a node."""
+        assert which in ["left", "right"]
+        idx = 0 if which == "left" else 1
+        leaves_nodeids = self.get_children(self.dendrogram[node_id - self.n_points_total, idx])
+        leaves_nodeids = self._check_indices_valid(leaves_nodeids)
+        return leaves_nodeids
+
     def get_left_leaves(self, node_id):
         """Computes list of leaves under the left child of a node."""
-        return self.get_children(self.dendrogram[node_id - self.n_points_total, 0])
+        return self.get_partial_leaves(node_id, "left")
 
     def get_right_leaves(self, node_id):
         """Computes list of leaves under the right child of a node."""
-        return self.get_children(self.dendrogram[node_id - self.n_points_total, 1])
+        return self.get_partial_leaves(node_id, "right")
 
     def get_tree_splits(self, max_depth=5):
         """Computes left and right children of each node in the tree starting from the root."""
@@ -60,6 +88,18 @@ class TreeExplorer:
         necessary_condition = self.dendrogram.shape[1] == 4
         if not necessary_condition:
             raise ValueError("Dendrogram must have 4 columns. This is not the case for the dendrogram provided.")
+
+    @staticmethod
+    def _check_indices_valid(indices):
+        indices_int = np.array(indices)
+        indices_int = indices_int.astype(int)
+        if not np.all(indices_int == indices):
+            raise ValueError("Indices must be integers.")
+        return indices_int
+
+    def node_name(self, nodeid):
+        """Returns the name of a node."""
+        return self.node_labels[nodeid]
 
     def compute_tree_coords(
         self,
@@ -118,6 +158,35 @@ class TreeExplorer:
             "nodeids_to_coords": nodeids_to_coords,
             "dend_info": dend_info,
         }
+
+    def simple_plot(
+        self,
+        use_ids_as_labels=False,
+    ):
+        """Simple plot of the dendrogram."""
+        coords = self.compute_tree_coords()
+        fig, ax = plt.subplots()
+        d_info = coords["dend_info"]
+        node_coords = coords["nodeids_to_coords"]
+
+        # provide annotations to the leaves
+        if use_ids_as_labels:
+            annotated_node_coords = node_coords
+        else:
+            annotated_node_coords = {}
+            for node_id, node_coord in node_coords.items():
+                new_node_name = self.node_name(node_id)
+                annotated_node_coords[new_node_name] = node_coord
+
+        # Plotting tree branches
+        for i in range(len(d_info["icoord"])):
+            plt.plot(d_info["icoord"][i], d_info["dcoord"][i], "k-")
+        # Plotting nodes
+        for node_id, (x, y) in annotated_node_coords.items():
+            ax.plot(x, y, "ro")
+            ax.annotate(str(node_id), (x, y), xytext=(0, -8), textcoords="offset points", va="top", ha="center")
+        plt.axis("off")
+        return fig, ax
 
 
 def compute_dendrogram_from_distance_matrix(

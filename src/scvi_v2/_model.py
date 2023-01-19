@@ -662,14 +662,18 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             de_probs = np.mean(np.abs(lfc_dist) > delta, axis=0)
             lfc_means = np.mean(lfc_dist, axis=0)
             lfc_medians = np.median(lfc_dist, axis=0)
-            results = pd.DataFrame(
-                {
-                    "de_prob": de_probs,
-                    "lfc_mean": lfc_means,
-                    "lfc_median": lfc_medians,
-                    "gene_name": self.adata.var_names,
-                }
-            ).set_index("gene_name")
+            results = (
+                pd.DataFrame(
+                    {
+                        "de_prob": de_probs,
+                        "lfc_mean": lfc_means,
+                        "lfc_median": lfc_medians,
+                        "gene_name": self.adata.var_names,
+                    }
+                )
+                .set_index("gene_name")
+                .sort_values("de_prob", ascending=False)
+            )
             return results
 
     def compute_sample_stratification(

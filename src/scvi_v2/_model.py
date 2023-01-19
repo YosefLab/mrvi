@@ -539,6 +539,11 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         sigs = pd.DataFrame(sigs, columns=columns)
         return sigs
 
+    @property
+    def original_donor_key(self):
+        """Original donor key used for training the model."""
+        return self.adata_manager.registry["setup_args"]["sample_key"]
+
     def differential_expression(
         self,
         adata: AnnData,
@@ -570,12 +575,19 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             Set of samples to use as query.
         """
         mc_samples_per_obs = np.minimum((mc_samples_total // adata.n_obs), 1)
-        n_passes_per_obs = np.maximum((mc_samples_per_obs // max_mc_samples_per_pass), 1)
+        if mc_samples_per_obs >= max_mc_samples_per_pass:
+            n_passes_per_obs = np.maximum((mc_samples_per_obs // max_mc_samples_per_pass), 1)
+            mc_samples_per_obs = max_mc_samples_per_pass
+        else:
+            n_passes_per_obs = 1
+
         self._check_if_trained(warn=False)
         adata = self._validate_anndata(adata)
         scdl = self._make_data_loader(adata=adata, batch_size=batch_size, iter_ndarray=True)
-        samples_a_ = np.array(self.donor_info.loc[samples_a, MRVI_REGISTRY_KEYS.SAMPLE_KEY])
-        samples_b_ = np.array(self.donor_info.loc[samples_b, MRVI_REGISTRY_KEYS.SAMPLE_KEY])
+
+        donor_mapper = self.donor_info.reset_index().set_index(self.original_donor_key)
+        samples_idx_a_ = np.array(donor_mapper.loc[samples_a, "_scvi_sample"])
+        samples_idx_b_ = np.array(donor_mapper.loc[samples_b, "_scvi_sample"])
 
         vars_in = {"params": self.module.params, **self.module.state}
         rngs = self.module.rngs
@@ -606,7 +618,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 batch_index=batch_index,
                 cf_sample=cf_sample,
                 continuous_covs=continuous_covs,
-                mc_samples=max_mc_samples_per_pass,
+                mc_samples=mc_samples_per_obs,
             )
 
         @jax.jit
@@ -627,24 +639,26 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
         ha_samples = []
         hb_samples = []
+
         for array_dict in tqdm(scdl):
             n_cells = array_dict[REGISTRY_KEYS.X_KEY].shape[0]
             inputs = _get_all_inputs(
                 array_dict,
             )
-            cf_sample_a = np.broadcast_to(samples_a_[:, None, None], (samples_a_.shape[0], n_cells, 1))
-            cf_sample_b = np.broadcast_to(samples_b_[:, None, None], (samples_b_.shape[0], n_cells, 1))
+            cf_sample_a = np.broadcast_to(samples_idx_a_[:, None, None], (samples_idx_a_.shape[0], n_cells, 1))
+            cf_sample_b = np.broadcast_to(samples_idx_b_[:, None, None], (samples_idx_b_.shape[0], n_cells, 1))
             for _ in range(n_passes_per_obs):
                 _ha = get_hs(inputs, cf_sample_a)
                 _hb = get_hs(inputs, cf_sample_b)
 
                 # shapes (n_samples_x, max_mc_samples_per_pass, n_cells, n_vars)
                 ha_samples.append(
-                    np.asarray(jax.device_put(_ha.reshape((samples_a_.shape[0], -1, self.summary_stats.n_vars))))
+                    np.asarray(jax.device_put(_ha.reshape((samples_idx_a_.shape[0], -1, self.summary_stats.n_vars))))
                 )
                 hb_samples.append(
-                    np.asarray(jax.device_put(_hb.reshape((samples_b_.shape[0], -1, self.summary_stats.n_vars))))
+                    np.asarray(jax.device_put(_hb.reshape((samples_idx_b_.shape[0], -1, self.summary_stats.n_vars))))
                 )
+                print(ha_samples[-1].shape)
         ha_samples = np.concatenate(ha_samples, axis=1)
         hb_samples = np.concatenate(hb_samples, axis=1)
 

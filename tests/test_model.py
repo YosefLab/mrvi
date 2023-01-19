@@ -30,6 +30,14 @@ def test_mrvi():
         adata_label1,
         samples_a=[0, 1],
         samples_b=[2, 3],
+        return_dist=True,
+    )
+
+    model.differential_expression(
+        adata_label1,
+        samples_a=[0, 1],
+        samples_b=[0, 1],
+        return_dist=False,
     )
 
     local_vmap = model.get_local_sample_representation()

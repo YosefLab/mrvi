@@ -135,8 +135,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         indices=None,
         batch_size: Optional[int] = None,
         give_z: bool = False,
-        give_mean: bool = True,
-        n_samples: Optional[int] = None,
     ) -> np.ndarray:
         """
         Computes the latent representation of the data.
@@ -151,11 +149,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             Batch size to use for computing the latent representation.
         give_z
             Whether to return the z latent representation or the u latent representation.
-        give_mean
-            Whether to return the mean of the latent representation or the samples.
-        n_samples
-            Number of posterior samples to produce per cell. Only applies when
-            `give_mean` is False.
 
         Returns
         -------
@@ -167,21 +160,15 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
         us = []
         zs = []
-        inference_kwargs = {"use_mean": give_mean}
-        concat_dim = 0
-        if n_samples is not None:
-            assert give_mean is False
-            inference_kwargs["mc_samples"] = n_samples
-            concat_dim = 1
-        jit_inference_fn = self.module.get_jit_inference_fn(inference_kwargs=inference_kwargs)
+        jit_inference_fn = self.module.get_jit_inference_fn(inference_kwargs={"use_mean": True})
         for array_dict in tqdm(scdl):
             outputs = jit_inference_fn(self.module.rngs, array_dict)
 
             us.append(outputs["u"])
             zs.append(outputs["z"])
 
-        u = np.array(jax.device_get(jnp.concatenate(us, axis=concat_dim)))
-        z = np.array(jax.device_get(jnp.concatenate(zs, axis=concat_dim)))
+        u = np.array(jax.device_get(jnp.concatenate(us, axis=0)))
+        z = np.array(jax.device_get(jnp.concatenate(zs, axis=0)))
         return z if give_z else u
 
     @staticmethod
@@ -558,12 +545,16 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         samples_a: List[str],
         samples_b: List[str],
         batch_size: int = 128,
-        n_samples_total: int = 10000,
+        mc_samples_total: int = 10000,
+        max_mc_samples_per_pass: int = 50,
     ):
         """Computes differential expression between two sets of samples.
 
         Background on the computation can be found here:
         https://www.overleaf.com/project/63c08ee8d7475a4c8478b1a3.
+        To correct for batch effects, the current approach consists in
+        computing batch-specific LFCs, and then averaging them.
+        Right now, other covariates are not considered.
 
         Parameters
         ----------
@@ -574,12 +565,69 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         samples_b
             Set of samples to use as query.
         """
-        # Compute u posterior samples for both sets of samples
-        us = self.get_latent_representation(
-            adata,
-            batch_size=batch_size,
-            give_z=False,
-        )
+
+        mc_samples_per_obs = np.minimum((mc_samples_total // adata.n_obs), 1)
+        n_passes_per_obs = np.maximum((mc_samples_per_obs // max_mc_samples_per_pass), 1)
+        self._check_if_trained(warn=False)
+        adata = self._validate_anndata(adata)
+        scdl = self._make_data_loader(adata=adata, batch_size=batch_size, iter_ndarray=True)
+        samples_a_ = np.array(self.donor_info.loc[samples_a, MRVI_REGISTRY_KEYS.SAMPLE_KEY])
+        samples_b_ = np.array(self.donor_info.loc[samples_b, MRVI_REGISTRY_KEYS.SAMPLE_KEY])
+
+        vars_in = {"params": self.module.params, **self.module.state}
+        rngs = self.module.rngs
+
+        def _get_all_inputs(
+            inputs,
+        ):
+            x = jnp.array(inputs[REGISTRY_KEYS.X_KEY])
+            sample_index = jnp.array(inputs[MRVI_REGISTRY_KEYS.SAMPLE_KEY])
+            batch_index = jnp.array(inputs[REGISTRY_KEYS.BATCH_KEY])
+            continuous_covs = inputs.get(REGISTRY_KEYS.CONT_COVS_KEY, None)
+            if continuous_covs is not None:
+                continuous_covs = jnp.array(continuous_covs)
+            return {
+                "x": x,
+                "sample_index": sample_index,
+                "batch_index": batch_index,
+                "continuous_covs": continuous_covs,
+            }
+
+        def h_inference_fn(x, sample_index, batch_index, cf_sample, continuous_covs):
+            return self.module.apply(
+                vars_in,
+                rngs=rngs,
+                method=self.module.compute_h_from_x,
+                x=x,
+                sample_index=sample_index,
+                batch_index=batch_index,
+                cf_sample=cf_sample,
+                continuous_covs=continuous_covs,
+                mc_samples=max_mc_samples_per_pass,
+            )
+
+        @jax.jit
+        def get_hs(inputs, cf_sample):
+            _h_inference_fn = lambda cf_sample: h_inference_fn(
+                inputs["x"],
+                inputs["sample_index"],
+                inputs["batch_index"],
+                cf_sample,
+                inputs["continuous_covs"],
+            )
+            hs = jax.lax.map(_h_inference_fn, cf_sample)
+            return hs
+
+        for array_dict in tqdm(scdl):
+            n_cells = array_dict[REGISTRY_KEYS.X_KEY].shape[0]
+            inputs = _get_all_inputs(
+                array_dict,
+            )
+            cf_sample_a = np.broadcast_to(samples_a_[:, None, None], (samples_a_.shape[0], n_cells, 1))
+            cf_sample_b = np.broadcast_to(samples_b_[:, None, None], (samples_b_.shape[0], n_cells, 1))
+            for _ in range(n_passes_per_obs):
+                get_hs(inputs, cf_sample_a)
+                get_hs(inputs, cf_sample_b)
 
     def compute_sample_stratification(
         self,

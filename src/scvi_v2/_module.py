@@ -249,3 +249,15 @@ class MrVAE(JaxBaseModuleClass):
             reconstruction_loss=reconstruction_loss,
             kl_local=(kl_u + kl_z),
         )
+
+    def compute_h_from_x(self, x, sample_index, batch_index, cf_sample=None, continuous_covs=None, mc_samples=10):
+        library = 7.0 * jnp.ones_like(sample_index)
+        inference_outputs = self.inference(x, sample_index, mc_samples=mc_samples, cf_sample=cf_sample, use_mean=False)
+        generative_inputs = {
+            "z": inference_outputs["z"],
+            "library": library,
+            "batch_index": batch_index,
+            "continuous_covs": continuous_covs,
+        }
+        generative_outputs = self.generative(**generative_inputs)
+        return generative_outputs["h"]

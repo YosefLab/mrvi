@@ -25,17 +25,12 @@ def test_mrvi():
     model.history
     assert model.get_latent_representation().shape == (adata.shape[0], n_latent)
 
-    us_multisample = model.get_latent_representation(
-        give_mean=False,
-        n_samples=5,
+    adata_label1 = adata[adata.obs["labels"] == "label_0"].copy()
+    model.differential_expression(
+        adata_label1,
+        samples_a=[0, 1],
+        samples_b=[2, 3],
     )
-    assert us_multisample.shape == (5, adata.shape[0], n_latent)
-
-    us_multisample = model.get_latent_representation(
-        give_mean=False,
-        n_samples=1,
-    )
-    assert us_multisample.shape == (1, adata.shape[0], n_latent)
 
     local_vmap = model.get_local_sample_representation()
 

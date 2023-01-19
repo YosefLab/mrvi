@@ -658,7 +658,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 hb_samples.append(
                     np.asarray(jax.device_put(_hb.reshape((samples_idx_b_.shape[0], -1, self.summary_stats.n_vars))))
                 )
-                print(ha_samples[-1].shape)
         ha_samples = np.concatenate(ha_samples, axis=1)
         hb_samples = np.concatenate(hb_samples, axis=1)
 

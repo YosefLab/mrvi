@@ -544,9 +544,13 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         adata: AnnData,
         samples_a: List[str],
         samples_b: List[str],
+        delta: float = 0.5,
+        return_dist: bool = False,
         batch_size: int = 128,
         mc_samples_total: int = 10000,
         max_mc_samples_per_pass: int = 50,
+        eps: float = 1e-4,
+        mc_samples_for_permutation: int = 30000,
     ):
         """Computes differential expression between two sets of samples.
 
@@ -565,7 +569,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         samples_b
             Set of samples to use as query.
         """
-
         mc_samples_per_obs = np.minimum((mc_samples_total // adata.n_obs), 1)
         n_passes_per_obs = np.maximum((mc_samples_per_obs // max_mc_samples_per_pass), 1)
         self._check_if_trained(warn=False)
@@ -616,8 +619,14 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 inputs["continuous_covs"],
             )
             hs = jax.lax.map(_h_inference_fn, cf_sample)
+
+            # convert to pseudocounts
+            hs = hs + eps
+            hs = jnp.log(hs)
             return hs
 
+        ha_samples = []
+        hb_samples = []
         for array_dict in tqdm(scdl):
             n_cells = array_dict[REGISTRY_KEYS.X_KEY].shape[0]
             inputs = _get_all_inputs(
@@ -626,8 +635,42 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             cf_sample_a = np.broadcast_to(samples_a_[:, None, None], (samples_a_.shape[0], n_cells, 1))
             cf_sample_b = np.broadcast_to(samples_b_[:, None, None], (samples_b_.shape[0], n_cells, 1))
             for _ in range(n_passes_per_obs):
-                get_hs(inputs, cf_sample_a)
-                get_hs(inputs, cf_sample_b)
+                _ha = get_hs(inputs, cf_sample_a)
+                _hb = get_hs(inputs, cf_sample_b)
+
+                # shapes (n_samples_x, max_mc_samples_per_pass, n_cells, n_vars)
+                ha_samples.append(
+                    np.asarray(jax.device_put(_ha.reshape((samples_a_.shape[0], -1, self.summary_stats.n_vars))))
+                )
+                hb_samples.append(
+                    np.asarray(jax.device_put(_hb.reshape((samples_b_.shape[0], -1, self.summary_stats.n_vars))))
+                )
+        ha_samples = np.concatenate(ha_samples, axis=1)
+        hb_samples = np.concatenate(hb_samples, axis=1)
+
+        # Giving equal weight to each sample ==> exchangeability assumption
+        ha_samples = ha_samples.reshape((-1, self.summary_stats.n_vars))
+        hb_samples = hb_samples.reshape((-1, self.summary_stats.n_vars))
+
+        # compute LFCs
+        rdm_idx_a = np.random.choice(ha_samples.shape[0], size=mc_samples_for_permutation, replace=True)
+        rdm_idx_b = np.random.choice(hb_samples.shape[0], size=mc_samples_for_permutation, replace=True)
+        lfc_dist = ha_samples[rdm_idx_a, :] - hb_samples[rdm_idx_b, :]
+        if return_dist:
+            return lfc_dist
+        else:
+            de_probs = np.mean(np.abs(lfc_dist) > delta, axis=0)
+            lfc_means = np.mean(lfc_dist, axis=0)
+            lfc_medians = np.median(lfc_dist, axis=0)
+            results = pd.DataFrame(
+                {
+                    "de_prob": de_probs,
+                    "lfc_mean": lfc_means,
+                    "lfc_median": lfc_medians,
+                    "gene_name": self.adata.var_names,
+                }
+            ).set_index("gene_name")
+            return results
 
     def compute_sample_stratification(
         self,

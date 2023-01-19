@@ -24,6 +24,19 @@ def test_mrvi():
     model.is_trained_ = True
     model.history
     assert model.get_latent_representation().shape == (adata.shape[0], n_latent)
+
+    us_multisample = model.get_latent_representation(
+        give_mean=False,
+        n_samples=5,
+    )
+    assert us_multisample.shape == (5, adata.shape[0], n_latent)
+
+    us_multisample = model.get_latent_representation(
+        give_mean=False,
+        n_samples=1,
+    )
+    assert us_multisample.shape == (1, adata.shape[0], n_latent)
+
     local_vmap = model.get_local_sample_representation()
 
     assert local_vmap.shape == (adata.shape[0], 15, n_latent)

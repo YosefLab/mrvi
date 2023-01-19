@@ -135,6 +135,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         indices=None,
         batch_size: Optional[int] = None,
         give_z: bool = False,
+        give_mean: bool = True,
+        n_samples: Optional[int] = None,
     ) -> np.ndarray:
         """
         Computes the latent representation of the data.
@@ -149,6 +151,11 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             Batch size to use for computing the latent representation.
         give_z
             Whether to return the z latent representation or the u latent representation.
+        give_mean
+            Whether to return the mean of the latent representation or the samples.
+        n_samples
+            Number of posterior samples to produce per cell. Only applies when
+            `give_mean` is False.
 
         Returns
         -------
@@ -160,15 +167,21 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
         us = []
         zs = []
-        jit_inference_fn = self.module.get_jit_inference_fn(inference_kwargs={"use_mean": True})
+        inference_kwargs = {"use_mean": give_mean}
+        concat_dim = 0
+        if n_samples is not None:
+            assert give_mean is False
+            inference_kwargs["mc_samples"] = n_samples
+            concat_dim = 1
+        jit_inference_fn = self.module.get_jit_inference_fn(inference_kwargs=inference_kwargs)
         for array_dict in tqdm(scdl):
             outputs = jit_inference_fn(self.module.rngs, array_dict)
 
             us.append(outputs["u"])
             zs.append(outputs["z"])
 
-        u = np.array(jax.device_get(jnp.concatenate(us, axis=0)))
-        z = np.array(jax.device_get(jnp.concatenate(zs, axis=0)))
+        u = np.array(jax.device_get(jnp.concatenate(us, axis=concat_dim)))
+        z = np.array(jax.device_get(jnp.concatenate(zs, axis=concat_dim)))
         return z if give_z else u
 
     @staticmethod
@@ -539,6 +552,35 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         sigs = pd.DataFrame(sigs, columns=columns)
         return sigs
 
+    def differential_expression(
+        self,
+        adata: AnnData,
+        samples_a: List[str],
+        samples_b: List[str],
+        batch_size: int = 128,
+        n_samples_total: int = 10000,
+    ):
+        """Computes differential expression between two sets of samples.
+
+        Background on the computation can be found here:
+        https://www.overleaf.com/project/63c08ee8d7475a4c8478b1a3.
+
+        Parameters
+        ----------
+        adata
+            AnnData object to use.
+        samples_a
+            Set of samples to use as reference.
+        samples_b
+            Set of samples to use as query.
+        """
+        # Compute u posterior samples for both sets of samples
+        us = self.get_latent_representation(
+            adata,
+            batch_size=batch_size,
+            give_z=False,
+        )
+
     def compute_sample_stratification(
         self,
         distances_dataset: xr.Dataset,
@@ -599,6 +641,11 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             )
             nodeid_to_samples = treeexp.get_tree_splits(max_depth=n_top_branchings)
             for nodeid, (left_samples, right_samples) in nodeid_to_samples.items():
+                # lfcs = self.compute_lfcs(
+                #     adata_sub,
+                #     left_samples,
+                #     right_samples,
+                # )
                 pass
 
 

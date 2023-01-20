@@ -25,21 +25,6 @@ def test_mrvi():
     model.history
     assert model.get_latent_representation().shape == (adata.shape[0], n_latent)
 
-    adata_label1 = adata[adata.obs["labels"] == "label_0"].copy()
-    model.differential_expression(
-        adata_label1,
-        samples_a=[0, 1],
-        samples_b=[2, 3],
-        return_dist=True,
-    )
-
-    model.differential_expression(
-        adata_label1,
-        samples_a=[0, 1],
-        samples_b=[0, 1],
-        return_dist=False,
-    )
-
     local_vmap = model.get_local_sample_representation()
 
     assert local_vmap.shape == (adata.shape[0], 15, n_latent)
@@ -103,3 +88,37 @@ def test_mrvi():
 
     # tests __repr__
     print(model)
+
+
+def test_de():
+    adata = synthetic_iid()
+    adata.obs["sample"] = np.random.choice(15, size=adata.shape[0])
+    MrVI.setup_anndata(adata, sample_key="sample", batch_key="batch")
+    n_latent = 10
+    model = MrVI(
+        adata,
+        n_latent=n_latent,
+    )
+    model.train(1, check_val_every_n_epoch=1, train_size=0.5)
+    model.is_trained_ = True
+    model.history
+    assert model.get_latent_representation().shape == (adata.shape[0], n_latent)
+
+    adata_label1 = adata[adata.obs["labels"] == "label_0"].copy()
+    mc_samples_for_permutation = 1000
+    de_dists = model.differential_expression(
+        adata_label1,
+        samples_a=[0, 1],
+        samples_b=[2, 3],
+        return_dist=True,
+        mc_samples_for_permutation=mc_samples_for_permutation,
+    )
+    assert de_dists.shape == (mc_samples_for_permutation, adata_label1.shape[0])
+
+    de_results = model.differential_expression(
+        adata_label1,
+        samples_a=[0, 1],
+        samples_b=[0, 1],
+        return_dist=False,
+    )
+    assert de_results.shape == (adata_label1.shape[0], 3)

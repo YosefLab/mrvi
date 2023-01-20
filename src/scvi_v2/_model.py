@@ -553,8 +553,9 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         batch_size: int = 128,
         mc_samples_total: int = 10000,
         max_mc_samples_per_pass: int = 50,
-        eps: float = 1e-4,
         mc_samples_for_permutation: int = 30000,
+        use_vmap: bool = False,
+        eps: float = 1e-4,
     ):
         """Computes differential expression between two sets of samples.
 
@@ -569,11 +570,32 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         adata
             AnnData object to use.
         samples_a
-            Set of samples to use as reference.
+            Set of samples to characterize the first sample subpopulation.
+            Should be a subset of values associated to the sample key.
         samples_b
-            Set of samples to use as query.
+            Set of samples to characterize the second sample subpopulation.
+            Should be a subset of values associated to the sample key.
+        delta
+            LFC threshold to use for differential expression.
+        return_dist
+            Whether to return the distribution of LFCs.
+            If False, returns a summarized result, contained in a DataFrame.
+        batch_size
+            Batch size to use for inference.
+        mc_samples_total
+            Number of Monte Carlo samples to sample normalized gene expressions, per group of samples.
+        max_mc_samples_per_pass
+            Maximum number of Monte Carlo samples to sample normalized gene expressions at once.
+            Lowering this value can help with memory issues.
+        mc_samples_for_permutation
+            Number of Monte Carlo samples to use to compute the LFC distribution from normalized expression levels.
+        use_vmap
+            Determines which parallelization strategy to use. If True, uses `jax.vmap`, otherwise uses `jax.lax.map`.
+            The former is faster, but requires more memory.
+        eps
+            Pseudo-count to add to the normalized expression levels.
         """
-        mc_samples_per_obs = np.minimum((mc_samples_total // adata.n_obs), 1)
+        mc_samples_per_obs = np.maximum((mc_samples_total // adata.n_obs), 1)
         if mc_samples_per_obs >= max_mc_samples_per_pass:
             n_passes_per_obs = np.maximum((mc_samples_per_obs // max_mc_samples_per_pass), 1)
             mc_samples_per_obs = max_mc_samples_per_pass
@@ -585,8 +607,14 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         scdl = self._make_data_loader(adata=adata, batch_size=batch_size, iter_ndarray=True)
 
         donor_mapper = self.donor_info.reset_index().set_index(self.original_donor_key)
-        samples_idx_a_ = np.array(donor_mapper.loc[samples_a, "_scvi_sample"])
-        samples_idx_b_ = np.array(donor_mapper.loc[samples_b, "_scvi_sample"])
+        try:
+            samples_idx_a_ = np.array(donor_mapper.loc[samples_a, "_scvi_sample"])
+            samples_idx_b_ = np.array(donor_mapper.loc[samples_b, "_scvi_sample"])
+        except KeyError:
+            raise KeyError(
+                "Some samples cannot be found."
+                "Please make sure that the provided samples can be found in {}.".format(self.original_donor_key)
+            )
 
         vars_in = {"params": self.module.params, **self.module.state}
         rngs = self.module.rngs
@@ -629,11 +657,19 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 cf_sample,
                 inputs["continuous_covs"],
             )
-            hs = jax.lax.map(_h_inference_fn, cf_sample)
+            if use_vmap:
+                hs = jax.vmap(h_inference_fn, in_axes=(None, None, None, 0, None), out_axes=0)(
+                    inputs["x"],
+                    inputs["sample_index"],
+                    inputs["batch_index"],
+                    cf_sample,
+                    inputs["continuous_covs"],
+                )
+            else:
+                hs = jax.lax.map(_h_inference_fn, cf_sample)
 
             # convert to pseudocounts
-            hs = hs + eps
-            hs = jnp.log(hs)
+            hs = jnp.log(hs + eps)
             return hs
 
         ha_samples = []

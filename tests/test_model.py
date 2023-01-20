@@ -24,7 +24,6 @@ def test_mrvi():
     model.is_trained_ = True
     model.history
     assert model.get_latent_representation().shape == (adata.shape[0], n_latent)
-
     local_vmap = model.get_local_sample_representation()
 
     assert local_vmap.shape == (adata.shape[0], 15, n_latent)
@@ -113,7 +112,16 @@ def test_de():
         return_dist=True,
         mc_samples_for_permutation=mc_samples_for_permutation,
     )
-    assert de_dists.shape == (mc_samples_for_permutation, adata_label1.shape[0])
+    n_genes = adata_label1.n_vars
+    assert de_dists.shape == (mc_samples_for_permutation, n_genes)
+
+    model.differential_expression(
+        adata_label1,
+        samples_a=[0, 1],
+        samples_b=[0, 1],
+        return_dist=False,
+        use_vmap=True,
+    )
 
     de_results = model.differential_expression(
         adata_label1,
@@ -121,4 +129,4 @@ def test_de():
         samples_b=[0, 1],
         return_dist=False,
     )
-    assert de_results.shape == (adata_label1.shape[0], 3)
+    assert de_results.shape == (n_genes, 3)

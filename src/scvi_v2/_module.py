@@ -70,6 +70,7 @@ class _DecoderUZ(nn.Module):
 
     n_latent: int
     n_sample: int
+    use_nonlinear: bool = False
     n_factorized_embed_dims: Optional[int] = None
     dropout_rate: float = 0.0
     training: Optional[bool] = None
@@ -79,26 +80,31 @@ class _DecoderUZ(nn.Module):
         training = nn.merge_param("training", self.training, training)
         u_drop = nn.Dropout(self.dropout_rate)(jax.lax.stop_gradient(u), deterministic=not training)
         sample_covariate = sample_covariate.astype(int).flatten()
-        # cells by n_latent by n_latent
-        if self.n_factorized_embed_dims is None:
-            A_s = nn.Embed(
-                self.n_sample, self.n_latent * self.n_latent, embedding_init=_normal_initializer, name="A_s"
-            )(sample_covariate)
+        if not self.use_nonlinear:
+            if self.n_factorized_embed_dims is None:
+                A_s = nn.Embed(
+                    self.n_sample, self.n_latent * self.n_latent, embedding_init=_normal_initializer, name="A_s"
+                )(sample_covariate)
+            else:
+                A_s = FactorizedEmbedding(
+                    self.n_sample,
+                    self.n_latent * self.n_latent,
+                    self.n_factorized_embed_dims,
+                    embedding_init=_normal_initializer,
+                    name="A_s",
+                )(sample_covariate)
+            # cells by n_latent by n_latent
+            A_s = A_s.reshape(sample_covariate.shape[0], self.n_latent, self.n_latent)
+            if u_drop.ndim == 3:
+                h2 = jnp.einsum("cgl,bcl->bcg", A_s, u_drop)
+            else:
+                h2 = jnp.einsum("cgl,cl->cg", A_s, u_drop)
+            h3 = nn.Embed(self.n_sample, self.n_latent, embedding_init=_normal_initializer)(sample_covariate)
+            delta = h2 + h3
         else:
-            A_s = FactorizedEmbedding(
-                self.n_sample,
-                self.n_latent * self.n_latent,
-                self.n_factorized_embed_dims,
-                embedding_init=_normal_initializer,
-                name="A_s",
-            )(sample_covariate)
-        A_s = A_s.reshape(sample_covariate.shape[0], self.n_latent, self.n_latent)
-        if u_drop.ndim == 3:
-            h2 = jnp.einsum("cgl,bcl->bcg", A_s, u_drop)
-        else:
-            h2 = jnp.einsum("cgl,cl->cg", A_s, u_drop)
-        h3 = nn.Embed(self.n_sample, self.n_latent, embedding_init=_normal_initializer)(sample_covariate)
-        delta = h2 + h3
+            # A_s output by a non-linear function without an explicit intercept
+            return u
+
         return u + delta
 
 
@@ -135,7 +141,6 @@ class MrVAE(JaxBaseModuleClass):
     n_batch: int
     n_continuous_cov: int
     n_latent: int = 20
-    n_factorized_embed_dims: Optional[int] = None
     encoder_n_hidden: int = 128
     encoder_n_layers: int = 2
     z_u_prior: bool = True
@@ -166,7 +171,6 @@ class MrVAE(JaxBaseModuleClass):
         self.pz = _DecoderUZ(
             self.n_latent,
             self.n_sample,
-            self.n_factorized_embed_dims,
             **pz_kwargs,
         )
 

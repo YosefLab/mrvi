@@ -2,7 +2,7 @@ import jax
 import jax.numpy as jnp
 
 from scvi_v2._components import (
-    ConditionalBatchNorm1d,
+    ConditionalNormalization,
     Dense,
     NormalDistOutputNN,
     ResnetBlock,
@@ -38,6 +38,6 @@ def test_conditionalbatchnorm1d():
     key = jax.random.PRNGKey(0)
     x = jnp.ones((20, 10))
     y = jnp.ones((20, 1))
-    conditionalbatchnorm1d = ConditionalBatchNorm1d(10, 3, training=True)
+    conditionalbatchnorm1d = ConditionalNormalization(10, 3, normalization_type="batch", training=True)
     params = conditionalbatchnorm1d.init(key, x, y)
     conditionalbatchnorm1d.apply(params, x, y, mutable=["batch_stats"])

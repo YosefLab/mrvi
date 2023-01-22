@@ -295,9 +295,9 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         normalize_distances: bool = False,
         use_vmap: bool = True,
         groupby: Optional[Union[List[str], str]] = None,
-    ) -> xr.DataArray:
+    ) -> xr.Dataset:
         """
-        Computes local sample distances as `xr.DataArray` or `xr.Dataset`.
+        Computes local sample distances as `xr.Dataset`.
 
         Computes cell-specific distances between samples, of size (n_sample, n_sample),
         stored as a Dataset, with variable name `cell`, of size (n_cell, n_sample, n_sample).

@@ -554,8 +554,9 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         batch_size: int = 128,
         mc_samples_total: int = 10000,
         max_mc_samples_per_pass: int = 50,
-        eps: float = 1e-4,
         mc_samples_for_permutation: int = 30000,
+        use_vmap: bool = False,
+        eps: float = 1e-4,
     ):
         """Computes differential expression between two sets of samples.
 
@@ -570,11 +571,32 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         adata
             AnnData object to use.
         samples_a
-            Set of samples to use as reference.
+            Set of samples to characterize the first sample subpopulation.
+            Should be a subset of values associated to the sample key.
         samples_b
-            Set of samples to use as query.
+            Set of samples to characterize the second sample subpopulation.
+            Should be a subset of values associated to the sample key.
+        delta
+            LFC threshold to use for differential expression.
+        return_dist
+            Whether to return the distribution of LFCs.
+            If False, returns a summarized result, contained in a DataFrame.
+        batch_size
+            Batch size to use for inference.
+        mc_samples_total
+            Number of Monte Carlo samples to sample normalized gene expressions, per group of samples.
+        max_mc_samples_per_pass
+            Maximum number of Monte Carlo samples to sample normalized gene expressions at once.
+            Lowering this value can help with memory issues.
+        mc_samples_for_permutation
+            Number of Monte Carlo samples to use to compute the LFC distribution from normalized expression levels.
+        use_vmap
+            Determines which parallelization strategy to use. If True, uses `jax.vmap`, otherwise uses `jax.lax.map`.
+            The former is faster, but requires more memory.
+        eps
+            Pseudo-count to add to the normalized expression levels.
         """
-        mc_samples_per_obs = np.minimum((mc_samples_total // adata.n_obs), 1)
+        mc_samples_per_obs = np.maximum((mc_samples_total // adata.n_obs), 1)
         if mc_samples_per_obs >= max_mc_samples_per_pass:
             n_passes_per_obs = np.maximum((mc_samples_per_obs // max_mc_samples_per_pass), 1)
             mc_samples_per_obs = max_mc_samples_per_pass
@@ -586,8 +608,14 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         scdl = self._make_data_loader(adata=adata, batch_size=batch_size, iter_ndarray=True)
 
         donor_mapper = self.donor_info.reset_index().set_index(self.original_donor_key)
-        samples_idx_a_ = np.array(donor_mapper.loc[samples_a, "_scvi_sample"])
-        samples_idx_b_ = np.array(donor_mapper.loc[samples_b, "_scvi_sample"])
+        try:
+            samples_idx_a_ = np.array(donor_mapper.loc[samples_a, "_scvi_sample"])
+            samples_idx_b_ = np.array(donor_mapper.loc[samples_b, "_scvi_sample"])
+        except KeyError:
+            raise KeyError(
+                "Some samples cannot be found."
+                "Please make sure that the provided samples can be found in {}.".format(self.original_donor_key)
+            )
 
         vars_in = {"params": self.module.params, **self.module.state}
         rngs = self.module.rngs
@@ -630,11 +658,19 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 cf_sample,
                 inputs["continuous_covs"],
             )
-            hs = jax.lax.map(_h_inference_fn, cf_sample)
+            if use_vmap:
+                hs = jax.vmap(h_inference_fn, in_axes=(None, None, None, 0, None), out_axes=0)(
+                    inputs["x"],
+                    inputs["sample_index"],
+                    inputs["batch_index"],
+                    cf_sample,
+                    inputs["continuous_covs"],
+                )
+            else:
+                hs = jax.lax.map(_h_inference_fn, cf_sample)
 
             # convert to pseudocounts
-            hs = hs + eps
-            hs = jnp.log(hs)
+            hs = jnp.log(hs + eps)
             return hs
 
         ha_samples = []
@@ -688,78 +724,3 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 .sort_values("de_prob", ascending=False)
             )
             return results
-
-    def compute_sample_stratification(
-        self,
-        distances_dataset: xr.Dataset,
-        var_name: str,
-        adata: Optional[AnnData] = None,
-        linkage_method: str = "complete",
-        n_top_branchings: int = 5,
-        symmmetry_inconsistency_thresh: float = 0.1,
-    ):
-        """Computes sample stratification based on distance matrices.
-
-        Performs the following steps for each distance matrix:
-        1. Performs hierarchical clustering using `scipy`.
-        2. Optionally, computes top differentially expressed genes for the first tree branchings.
-        3. Optionally, plot the distance matrices and the top DE genes.
-
-        Parameters
-        ----------
-        distance_dataset :
-            Dataset containing distance matrices.
-        var_name :
-            Name of the variable mapping to the distance matrices of interest.
-        adata :
-            Anndata used to compute DE genes.
-        linkage_method :
-            Linkage method used to cluster the distance matrices.
-            See `scipy.cluster.hierarchy.linkage` for more details.
-        n_top_branchings :
-            Number of top branchings to consider when computing DE genes.
-        symmmetry_inconsistency_thresh :
-            Maximum allowed symmetry inconsistency between distance matrices.
-        """
-        adata = self.adata if adata is None else adata
-
-        distance_matrices = distances_dataset[var_name]
-        assert (distance_matrices.ndim == 3) and isinstance(
-            distance_matrices, xr.DataArray
-        ), "distance_matrices must be a xr.DataArray with 3 dimensions"
-        if var_name not in adata.obs.columns:
-            raise ValueError(f"Impossible to find {var_name} in adata.obs.columns")
-
-        cell_groups = adata.obs[var_name]
-        for dmat in distance_matrices:
-            group_name = dmat.coords[f"{var_name}_name"].item()
-            adata_sub = adata[cell_groups == group_name].copy()
-
-            _check_distance_mat_valid(dmat, symmmetry_inconsistency_thresh=symmmetry_inconsistency_thresh)
-            Z = compute_dendrogram_from_distance_matrix(
-                distance_matrix=dmat,
-                linkage_method=linkage_method,
-                symmetrize=True,
-            )
-            assert (dmat.coords["sample_x"].values == dmat.coords["sample_y"].values).all()
-            leaves_labels = dmat.coords["sample_x"].values
-            treeexp = TreeExplorer(
-                dendrogram=Z,
-                leaves_labels=leaves_labels,
-            )
-            nodeid_to_samples = treeexp.get_tree_splits(max_depth=n_top_branchings)
-            for nodeid, (left_samples, right_samples) in nodeid_to_samples.items():
-                # lfcs = self.compute_lfcs(
-                #     adata_sub,
-                #     left_samples,
-                #     right_samples,
-                # )
-                pass
-
-
-def _check_distance_mat_valid(dmat, symmmetry_inconsistency_thresh: float = 0.1):
-    if dmat.shape[0] != dmat.shape[1]:
-        raise ValueError("Distance matrices must be square.")
-    sym_inconsistency = np.abs(dmat - dmat.T).max()
-    if sym_inconsistency > symmmetry_inconsistency_thresh:
-        raise ValueError(f"Distance matrix is not symmetric. Maximum symmetry inconsistency is {sym_inconsistency}.")

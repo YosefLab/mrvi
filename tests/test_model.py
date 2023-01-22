@@ -24,22 +24,6 @@ def test_mrvi():
     model.is_trained_ = True
     model.history
     assert model.get_latent_representation().shape == (adata.shape[0], n_latent)
-
-    adata_label1 = adata[adata.obs["labels"] == "label_0"].copy()
-    model.differential_expression(
-        adata_label1,
-        samples_a=[0, 1],
-        samples_b=[2, 3],
-        return_dist=True,
-    )
-
-    model.differential_expression(
-        adata_label1,
-        samples_a=[0, 1],
-        samples_b=[0, 1],
-        return_dist=False,
-    )
-
     local_vmap = model.get_local_sample_representation()
 
     assert local_vmap.shape == (adata.shape[0], 15, n_latent)

@@ -17,7 +17,6 @@ from tqdm import tqdm
 
 from ._constants import MRVI_REGISTRY_KEYS
 from ._module import MrVAE
-from ._tree_utils import TreeExplorer, compute_dendrogram_from_distance_matrix
 from ._utils import compute_statistic, permutation_test
 
 logger = logging.getLogger(__name__)

@@ -87,3 +87,35 @@ def test_mrvi():
 
     # tests __repr__
     print(model)
+
+
+def test_mrvi_nonlinear():
+    adata = synthetic_iid()
+    adata.obs["sample"] = np.random.choice(15, size=adata.shape[0])
+    meta1 = np.random.randint(0, 2, size=15)
+    adata.obs["meta1"] = meta1[adata.obs["sample"].values]
+
+    meta2 = np.random.randn(15)
+    adata.obs["meta2"] = meta2[adata.obs["sample"].values]
+    MrVI.setup_anndata(adata, sample_key="sample", batch_key="batch")
+    adata.obs["cont_cov"] = np.random.normal(0, 1, size=adata.shape[0])
+    MrVI.setup_anndata(adata, sample_key="sample", batch_key="batch", continuous_covariate_keys=["cont_cov"])
+    n_latent = 10
+    model = MrVI(
+        adata,
+        n_latent=n_latent,
+        pz_kwargs={"use_nonlinear": True},
+    )
+    model.train(1, check_val_every_n_epoch=1, train_size=0.5)
+    model.is_trained_ = True
+    model.history
+    assert model.get_latent_representation().shape == (adata.shape[0], n_latent)
+    local_vmap = model.get_local_sample_representation()
+
+    assert local_vmap.shape == (adata.shape[0], 15, n_latent)
+    local_dist_vmap = model.get_local_sample_distances()["cell"]
+    assert local_dist_vmap.shape == (
+        adata.shape[0],
+        15,
+        15,
+    )

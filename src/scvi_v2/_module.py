@@ -13,6 +13,7 @@ from ._components import (
     Dense,
     FactorizedEmbedding,
     NormalDistOutputNN,
+    ResnetBlock,
 )
 from ._constants import MRVI_REGISTRY_KEYS
 from ._types import NdArray
@@ -93,18 +94,19 @@ class _DecoderUZ(nn.Module):
                     embedding_init=_normal_initializer,
                     name="A_s",
                 )(sample_covariate)
-            # cells by n_latent by n_latent
-            A_s = A_s.reshape(sample_covariate.shape[0], self.n_latent, self.n_latent)
-            if u_drop.ndim == 3:
-                h2 = jnp.einsum("cgl,bcl->bcg", A_s, u_drop)
-            else:
-                h2 = jnp.einsum("cgl,cl->cg", A_s, u_drop)
-            h3 = nn.Embed(self.n_sample, self.n_latent, embedding_init=_normal_initializer)(sample_covariate)
-            delta = h2 + h3
         else:
             # A_s output by a non-linear function without an explicit intercept
-            return u
-
+            sample_one_hot = jax.nn.one_hot(sample_covariate, self.n_sample)
+            A_s_dec_inputs = jnp.concatenate([u_drop, sample_one_hot], axis=-1)
+            A_s = ResnetBlock(self.n_latent * self.n_latent, name="A_s")(A_s_dec_inputs, training=training)
+        # cells by n_latent by n_latent
+        A_s = A_s.reshape(sample_covariate.shape[0], self.n_latent, self.n_latent)
+        if u_drop.ndim == 3:
+            h2 = jnp.einsum("cgl,bcl->bcg", A_s, u_drop)
+        else:
+            h2 = jnp.einsum("cgl,cl->cg", A_s, u_drop)
+        h3 = nn.Embed(self.n_sample, self.n_latent, embedding_init=_normal_initializer)(sample_covariate)
+        delta = h2 + h3
         return u + delta
 
 

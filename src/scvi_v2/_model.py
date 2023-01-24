@@ -387,15 +387,22 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
         jit_inference_fn = self.module.get_jit_inference_fn()
 
-        def get_A_s(module, sample_index):
-            A_s_embed = module.pz.get_variable("params", "A_s")["embedding"]
-            sample_index = sample_index.astype(int).flatten()
-            return jnp.take(A_s_embed, sample_index, axis=0)
+        def get_A_s(module, u, sample_covariate):
+            sample_covariate = sample_covariate.astype(int).flatten()
+            if not module.pz.use_nonlinear:
+                A_s = module.pz.A_s_enc(sample_covariate)
+            else:
+                # A_s output by a non-linear function without an explicit intercept
+                sample_one_hot = jax.nn.one_hot(sample_covariate, module.pz.n_sample)
+                A_s_dec_inputs = jnp.concatenate([u, sample_one_hot], axis=-1)
+                A_s = module.pz.A_s_enc(A_s_dec_inputs, training=False)
+            # cells by n_latent by n_latent
+            return A_s.reshape(sample_covariate.shape[0], module.pz.n_latent, module.pz.n_latent)
 
-        def apply_get_A_s(sample_index):
+        def apply_get_A_s(u, sample_covariate):
             vars_in = {"params": self.module.params, **self.module.state}
             rngs = self.module.rngs
-            A_s = self.module.apply(vars_in, rngs=rngs, method=get_A_s, sample_index=sample_index).reshape(
+            A_s = self.module.apply(vars_in, rngs=rngs, method=get_A_s, u=u, sample_covariate=sample_covariate).reshape(
                 sample_index.shape[0], self.module.n_latent, self.module.n_latent
             )
             return A_s
@@ -407,7 +414,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             qu_vars_diag = jax.vmap(jnp.diag)(qu.variance)
 
             sample_index = self.module._get_inference_input(array_dict)["sample_index"]
-            A_s = apply_get_A_s(sample_index)
+            A_s = apply_get_A_s(qu.mean, sample_index)  # use mean of latent representation to compute the baseline
             B = jnp.expand_dims(jnp.eye(A_s.shape[1]), 0) + A_s
             squared_l2_sigma = 2 * jnp.einsum(
                 "cij, cjk, clk -> cil", B, qu_vars_diag, B

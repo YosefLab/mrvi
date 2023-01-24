@@ -10,7 +10,7 @@ from scipy.spatial.distance import squareform
 
 
 def convert_pandas_to_colors(metadata: pd.DataFrame):
-    """Initializes leaves colors."""
+    """Converts a pandas dataframe to hex colors."""
 
     def _get_colors_from_categorical(x):
         return np.array([rgb2hex(plt.cm.tab10(i)) for i in x])

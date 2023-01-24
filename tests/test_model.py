@@ -44,7 +44,7 @@ def test_mrvi():
     assert np.allclose(local_map, local_vmap, atol=1e-6)
     assert np.allclose(local_dist_map, local_dist_vmap, atol=1e-6)
 
-    local_normalized_dists = model.get_local_sample_distances(normalize_distances=True)["cell"]
+    local_normalized_dists = model.get_local_sample_distances(use_mean=False, normalize_distances=True)["cell"]
     assert local_normalized_dists.shape == (
         adata.shape[0],
         15,
@@ -119,7 +119,7 @@ def test_mrvi_nonlinear():
         15,
     )
 
-    local_normalized_dists = model.get_local_sample_distances(normalize_distances=True)["cell"]
+    local_normalized_dists = model.get_local_sample_distances(use_mean=False, normalize_distances=True)["cell"]
     assert local_normalized_dists.shape == (
         adata.shape[0],
         15,

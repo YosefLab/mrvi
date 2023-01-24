@@ -205,6 +205,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         self,
         adata: Optional[AnnData] = None,
         batch_size: int = 256,
+        use_mean: bool = True,
         use_vmap: bool = True,
     ) -> xr.DataArray:
         """
@@ -218,6 +219,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             AnnData object to use for computing the local sample representation.
         batch_size
             Batch size to use for computing the local sample representation.
+        use_mean
+            Whether to use the mean of the latent representation as the local sample representation.
         use_vmap
             Whether to use vmap for computing the local sample representation.
             Disabling vmap can be useful if running out of memory on a GPU.
@@ -244,7 +247,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 x=x,
                 sample_index=sample_index,
                 cf_sample=cf_sample,
-                use_mean=True,
+                use_mean=use_mean,
             )["z"]
 
         @jax.jit
@@ -292,6 +295,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         self,
         adata: Optional[AnnData] = None,
         batch_size: int = 256,
+        use_mean: bool = True,
         normalize_distances: bool = False,
         use_vmap: bool = True,
         groupby: Optional[Union[List[str], str]] = None,
@@ -310,9 +314,12 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             AnnData object to use for computing the local sample representation.
         batch_size
             Batch size to use for computing the local sample representation.
+        use_mean
+            Whether to use the mean of the latent representation as the local sample representation.
         normalize_distances
             Whether to normalize the local sample distances. Normalizes by
             the standard deviation of the original intra-sample distances.
+            Only works with ``use_mean=False``.
         use_vmap
             Whether to use vmap for computing the local sample representation.
             Disabling vmap can be useful if running out of memory on a GPU.
@@ -320,9 +327,13 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             List of categorical keys or single key of the anndata that is
             used to group the cells.
         """
-        reps_data = self.get_local_sample_representation(adata=adata, batch_size=batch_size, use_vmap=use_vmap)
+        reps_data = self.get_local_sample_representation(
+            adata=adata, batch_size=batch_size, use_mean=use_mean, use_vmap=use_vmap
+        )
         cell_dists_data = self.compute_distance_matrix_from_representations(reps_data)
         if normalize_distances:
+            if use_mean:
+                raise ValueError("normalize_distances can only be used with use_mean=False")
             local_baseline_means, local_baseline_vars = self._compute_local_baseline_dists(adata)
             local_baseline_means = local_baseline_means.reshape(-1, 1, 1)
             local_baseline_vars = local_baseline_vars.reshape(-1, 1, 1)
@@ -361,7 +372,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         )
 
     def _compute_local_baseline_dists(
-        self, adata: Optional[AnnData], mc_samples: int = 1000, batch_size: int = 256
+        self, adata: Optional[AnnData] = None, mc_samples: int = 1000, batch_size: int = 256
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
         Approximate the distributions used as baselines for normalizing the local sample distances.

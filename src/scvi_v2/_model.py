@@ -276,7 +276,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         reps_data_array = xr.DataArray(
             reps,
             dims=["cell_name", "sample", "latent_dim"],
-            coords={"cell_name": adata.obs_names, "sample": sample_order},
+            coords={"cell_name": adata.obs_names.values, "sample": sample_order},
             name="sample_representation",
         )
 
@@ -694,6 +694,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         cell_type_keys: Optional[Union[str, List[str]]] = None,
         linkage_method: str = "complete",
         rank_genes: bool = False,
+        adata: Optional[AnnData] = None,
         figure_dir: Optional[str] = None,
         show_figures: bool = False,
         sample_metadata: Optional[Union[str, List[str]]] = None,
@@ -712,7 +713,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         rank_genes :
             Whether to compute gene most responsible for stratification, by default False
         adata :
-            Anndata to use for gene ranking, by default None
+            Anndata to use for gene ranking, by default None.
+            Using subsampled data may speed up execution.
         figure_dir :
             Optional directory in which to save figures, by default None
         show_figures :
@@ -741,7 +743,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
         # Optionally compute gene-specific distance matrices
         if rank_genes:
-            gene_results = self.find_relevant_genes(distances_, **gene_distance_kwargs)
+            gene_results = self.find_relevant_genes(distances_, adata, **gene_distance_kwargs)
             results["gene_scores"] = gene_results
             if figure_dir is not None:
                 csv_path = os.path.join(figure_dir, "gene_rfs.csv")
@@ -769,6 +771,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
     def find_relevant_genes(
         self,
         distances,
+        adata: Optional[AnnData] = None,
         linkage_method: str = "complete",
         **kwargs,
     ):
@@ -782,13 +785,15 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         ----------
         distances :
             Cell-type specific distance matrices.
+        adata :
+            Anndata to use to compute means, by default None
         linkage_method :
             Linkage method to use to cluster distance matrices, by default "complete"
         """
         ct_dimname = distances.dims[0]
         cell_type_keys = distances.coords[ct_dimname].values
         gene_dmats = self.get_gene_specific_distances(
-            self.adata,
+            adata,
             groupby=distances.name,
             cell_type_keys=cell_type_keys,
             **kwargs,
@@ -925,10 +930,10 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
             # Compute distance matrices
             delta = mean_expr.T  # # shape (n_vars, n_sample)
-            delta = jnp.expand_dims(delta, -1) - jnp.expand_dims(delta, -2)  # shape (n_vars, n_sample, n_sample)
-            delta = jnp.sqrt(delta**2)
-            delta = np.asarray(jax.device_put(delta))[None]
-            all_dists.append(delta)
+            delta = np.asarray(jax.device_put(delta))
+            delta = np.expand_dims(delta, -1) - np.expand_dims(delta, -2)  # shape (n_vars, n_sample, n_sample)
+            delta = np.sqrt(delta**2)
+            all_dists.append(delta[None])
         all_dists = np.concatenate(all_dists, axis=0)
 
         ct_dimname = f"{groupby}_name"

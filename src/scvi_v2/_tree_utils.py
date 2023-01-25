@@ -80,8 +80,9 @@ def compute_dendrogram_from_distance_matrix(
     """
     distance_matrix_ = distance_matrix.copy()
     if symmetrize:
+        assert np.allclose(distance_matrix_, distance_matrix_.T)
         distance_matrix_ = (distance_matrix_ + distance_matrix_.T) / 2
-    dists_1d = squareform(distance_matrix_)
+    dists_1d = squareform(distance_matrix_, checks=False)
     dendrogram = hc.linkage(dists_1d, method=linkage_method)
     dendrogram = hc.optimal_leaf_ordering(dendrogram, dists_1d)
     if convert_to_ete:
@@ -117,6 +118,7 @@ def plot_distance_matrix(
     dendrogram = compute_dendrogram_from_distance_matrix(
         distance_matrix,
         linkage_method=linkage_method,
+        symmetrize=True,
     )
 
     fig = sns.clustermap(distance_matrix.to_pandas(), row_linkage=dendrogram, col_linkage=dendrogram, row_colors=colors)

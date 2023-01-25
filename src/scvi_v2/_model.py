@@ -414,7 +414,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             vars_in = {"params": self.module.params, **self.module.state}
             rngs = self.module.rngs
             A_s = self.module.apply(vars_in, rngs=rngs, method=get_A_s, u=u, sample_covariate=sample_covariate).reshape(
-                sample_index.shape[0], self.module.n_latent, self.module.n_latent
+                sample_covariate.shape[0], self.module.n_latent, self.module.n_latent
             )
             return A_s
 

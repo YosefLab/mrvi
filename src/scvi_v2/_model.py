@@ -235,7 +235,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         n_sample = self.summary_stats.n_sample
 
         vars_in = {"params": self.module.params, **self.module.state}
-        rngs = self.module.rngs
 
         # TODO: use `self.module.get_jit_inference_fn` when it supports traced values.
         def inference_fn(
@@ -243,6 +242,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             sample_index,
             cf_sample,
         ):
+            rngs = self.module.rngs
             return self.module.apply(
                 vars_in,
                 rngs=rngs,
@@ -335,8 +335,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         )
         cell_dists_data = self.compute_distance_matrix_from_representations(reps_data)
         if normalize_distances:
-            if use_mean:
-                raise ValueError("normalize_distances can only be used with use_mean=False")
             local_baseline_means, local_baseline_vars = self._compute_local_baseline_dists(adata)
             local_baseline_means = local_baseline_means.reshape(-1, 1, 1)
             local_baseline_vars = local_baseline_vars.reshape(-1, 1, 1)

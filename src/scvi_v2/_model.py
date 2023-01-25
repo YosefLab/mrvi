@@ -328,7 +328,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             if not isinstance(groupby, list):
                 groupby = [groupby]
             for groupby_key in groupby:
-                if "cell{}}" in groupby:
+                if "cell_name" in groupby:
                     raise ValueError("`cell_name` is an ambiguous dimension name. Please rename the dimension name.")
                 adata = self.adata if adata is None else adata
                 cell_groups = adata.obs[groupby_key]
@@ -698,6 +698,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         figure_dir: Optional[str] = None,
         show_figures: bool = False,
         sample_metadata: Optional[Union[str, List[str]]] = None,
+        return_all_results: bool = False,
     ):
         """Analysis of distance matrix stratifications.
 
@@ -781,7 +782,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         linkage_method :
             Linkage method to use to cluster distance matrices, by default "complete"
         """
-        gene_scores = []
         ct_dimname = distances.dims[0]
         cell_type_keys = distances.coords[ct_dimname].values
         gene_dmats = self.get_gene_specific_distances(
@@ -790,6 +790,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             cell_type_keys=cell_type_keys,
             **kwargs,
         )
+        scores = []
         for cell_type in cell_type_keys:
             gene_dmats_ = gene_dmats.sel({ct_dimname: cell_type})
             mrvi_dmat = distances.sel({ct_dimname: cell_type})
@@ -800,7 +801,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 symmetrize=True,
                 convert_to_ete=True,
             )
-
+            scores_ = []
             for gene in gene_dmats_.coords["gene_name"].values:
                 gene_dmat = gene_dmats_.sel({"gene_name": gene})
                 gene_tree = compute_dendrogram_from_distance_matrix(
@@ -811,14 +812,24 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 )
                 gene_score = mrvi_tree.robinson_foulds(gene_tree)
                 gene_score = gene_score[0] / gene_score[1]
-                gene_scores.append(
-                    {
-                        "gene_name": gene,
-                        "cell_type": cell_type,
-                        "score": gene_score,
-                    }
-                )
-        return pd.DataFrame(gene_scores)
+                scores_.append(gene_score)
+            scores.append(np.array(scores_)[None])
+        scores = np.concatenate(scores, axis=0)
+        gene_scores = xr.DataArray(
+            scores,
+            dims=["cell_type", "gene_name"],
+            coords={
+                "cell_type": cell_type_keys,
+                "gene_name": gene_dmats.coords["gene_name"].values,
+            },
+        )
+        res = xr.Dataset(
+            {
+                "gene_distance": gene_dmats,
+                "rf_distance": gene_scores,
+            }
+        )
+        return res
 
     def get_gene_specific_distances(
         self,

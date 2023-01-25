@@ -133,6 +133,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         adata: Optional[AnnData] = None,
         indices=None,
         batch_size: Optional[int] = None,
+        use_mean: bool = True,
         give_z: bool = False,
     ) -> np.ndarray:
         """
@@ -146,6 +147,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             Indices of cells to use.
         batch_size
             Batch size to use for computing the latent representation.
+        use_mean
+            Whether to use the mean of the distribution as the latent representation.
         give_z
             Whether to return the z latent representation or the u latent representation.
 
@@ -159,7 +162,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
         us = []
         zs = []
-        jit_inference_fn = self.module.get_jit_inference_fn(inference_kwargs={"use_mean": True})
+        jit_inference_fn = self.module.get_jit_inference_fn(inference_kwargs={"use_mean": use_mean})
         for array_dict in tqdm(scdl):
             outputs = jit_inference_fn(self.module.rngs, array_dict)
 

@@ -694,11 +694,10 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         cell_type_keys: Optional[Union[str, List[str]]] = None,
         linkage_method: str = "complete",
         rank_genes: bool = False,
-        rank_genes_kwargs: Optional[dict] = None,
         figure_dir: Optional[str] = None,
         show_figures: bool = False,
         sample_metadata: Optional[Union[str, List[str]]] = None,
-        return_all_results: bool = False,
+        **gene_distance_kwargs,
     ):
         """Analysis of distance matrix stratifications.
 
@@ -742,9 +741,13 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
         # Optionally compute gene-specific distance matrices
         if rank_genes:
-            rank_genes_kwargs = {} if rank_genes_kwargs is None else rank_genes_kwargs
-            gene_scores = self.find_relevant_genes(distances_, **rank_genes_kwargs)
-            results["gene_scores"] = gene_scores
+            gene_results = self.find_relevant_genes(distances_, **gene_distance_kwargs)
+            results["gene_scores"] = gene_results
+            if figure_dir is not None:
+                csv_path = os.path.join(figure_dir, "gene_rfs.csv")
+                gene_results.rf_distance.to_pandas().T.to_csv(
+                    csv_path,
+                )
         figs = []
         for dist in distances_:
             celltype_name = dist.coords[celltype_dimname].item()
@@ -790,7 +793,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             cell_type_keys=cell_type_keys,
             **kwargs,
         )
-        scores = []
+        rfs = []
         for cell_type in cell_type_keys:
             gene_dmats_ = gene_dmats.sel({ct_dimname: cell_type})
             mrvi_dmat = distances.sel({ct_dimname: cell_type})
@@ -801,7 +804,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 symmetrize=True,
                 convert_to_ete=True,
             )
-            scores_ = []
+            rfs_ = []
             for gene in gene_dmats_.coords["gene_name"].values:
                 gene_dmat = gene_dmats_.sel({"gene_name": gene})
                 gene_tree = compute_dendrogram_from_distance_matrix(
@@ -810,16 +813,16 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                     symmetrize=True,
                     convert_to_ete=True,
                 )
-                gene_score = mrvi_tree.robinson_foulds(gene_tree)
-                gene_score = gene_score[0] / gene_score[1]
-                scores_.append(gene_score)
-            scores.append(np.array(scores_)[None])
-        scores = np.concatenate(scores, axis=0)
+                rf = mrvi_tree.robinson_foulds(gene_tree)
+                rf = rf[0] / rf[1]
+                rfs_.append(rf)
+            rfs.append(np.array(rfs_)[None])
+        rfs = np.concatenate(rfs, axis=0)
         gene_scores = xr.DataArray(
-            scores,
-            dims=["cell_type", "gene_name"],
+            rfs,
+            dims=[distances.name, "gene_name"],
             coords={
-                "cell_type": cell_type_keys,
+                distances.name: cell_type_keys,
                 "gene_name": gene_dmats.coords["gene_name"].values,
             },
         )

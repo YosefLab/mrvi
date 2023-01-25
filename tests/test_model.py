@@ -80,6 +80,7 @@ def test_mrvi():
 
     with TemporaryDirectory() as d:
         model.explore_stratifications(dists["labels"], sample_metadata="meta1", figure_dir=d)
+        model.explore_stratifications(dists["labels"], cell_type_keys="label_0", figure_dir=d, rank_genes=True)
     model.explore_stratifications(dists["labels"], sample_metadata="meta1", show_figures=True)
     model.explore_stratifications(dists["labels"], cell_type_keys="label_0", rank_genes=True)
     model.explore_stratifications(dists["labels"], cell_type_keys=["label_0", "label_1"])

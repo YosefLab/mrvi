@@ -9,7 +9,6 @@ import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import seaborn as sns
 import xarray as xr
 from anndata import AnnData
 from scvi import REGISTRY_KEYS
@@ -24,6 +23,7 @@ from ._module import MrVAE
 from ._tree_utils import (
     compute_dendrogram_from_distance_matrix,
     convert_pandas_to_colors,
+    plot_distance_matrix,
 )
 from ._utils import compute_statistic, permutation_test
 
@@ -695,7 +695,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         linkage_method: str = "complete",
         rank_genes: bool = False,
         rank_genes_kwargs: Optional[dict] = None,
-        adata: Optional[AnnData] = None,
         figure_dir: Optional[str] = None,
         show_figures: bool = False,
         sample_metadata: Optional[Union[str, List[str]]] = None,
@@ -721,6 +720,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         sample_metadata :
             Metadata keys to plot, by default None
         """
+        results = {}
+
         if figure_dir is not None:
             os.makedirs(figure_dir, exist_ok=True)
 
@@ -741,20 +742,16 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         # Optionally compute gene-specific distance matrices
         if rank_genes:
             rank_genes_kwargs = {} if rank_genes_kwargs is None else rank_genes_kwargs
-            self.get_gene_specific_distances(
-                adata, groupby=distances.name, cell_type_keys=cell_type_keys, **rank_genes_kwargs
-            )
-
+            gene_scores = self.find_relevant_genes(distances_, **rank_genes_kwargs)
+            results["gene_scores"] = gene_scores
         figs = []
         for dist in distances_:
             celltype_name = dist.coords[celltype_dimname].item()
-            dendrogram = compute_dendrogram_from_distance_matrix(
-                dist,
+            fig = plot_distance_matrix(
+                distance_matrix=dist,
                 linkage_method=linkage_method,
+                colors=colors,
             )
-            assert dist.ndim == 2
-
-            fig = sns.clustermap(dist.to_pandas(), row_linkage=dendrogram, col_linkage=dendrogram, row_colors=colors)
             fig.fig.suptitle(celltype_name)
             if figure_dir is not None:
                 fig.savefig(os.path.join(figure_dir, f"{celltype_name}.png"))
@@ -762,14 +759,71 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 plt.show()
                 plt.clf()
             figs.append(fig)
+        results["figures"] = figs
+        return results
 
-        return figs
+    def find_relevant_genes(
+        self,
+        distances,
+        linkage_method: str = "complete",
+        **kwargs,
+    ):
+        """Find genes most reflecting MrVI sample stratification.
+
+        The function first compute gene-specific distance matrices for each cell-type.
+        Then, it computes the Robinson-Foulds distance between the gene-specific distance matrix and
+        the MrVI distance matrix for each cell type.
+
+        Parameters
+        ----------
+        distances :
+            Cell-type specific distance matrices.
+        linkage_method :
+            Linkage method to use to cluster distance matrices, by default "complete"
+        """
+        gene_scores = []
+        ct_dimname = distances.dims[0]
+        cell_type_keys = distances.coords[ct_dimname].values
+        gene_dmats = self.get_gene_specific_distances(
+            self.adata,
+            groupby=distances.name,
+            cell_type_keys=cell_type_keys,
+            **kwargs,
+        )
+        for cell_type in cell_type_keys:
+            gene_dmats_ = gene_dmats.sel({ct_dimname: cell_type})
+            mrvi_dmat = distances.sel({ct_dimname: cell_type})
+
+            mrvi_tree = compute_dendrogram_from_distance_matrix(
+                mrvi_dmat,
+                linkage_method=linkage_method,
+                symmetrize=True,
+                convert_to_ete=True,
+            )
+
+            for gene in gene_dmats_.coords["gene_name"].values:
+                gene_dmat = gene_dmats_.sel({"gene_name": gene})
+                gene_tree = compute_dendrogram_from_distance_matrix(
+                    gene_dmat,
+                    linkage_method=linkage_method,
+                    symmetrize=True,
+                    convert_to_ete=True,
+                )
+                gene_score = mrvi_tree.robinson_foulds(gene_tree)
+                gene_score = gene_score[0] / gene_score[1]
+                gene_scores.append(
+                    {
+                        "gene_name": gene,
+                        "cell_type": cell_type,
+                        "score": gene_score,
+                    }
+                )
+        return pd.DataFrame(gene_scores)
 
     def get_gene_specific_distances(
         self,
         adata: AnnData,
         groupby: str,
-        metric: str = "euclidean",
         cell_type_keys: Optional[Union[str, List[str]]] = None,
         batch_size: int = 128,
         eps: float = 1e-4,
@@ -787,8 +841,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             Anndata to use to compute mean expresssions.
         groupby :
             Column in `adata.obs` to use to stratify cells.
-        metric :
-            Metric to use to compute distance matrices.
         cell_type_keys :
             Subset of cell types to analyze. By default, computes distances for unique values of
             `groupby` in `adata.obs`.

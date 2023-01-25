@@ -789,5 +789,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 fig.savefig(os.path.join(figure_dir, f"{celltype_name}.png"))
             if show_figures:
                 plt.show()
+                plt.clf()
             figs.append(fig)
         return figs

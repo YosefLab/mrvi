@@ -25,7 +25,7 @@ def convert_pandas_to_colors(metadata: pd.DataFrame):
             cats = metadata[col].astype("category").cat.codes
             colors = _get_colors_from_categorical(cats)
         elif dtypes[col] == "category":
-            colors = _get_colors_from_continuous(metadata[col])
+            colors = _get_colors_from_categorical(metadata[col])
         else:
             scales = (metadata[col] - metadata[col].min()) / (metadata[col].max() - metadata[col].min())
             colors = _get_colors_from_continuous(scales)

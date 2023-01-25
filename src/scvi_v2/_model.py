@@ -238,11 +238,11 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
         # TODO: use `self.module.get_jit_inference_fn` when it supports traced values.
         def inference_fn(
+            rngs,
             x,
             sample_index,
             cf_sample,
         ):
-            rngs = self.module.rngs
             return self.module.apply(
                 vars_in,
                 rngs=rngs,
@@ -255,19 +255,25 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
         @jax.jit
         def mapped_inference_fn(
+            rngs,
             x,
             sample_index,
             cf_sample,
         ):
             if use_vmap:
-                return jax.vmap(inference_fn, in_axes=(None, None, 0), out_axes=-2)(
+                return jax.vmap(inference_fn, in_axes=(0, None, None, 0), out_axes=-2)(
+                    stacked_rngs,
                     x,
                     sample_index,
                     cf_sample,
                 )
             else:
-                per_sample_inference_fn = lambda cf_sample: inference_fn(x, sample_index, cf_sample)
-                return jax.lax.transpose(jax.lax.map(per_sample_inference_fn, cf_sample), (1, 0, 2))
+
+                def per_sample_inference_fn(pair):
+                    rngs, cf_sample = pair
+                    return inference_fn(rngs, x, sample_index, cf_sample)
+
+                return jax.lax.transpose(jax.lax.map(per_sample_inference_fn, (rngs, cf_sample)), (1, 0, 2))
 
         reps = []
         for array_dict in tqdm(scdl):
@@ -276,7 +282,14 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             inputs = self.module._get_inference_input(
                 array_dict,
             )
+            # Generate a set of RNGs for every cf_sample.
+            rngs_list = [self.module.rngs for _ in range(cf_sample.shape[0])]
+            stacked_rngs = {
+                required_rng: jnp.concatenate([rngs_dict[required_rng][None] for rngs_dict in rngs_list], axis=0)
+                for required_rng in self.module.required_rngs
+            }
             zs = mapped_inference_fn(
+                rngs=stacked_rngs,
                 x=jnp.array(inputs["x"]),
                 sample_index=jnp.array(inputs["sample_index"]),
                 cf_sample=jnp.array(cf_sample),

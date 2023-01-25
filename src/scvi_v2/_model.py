@@ -1,11 +1,14 @@
 import logging
+import os
 from copy import deepcopy
 from typing import List, Optional, Tuple, Union
 
 import jax
 import jax.numpy as jnp
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import seaborn as sns
 import xarray as xr
 from anndata import AnnData
 from scvi import REGISTRY_KEYS
@@ -17,6 +20,10 @@ from tqdm import tqdm
 
 from ._constants import MRVI_REGISTRY_KEYS
 from ._module import MrVAE
+from ._tree_utils import (
+    compute_dendrogram_from_distance_matrix,
+    convert_pandas_to_colors,
+)
 from ._utils import compute_statistic, permutation_test
 
 logger = logging.getLogger(__name__)
@@ -723,3 +730,65 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 .sort_values("de_prob", ascending=False)
             )
             return results
+
+    def explore_stratifications(
+        self,
+        distances: xr.Dataset,
+        cell_type_keys: Optional[Union[str, List[str]]] = None,
+        linkage_method: str = "complete",
+        figure_dir: Optional[str] = None,
+        show_figures: bool = False,
+        sample_metadata: Optional[Union[str, List[str]]] = None,
+    ):
+        """Analysis of distance matrix stratifications.
+
+        Parameters
+        ----------
+        distances :
+            Cell-type specific distance matrices.
+        cell_type_keys :
+            Subset of cell types to analyze, by default None
+        linkage_method :
+            Linkage method to use to cluster distance matrices, by default "complete"
+        figure_dir :
+            Optional directory in which to save figures, by default None
+        show_figures :
+            Whether to show figures, by default False
+        sample_metadata :
+            Metadata keys to plot, by default None
+        """
+        if figure_dir is not None:
+            os.makedirs(figure_dir, exist_ok=True)
+
+        # Convert metadata to hex colors
+        colors = None
+        if sample_metadata is not None:
+            sample_metadata = [sample_metadata] if isinstance(sample_metadata, str) else sample_metadata
+            colors = convert_pandas_to_colors(self.donor_info.loc[:, sample_metadata])
+
+        # Subsample distances if necessary
+        distances_ = distances
+        celltype_dimname = distances.dims[0]
+        if cell_type_keys is not None:
+            cell_type_keys = [cell_type_keys] if isinstance(cell_type_keys, str) else cell_type_keys
+            dimname_to_vals = {celltype_dimname: cell_type_keys}
+            distances_ = distances.sel(dimname_to_vals)
+
+        figs = []
+        for dist in distances_:
+            celltype_name = dist.coords[celltype_dimname].item()
+            dendrogram = compute_dendrogram_from_distance_matrix(
+                dist,
+                linkage_method=linkage_method,
+            )
+            assert dist.ndim == 2
+
+            fig = sns.clustermap(dist.to_pandas(), row_linkage=dendrogram, col_linkage=dendrogram, row_colors=colors)
+            fig.fig.suptitle(celltype_name)
+            if figure_dir is not None:
+                fig.savefig(os.path.join(figure_dir, f"{celltype_name}.png"))
+            if show_figures:
+                plt.show()
+                plt.clf()
+            figs.append(fig)
+        return figs

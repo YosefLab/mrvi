@@ -92,8 +92,15 @@ def test_mrvi():
     es = model.compute_cell_scores(donor_keys=donor_keys, compute_pval=False)
     assert es.shape == (adata.shape[0], 2)
 
+    # Test memory efficient groupby.
+    grouped_dists_no_cell = model.get_local_sample_distances(keep_cell=False, groupby=["meta1", "meta2"])
+    grouped_dists_w_cell = model.get_local_sample_distances(groupby=["meta1", "meta2"])
+    assert np.allclose(grouped_dists_no_cell.meta1, grouped_dists_w_cell.meta1)
+    assert np.allclose(grouped_dists_no_cell.meta2, grouped_dists_w_cell.meta2)
+
     # tests __repr__
     print(model)
+
 
 
 def test_mrvi_nonlinear():

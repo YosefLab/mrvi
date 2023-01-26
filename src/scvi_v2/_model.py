@@ -1,7 +1,7 @@
 import logging
 import os
 from copy import deepcopy
-from typing import List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import jax
 import jax.numpy as jnp
@@ -182,7 +182,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
     @staticmethod
     def compute_distance_matrix_from_representations(
-        representations: xr.DataArray, metric: str = "euclidean"
+        representations: xr.DataArray, metric: str = "euclidean", groups: Optional[Dict[str, List[np.ndarray]]] = None
     ) -> xr.DataArray:
         """
         Compute distance matrices from counterfactual sample representations.
@@ -193,23 +193,64 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             Counterfactual sample representations of shape (n_cells, n_sample, n_features).
         metric
             Metric to use for computing distance matrix.
+        groups
+            n_cells vectors indicating the groups for each cell.
         """
         n_cells, n_donors, _ = representations.shape
-        pairwise_dists = np.zeros((n_cells, n_donors, n_donors))
-        for i, cell_rep in enumerate(representations):
-            d_ = pairwise_distances(cell_rep, metric=metric)
-            pairwise_dists[i, :, :] = d_
-        dists_data_array = xr.DataArray(
-            pairwise_dists,
-            dims=["cell_name", "sample_x", "sample_y"],
-            coords={
-                "cell_name": representations.cell_name.values,
-                "sample_x": representations.sample.values,
-                "sample_y": representations.sample.values,
-            },
-            name="sample_distances",
-        )
-        return dists_data_array
+        if groups is None:
+            pairwise_dists = np.zeros((n_cells, n_donors, n_donors))
+            for i, cell_rep in enumerate(representations):
+                d_ = pairwise_distances(cell_rep, metric=metric)
+                pairwise_dists[i, :, :] = d_
+            dists_data_array = xr.DataArray(
+                pairwise_dists,
+                dims=["cell_name", "sample_x", "sample_y"],
+                coords={
+                    "cell_name": representations.cell_name.values,
+                    "sample_x": representations.sample.values,
+                    "sample_y": representations.sample.values,
+                },
+                name="sample_distances",
+            )
+            return dists_data_array
+        else:
+            new_arrays = {}
+            if "cell_name" in list(groups.keys()):
+                raise ValueError("`cell_name` is an ambiguous dimension name. Please rename the dimension name.")
+            for groupby_key, group in groups.items():
+                group_cats = group.unique()
+                group_dists = []
+                new_dimension_key = (
+                    f"{groupby_key}_name"  # needs to be different from groupby_key name to construct a valid dataset
+                )
+
+                # Computing the mean distance matrix for each group
+                for group_cat in group_cats:
+                    group_mask = (group == group_cat).values
+                    group_reps = representations[group_mask, :, :]
+                    group_dist = np.zeros((1, n_donors, n_donors))
+                    for cell_rep in group_reps:
+                        d_ = pairwise_distances(cell_rep, metric=metric)
+                        group_dist[0, :, :] += d_
+                    group_dist /= len(group_reps)
+                    group_dist_data_array = xr.DataArray(
+                        group_dist,
+                        dims=[new_dimension_key, "sample_x", "sample_y"],
+                        coords={
+                            new_dimension_key: [group_cat],
+                            "sample_x": representations.sample.values,
+                            "sample_y": representations.sample.values,
+                        },
+                        name=f"{groupby_key}_distances",
+                    )
+                    group_dists.append(group_dist_data_array)
+                group_dist_data = xr.concat(group_dists, dim=new_dimension_key)
+                new_arrays[groupby_key] = group_dist_data
+            return xr.Dataset(
+                {
+                    **new_arrays,
+                }
+            )
 
     def get_local_sample_representation(
         self,
@@ -323,6 +364,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         normalize_distances: bool = False,
         use_vmap: bool = True,
         groupby: Optional[Union[List[str], str]] = None,
+        keep_cell: bool = True,
     ) -> xr.Dataset:
         """
         Computes local sample distances as `xr.Dataset`.
@@ -350,10 +392,22 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         groupby
             List of categorical keys or single key of the anndata that is
             used to group the cells.
+        keep_cell
+            Whether to keep the original cell sample-sample distance matrices.
         """
+        adata = self.adata if adata is None else adata
+        self._check_if_trained(warn=False)
+        adata = self._validate_anndata(adata)
         reps_data = self.get_local_sample_representation(
             adata=adata, batch_size=batch_size, use_mean=use_mean, use_vmap=use_vmap
         )
+        if not keep_cell and groupby is not None:
+            if not isinstance(groupby, list):
+                groupby = [groupby]
+            cell_groups = {groupby_key: adata.obs[groupby_key] for groupby_key in groupby}
+            return self.compute_distance_matrix_from_representations(reps_data, groups=cell_groups)
+        elif not keep_cell:
+            raise ValueError("`keep_cell=False` requires `groupby` to be provided. ")
         cell_dists_data = self.compute_distance_matrix_from_representations(reps_data)
         if normalize_distances:
             if use_mean:

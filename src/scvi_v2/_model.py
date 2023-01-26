@@ -1,11 +1,14 @@
 import logging
+import os
 from copy import deepcopy
 from typing import List, Optional, Tuple, Union
 
 import jax
 import jax.numpy as jnp
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import seaborn as sns
 import xarray as xr
 from anndata import AnnData
 from scvi import REGISTRY_KEYS
@@ -17,6 +20,10 @@ from tqdm import tqdm
 
 from ._constants import MRVI_REGISTRY_KEYS
 from ._module import MrVAE
+from ._tree_utils import (
+    compute_dendrogram_from_distance_matrix,
+    convert_pandas_to_colors,
+)
 from ._utils import compute_statistic, permutation_test
 
 logger = logging.getLogger(__name__)
@@ -316,9 +323,9 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         normalize_distances: bool = False,
         use_vmap: bool = True,
         groupby: Optional[Union[List[str], str]] = None,
-    ) -> xr.DataArray:
+    ) -> xr.Dataset:
         """
-        Computes local sample distances as `xr.DataArray` or `xr.Dataset`.
+        Computes local sample distances as `xr.Dataset`.
 
         Computes cell-specific distances between samples, of size (n_sample, n_sample),
         stored as a Dataset, with variable name `cell`, of size (n_cell, n_sample, n_sample).
@@ -570,3 +577,251 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         columns = [prepand + key[0] for key in donor_keys]
         sigs = pd.DataFrame(sigs, columns=columns)
         return sigs
+
+    @property
+    def original_donor_key(self):
+        """Original donor key used for training the model."""
+        return self.adata_manager.registry["setup_args"]["sample_key"]
+
+    def differential_expression(
+        self,
+        adata: AnnData,
+        samples_a: List[str],
+        samples_b: List[str],
+        delta: float = 0.5,
+        return_dist: bool = False,
+        batch_size: int = 128,
+        mc_samples_total: int = 10000,
+        max_mc_samples_per_pass: int = 50,
+        mc_samples_for_permutation: int = 30000,
+        use_vmap: bool = False,
+        eps: float = 1e-4,
+    ):
+        """Computes differential expression between two sets of samples.
+
+        Background on the computation can be found here:
+        https://www.overleaf.com/project/63c08ee8d7475a4c8478b1a3.
+        To correct for batch effects, the current approach consists in
+        computing batch-specific LFCs, and then averaging them.
+        Right now, other covariates are not considered.
+
+        Parameters
+        ----------
+        adata
+            AnnData object to use.
+        samples_a
+            Set of samples to characterize the first sample subpopulation.
+            Should be a subset of values associated to the sample key.
+        samples_b
+            Set of samples to characterize the second sample subpopulation.
+            Should be a subset of values associated to the sample key.
+        delta
+            LFC threshold to use for differential expression.
+        return_dist
+            Whether to return the distribution of LFCs.
+            If False, returns a summarized result, contained in a DataFrame.
+        batch_size
+            Batch size to use for inference.
+        mc_samples_total
+            Number of Monte Carlo samples to sample normalized gene expressions, per group of samples.
+        max_mc_samples_per_pass
+            Maximum number of Monte Carlo samples to sample normalized gene expressions at once.
+            Lowering this value can help with memory issues.
+        mc_samples_for_permutation
+            Number of Monte Carlo samples to use to compute the LFC distribution from normalized expression levels.
+        use_vmap
+            Determines which parallelization strategy to use. If True, uses `jax.vmap`, otherwise uses `jax.lax.map`.
+            The former is faster, but requires more memory.
+        eps
+            Pseudo-count to add to the normalized expression levels.
+        """
+        mc_samples_per_obs = np.maximum((mc_samples_total // adata.n_obs), 1)
+        if mc_samples_per_obs >= max_mc_samples_per_pass:
+            n_passes_per_obs = np.maximum((mc_samples_per_obs // max_mc_samples_per_pass), 1)
+            mc_samples_per_obs = max_mc_samples_per_pass
+        else:
+            n_passes_per_obs = 1
+
+        self._check_if_trained(warn=False)
+        adata = self._validate_anndata(adata)
+        scdl = self._make_data_loader(adata=adata, batch_size=batch_size, iter_ndarray=True)
+
+        donor_mapper = self.donor_info.reset_index().set_index(self.original_donor_key)
+        try:
+            samples_idx_a_ = np.array(donor_mapper.loc[samples_a, "_scvi_sample"])
+            samples_idx_b_ = np.array(donor_mapper.loc[samples_b, "_scvi_sample"])
+        except KeyError:
+            raise KeyError(
+                "Some samples cannot be found."
+                "Please make sure that the provided samples can be found in {}.".format(self.original_donor_key)
+            )
+
+        vars_in = {"params": self.module.params, **self.module.state}
+        rngs = self.module.rngs
+
+        def _get_all_inputs(
+            inputs,
+        ):
+            x = jnp.array(inputs[REGISTRY_KEYS.X_KEY])
+            sample_index = jnp.array(inputs[MRVI_REGISTRY_KEYS.SAMPLE_KEY])
+            batch_index = jnp.array(inputs[REGISTRY_KEYS.BATCH_KEY])
+            continuous_covs = inputs.get(REGISTRY_KEYS.CONT_COVS_KEY, None)
+            if continuous_covs is not None:
+                continuous_covs = jnp.array(continuous_covs)
+            return {
+                "x": x,
+                "sample_index": sample_index,
+                "batch_index": batch_index,
+                "continuous_covs": continuous_covs,
+            }
+
+        def h_inference_fn(x, sample_index, batch_index, cf_sample, continuous_covs):
+            return self.module.apply(
+                vars_in,
+                rngs=rngs,
+                method=self.module.compute_h_from_x,
+                x=x,
+                sample_index=sample_index,
+                batch_index=batch_index,
+                cf_sample=cf_sample,
+                continuous_covs=continuous_covs,
+                mc_samples=mc_samples_per_obs,
+            )
+
+        @jax.jit
+        def get_hs(inputs, cf_sample):
+            _h_inference_fn = lambda cf_sample: h_inference_fn(
+                inputs["x"],
+                inputs["sample_index"],
+                inputs["batch_index"],
+                cf_sample,
+                inputs["continuous_covs"],
+            )
+            if use_vmap:
+                hs = jax.vmap(h_inference_fn, in_axes=(None, None, None, 0, None), out_axes=0)(
+                    inputs["x"],
+                    inputs["sample_index"],
+                    inputs["batch_index"],
+                    cf_sample,
+                    inputs["continuous_covs"],
+                )
+            else:
+                hs = jax.lax.map(_h_inference_fn, cf_sample)
+
+            # convert to pseudocounts
+            hs = jnp.log(hs + eps)
+            return hs
+
+        ha_samples = []
+        hb_samples = []
+
+        for array_dict in tqdm(scdl):
+            n_cells = array_dict[REGISTRY_KEYS.X_KEY].shape[0]
+            inputs = _get_all_inputs(
+                array_dict,
+            )
+            cf_sample_a = np.broadcast_to(samples_idx_a_[:, None, None], (samples_idx_a_.shape[0], n_cells, 1))
+            cf_sample_b = np.broadcast_to(samples_idx_b_[:, None, None], (samples_idx_b_.shape[0], n_cells, 1))
+            for _ in range(n_passes_per_obs):
+                _ha = get_hs(inputs, cf_sample_a)
+                _hb = get_hs(inputs, cf_sample_b)
+
+                # shapes (n_samples_x, max_mc_samples_per_pass, n_cells, n_vars)
+                ha_samples.append(
+                    np.asarray(jax.device_put(_ha.reshape((samples_idx_a_.shape[0], -1, self.summary_stats.n_vars))))
+                )
+                hb_samples.append(
+                    np.asarray(jax.device_put(_hb.reshape((samples_idx_b_.shape[0], -1, self.summary_stats.n_vars))))
+                )
+        ha_samples = np.concatenate(ha_samples, axis=1)
+        hb_samples = np.concatenate(hb_samples, axis=1)
+
+        # Giving equal weight to each sample ==> exchangeability assumption
+        ha_samples = ha_samples.reshape((-1, self.summary_stats.n_vars))
+        hb_samples = hb_samples.reshape((-1, self.summary_stats.n_vars))
+
+        # compute LFCs
+        rdm_idx_a = np.random.choice(ha_samples.shape[0], size=mc_samples_for_permutation, replace=True)
+        rdm_idx_b = np.random.choice(hb_samples.shape[0], size=mc_samples_for_permutation, replace=True)
+        lfc_dist = ha_samples[rdm_idx_a, :] - hb_samples[rdm_idx_b, :]
+        if return_dist:
+            return lfc_dist
+        else:
+            de_probs = np.mean(np.abs(lfc_dist) > delta, axis=0)
+            lfc_means = np.mean(lfc_dist, axis=0)
+            lfc_medians = np.median(lfc_dist, axis=0)
+            results = (
+                pd.DataFrame(
+                    {
+                        "de_prob": de_probs,
+                        "lfc_mean": lfc_means,
+                        "lfc_median": lfc_medians,
+                        "gene_name": self.adata.var_names,
+                    }
+                )
+                .set_index("gene_name")
+                .sort_values("de_prob", ascending=False)
+            )
+            return results
+
+    def explore_stratifications(
+        self,
+        distances: xr.Dataset,
+        cell_type_keys: Optional[Union[str, List[str]]] = None,
+        linkage_method: str = "complete",
+        figure_dir: Optional[str] = None,
+        show_figures: bool = False,
+        sample_metadata: Optional[Union[str, List[str]]] = None,
+    ):
+        """Analysis of distance matrix stratifications.
+
+        Parameters
+        ----------
+        distances :
+            Cell-type specific distance matrices.
+        cell_type_keys :
+            Subset of cell types to analyze, by default None
+        linkage_method :
+            Linkage method to use to cluster distance matrices, by default "complete"
+        figure_dir :
+            Optional directory in which to save figures, by default None
+        show_figures :
+            Whether to show figures, by default False
+        sample_metadata :
+            Metadata keys to plot, by default None
+        """
+        if figure_dir is not None:
+            os.makedirs(figure_dir, exist_ok=True)
+
+        # Convert metadata to hex colors
+        colors = None
+        if sample_metadata is not None:
+            sample_metadata = [sample_metadata] if isinstance(sample_metadata, str) else sample_metadata
+            colors = convert_pandas_to_colors(self.donor_info.loc[:, sample_metadata])
+
+        # Subsample distances if necessary
+        distances_ = distances
+        celltype_dimname = distances.dims[0]
+        if cell_type_keys is not None:
+            cell_type_keys = [cell_type_keys] if isinstance(cell_type_keys, str) else cell_type_keys
+            dimname_to_vals = {celltype_dimname: cell_type_keys}
+            distances_ = distances.sel(dimname_to_vals)
+
+        figs = []
+        for dist in distances_:
+            celltype_name = dist.coords[celltype_dimname].item()
+            dendrogram = compute_dendrogram_from_distance_matrix(
+                dist,
+                linkage_method=linkage_method,
+            )
+            assert dist.ndim == 2
+
+            fig = sns.clustermap(dist.to_pandas(), row_linkage=dendrogram, col_linkage=dendrogram, row_colors=colors)
+            fig.fig.suptitle(celltype_name)
+            if figure_dir is not None:
+                fig.savefig(os.path.join(figure_dir, f"{celltype_name}.png"))
+            if show_figures:
+                plt.show()
+                plt.clf()
+            figs.append(fig)
+        return figs

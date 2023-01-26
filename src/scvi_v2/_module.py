@@ -9,11 +9,11 @@ from scvi.distributions import JaxNegativeBinomialMeanDisp as NegativeBinomial
 from scvi.module.base import JaxBaseModuleClass, LossOutput, flax_configure
 
 from ._components import (
+    MLP,
     ConditionalNormalization,
     Dense,
     FactorizedEmbedding,
     NormalDistOutputNN,
-    ResnetBlock,
 )
 from ._constants import MRVI_REGISTRY_KEYS
 from ._types import NdArray
@@ -92,7 +92,7 @@ class _DecoderUZ(nn.Module):
                     name="A_s_enc",
                 )
         else:
-            self.A_s_enc = ResnetBlock(self.n_latent * self.n_latent, name="A_s_enc")
+            self.A_s_enc = MLP(self.n_latent * self.n_latent, name="A_s_enc")
         self.h3_embed = nn.Embed(self.n_sample, self.n_latent, embedding_init=_normal_initializer)
 
     def __call__(self, u: NdArray, sample_covariate: NdArray, training: Optional[bool] = None) -> jnp.ndarray:

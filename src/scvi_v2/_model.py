@@ -243,8 +243,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             sample_index,
             cf_sample,
         ):
-            module = self.module.clone()
-            return module.apply(
+            return self.module.apply(
                 vars_in,
                 rngs=rngs,
                 method=self.module.inference,
@@ -349,6 +348,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         )
         cell_dists_data = self.compute_distance_matrix_from_representations(reps_data)
         if normalize_distances:
+            if use_mean:
+                raise ValueError("normalize_distances can only be used with use_mean=False")
             local_baseline_means, local_baseline_vars = self._compute_local_baseline_dists(adata)
             local_baseline_means = local_baseline_means.reshape(-1, 1, 1)
             local_baseline_vars = local_baseline_vars.reshape(-1, 1, 1)
@@ -428,28 +429,26 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         def apply_get_A_s(u, sample_covariate):
             vars_in = {"params": self.module.params, **self.module.state}
             rngs = self.module.rngs
-            A_s = self.module.apply(vars_in, rngs=rngs, method=get_A_s, u=u, sample_covariate=sample_covariate).reshape(
-                sample_covariate.shape[0], self.module.n_latent, self.module.n_latent
-            )
+            A_s = self.module.apply(vars_in, rngs=rngs, method=get_A_s, u=u, sample_covariate=sample_covariate)
             return A_s
 
         baseline_means = []
         baseline_vars = []
-        for array_dict in tqdm(scdl):
+        for array_dict in scdl:
             qu = jit_inference_fn(self.module.rngs, array_dict)["qu"]
             qu_vars_diag = jax.vmap(jnp.diag)(qu.variance)
 
             sample_index = self.module._get_inference_input(array_dict)["sample_index"]
             A_s = apply_get_A_s(qu.mean, sample_index)  # use mean of latent representation to compute the baseline
             B = jnp.expand_dims(jnp.eye(A_s.shape[1]), 0) + A_s
-            squared_l2_sigma = 2 * jnp.einsum(
+            u_diff_sigma = 2 * jnp.einsum(
                 "cij, cjk, clk -> cil", B, qu_vars_diag, B
-            )  # (I + A_s) @ qu_vars_diag @ (I + A_s).T
-            eigvals = jax.vmap(jnp.linalg.eigh)(squared_l2_sigma)[0].astype(float)
-            _ = self.module.rngs  # Regenerate seed_rng
+            )  # 2 * (I + A_s) @ qu_vars_diag @ (I + A_s).T
+            eigvals = jax.vmap(jnp.linalg.eigh)(u_diff_sigma)[0].astype(float)
+            normal_rng = self.module.rngs["params"]  # Hack to get new rng for normal samples.
             normal_samples = jax.random.normal(
-                self.module.seed_rng, shape=(eigvals.shape[0], mc_samples, eigvals.shape[1])
-            )
+                normal_rng, shape=(eigvals.shape[0], mc_samples, eigvals.shape[1])
+            )  # n_cells by mc_samples by n_latent
             squared_l2_dists = jnp.sum(jnp.einsum("cij, cj -> cij", (normal_samples**2), eigvals), axis=2)
             l2_dists = squared_l2_dists**0.5
             baseline_means.append(jnp.mean(l2_dists, axis=1))

@@ -95,6 +95,7 @@ def test_mrvi():
     # tests __repr__
     print(model)
 
+
 def test_mrvi_nonlinear():
     adata = synthetic_iid()
     adata.obs["sample"] = np.random.choice(15, size=adata.shape[0])
@@ -106,7 +107,7 @@ def test_mrvi_nonlinear():
     MrVI.setup_anndata(adata, sample_key="sample", batch_key="batch")
     adata.obs["cont_cov"] = np.random.normal(0, 1, size=adata.shape[0])
     MrVI.setup_anndata(adata, sample_key="sample", batch_key="batch", continuous_covariate_keys=["cont_cov"])
-    
+
     n_latent = 10
     model = MrVI(
         adata,
@@ -134,6 +135,7 @@ def test_mrvi_nonlinear():
         15,
     )
     assert np.allclose(local_normalized_dists[0].values, local_normalized_dists[0].values.T, atol=1e-6)
+
 
 def test_de():
     adata = synthetic_iid()

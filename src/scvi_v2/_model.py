@@ -255,7 +255,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
         @jax.jit
         def mapped_inference_fn(
-            rngs,
+            stacked_rngs,
             x,
             sample_index,
             cf_sample,
@@ -273,7 +273,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                     rngs, cf_sample = pair
                     return inference_fn(rngs, x, sample_index, cf_sample)
 
-                return jax.lax.transpose(jax.lax.map(per_sample_inference_fn, (rngs, cf_sample)), (1, 0, 2))
+                return jax.lax.transpose(jax.lax.map(per_sample_inference_fn, (stacked_rngs, cf_sample)), (1, 0, 2))
 
         reps = []
         for array_dict in tqdm(scdl):
@@ -284,12 +284,13 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             )
             # Generate a set of RNGs for every cf_sample.
             rngs_list = [self.module.rngs for _ in range(cf_sample.shape[0])]
+            # Combine list of RNG dicts into a single list. This is necessary for vmap/map.
             stacked_rngs = {
                 required_rng: jnp.concatenate([rngs_dict[required_rng][None] for rngs_dict in rngs_list], axis=0)
                 for required_rng in self.module.required_rngs
             }
             zs = mapped_inference_fn(
-                rngs=stacked_rngs,
+                stacked_rngs=stacked_rngs,
                 x=jnp.array(inputs["x"]),
                 sample_index=jnp.array(inputs["sample_index"]),
                 cf_sample=jnp.array(cf_sample),

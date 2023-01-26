@@ -243,7 +243,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             sample_index,
             cf_sample,
         ):
-            return self.module.apply(
+            module = self.module.clone()
+            return module.apply(
                 vars_in,
                 rngs=rngs,
                 method=self.module.inference,

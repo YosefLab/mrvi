@@ -550,7 +550,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         n_sample = self.summary_stats.n_sample
 
         vars_in = {"params": self.module.params, **self.module.state}
-        rngs = self.module.rngs
+        self.module.rngs
 
         sample_covariates_values = []
         for sample_covariate_key, sample_covariate_test in donor_keys:
@@ -562,6 +562,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         sample_covariate_tests = [key[1] for key in donor_keys]
 
         def inference_fn(
+            rngs,
             x,
             sample_index,
             cf_sample,
@@ -578,19 +579,25 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
         @jax.jit
         def mapped_inference_fn(
+            stacked_rngs,
             x,
             sample_index,
             cf_sample,
         ):
             if use_vmap:
-                reps = jax.vmap(inference_fn, in_axes=(None, None, 0), out_axes=-2)(
+                reps = jax.vmap(inference_fn, in_axes=(0, None, None, 0), out_axes=-2)(
+                    stacked_rngs,
                     x,
                     sample_index,
                     cf_sample,
                 )
             else:
-                per_sample_inference_fn = lambda cf_sample: inference_fn(x, sample_index, cf_sample)
-                reps = jax.lax.transpose(jax.lax.map(per_sample_inference_fn, cf_sample), (1, 0, 2))
+
+                def per_sample_inference_fn(pair):
+                    rngs, cf_sample = pair
+                    return inference_fn(rngs, x, sample_index, cf_sample)
+
+                reps = jax.lax.transpose(jax.lax.map(per_sample_inference_fn, (stacked_rngs, cf_sample)), (1, 0, 2))
 
             euclid_d = lambda x: jnp.sqrt(((x[:, None] - x[None, :]) ** 2).sum(-1))
             dists = jax.vmap(euclid_d, in_axes=0)(reps)
@@ -611,7 +618,15 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             inputs = self.module._get_inference_input(
                 array_dict,
             )
+            # Generate a set of RNGs for every cf_sample.
+            rngs_list = [self.module.rngs for _ in range(cf_sample.shape[0])]
+            # Combine list of RNG dicts into a single list. This is necessary for vmap/map.
+            stacked_rngs = {
+                required_rng: jnp.concatenate([rngs_dict[required_rng][None] for rngs_dict in rngs_list], axis=0)
+                for required_rng in self.module.required_rngs
+            }
             dists = mapped_inference_fn(
+                stacked_rngs=stacked_rngs,
                 x=jnp.array(inputs["x"]),
                 sample_index=jnp.array(inputs["sample_index"]),
                 cf_sample=jnp.array(cf_sample),

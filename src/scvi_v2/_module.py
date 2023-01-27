@@ -104,7 +104,7 @@ class _DecoderUZ(nn.Module):
         else:
             # A_s output by a non-linear function without an explicit intercept
             sample_one_hot = jax.nn.one_hot(sample_covariate, self.n_sample)
-            A_s_dec_inputs = jnp.concatenate([u_drop, sample_one_hot], axis=-1)
+            A_s_dec_inputs = jnp.concatenate([u_drop, sample_one_hot], axis=0)
             A_s = self.A_s_enc(A_s_dec_inputs, training=training)
         # cells by n_latent by n_latent
         A_s = A_s.reshape(sample_covariate.shape[0], self.n_latent, self.n_latent)

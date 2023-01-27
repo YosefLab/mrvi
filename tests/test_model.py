@@ -25,6 +25,12 @@ def test_mrvi():
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)
     model.is_trained_ = True
     model.history
+
+    # Test memory efficient groupby.
+    grouped_dists_no_cell = model.get_local_sample_distances(keep_cell=False, groupby=["meta1", "meta2"])
+    grouped_dists_w_cell = model.get_local_sample_distances(groupby=["meta1", "meta2"])
+    assert np.allclose(grouped_dists_no_cell.meta1, grouped_dists_w_cell.meta1)
+    assert np.allclose(grouped_dists_no_cell.meta2, grouped_dists_w_cell.meta2)
     assert model.get_latent_representation().shape == (adata.shape[0], n_latent)
     local_vmap = model.get_local_sample_representation()
 
@@ -53,6 +59,30 @@ def test_mrvi():
         15,
     )
     assert np.allclose(local_normalized_dists[0].values, local_normalized_dists[0].values.T, atol=1e-6)
+
+    # tests __repr__
+    print(model)
+
+
+def test_mrvi_stratifications():
+    adata = synthetic_iid()
+    adata.obs["sample"] = np.random.choice(15, size=adata.shape[0])
+    meta1 = np.random.randint(0, 2, size=15)
+    adata.obs["meta1"] = meta1[adata.obs["sample"].values]
+
+    meta2 = np.random.randn(15)
+    adata.obs["meta2"] = meta2[adata.obs["sample"].values]
+    MrVI.setup_anndata(adata, sample_key="sample", batch_key="batch")
+    adata.obs["cont_cov"] = np.random.normal(0, 1, size=adata.shape[0])
+    MrVI.setup_anndata(adata, sample_key="sample", batch_key="batch", continuous_covariate_keys=["cont_cov"])
+    n_latent = 10
+    model = MrVI(
+        adata,
+        n_latent=n_latent,
+    )
+    model.train(1, check_val_every_n_epoch=1, train_size=0.5)
+    model.is_trained_ = True
+    model.history
 
     adata.obs.loc[:, "label_2"] = np.random.choice(2, size=adata.shape[0])
     dists = model.get_local_sample_distances(groupby=["labels", "label_2"])
@@ -91,16 +121,6 @@ def test_mrvi():
     assert pvals.shape == (adata.shape[0], 2)
     es = model.compute_cell_scores(donor_keys=donor_keys, compute_pval=False)
     assert es.shape == (adata.shape[0], 2)
-
-    # Test memory efficient groupby.
-    grouped_dists_no_cell = model.get_local_sample_distances(keep_cell=False, groupby=["meta1", "meta2"])
-    grouped_dists_w_cell = model.get_local_sample_distances(groupby=["meta1", "meta2"])
-    assert np.allclose(grouped_dists_no_cell.meta1, grouped_dists_w_cell.meta1)
-    assert np.allclose(grouped_dists_no_cell.meta2, grouped_dists_w_cell.meta2)
-
-    # tests __repr__
-    print(model)
-
 
 
 def test_mrvi_nonlinear():

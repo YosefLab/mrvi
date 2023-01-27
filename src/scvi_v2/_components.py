@@ -50,6 +50,26 @@ class ResnetBlock(nn.Module):
         return self.output_activation(h)
 
 
+class MLP(nn.Module):
+    """Multi-layer perceptron with resnet blocks."""
+
+    n_out: int
+    n_hidden: int = 128
+    n_layers: int = 1
+    activation: Callable = nn.relu
+    training: Optional[bool] = None
+
+    @nn.compact
+    def __call__(self, inputs: NdArray, training: Optional[bool] = None) -> dist.Normal:  # noqa: D102
+        training = nn.merge_param("training", self.training, training)
+        h = inputs
+        for _ in range(self.n_layers):
+            h = ResnetBlock(
+                n_out=self.n_hidden, internal_activation=self.activation, output_activation=self.activation
+            )(h, training=training)
+        return Dense(self.n_out)(h)
+
+
 class NormalDistOutputNN(nn.Module):
     """Fully-connected neural net parameterizing a normal distribution."""
 

@@ -140,6 +140,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         adata: Optional[AnnData] = None,
         indices=None,
         batch_size: Optional[int] = None,
+        use_mean: bool = True,
         give_z: bool = False,
     ) -> np.ndarray:
         """
@@ -153,6 +154,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             Indices of cells to use.
         batch_size
             Batch size to use for computing the latent representation.
+        use_mean
+            Whether to use the mean of the distribution as the latent representation.
         give_z
             Whether to return the z latent representation or the u latent representation.
 
@@ -166,7 +169,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
         us = []
         zs = []
-        jit_inference_fn = self.module.get_jit_inference_fn(inference_kwargs={"use_mean": True})
+        jit_inference_fn = self.module.get_jit_inference_fn(inference_kwargs={"use_mean": use_mean})
         for array_dict in tqdm(scdl):
             outputs = jit_inference_fn(self.module.rngs, array_dict)
 
@@ -212,6 +215,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         self,
         adata: Optional[AnnData] = None,
         batch_size: int = 256,
+        use_mean: bool = True,
         use_vmap: bool = True,
     ) -> xr.DataArray:
         """
@@ -225,6 +229,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             AnnData object to use for computing the local sample representation.
         batch_size
             Batch size to use for computing the local sample representation.
+        use_mean
+            Whether to use the mean of the latent representation as the local sample representation.
         use_vmap
             Whether to use vmap for computing the local sample representation.
             Disabling vmap can be useful if running out of memory on a GPU.
@@ -236,10 +242,10 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         n_sample = self.summary_stats.n_sample
 
         vars_in = {"params": self.module.params, **self.module.state}
-        rngs = self.module.rngs
 
         # TODO: use `self.module.get_jit_inference_fn` when it supports traced values.
         def inference_fn(
+            rngs,
             x,
             sample_index,
             cf_sample,
@@ -251,24 +257,30 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 x=x,
                 sample_index=sample_index,
                 cf_sample=cf_sample,
-                use_mean=True,
+                use_mean=use_mean,
             )["z"]
 
         @jax.jit
         def mapped_inference_fn(
+            stacked_rngs,
             x,
             sample_index,
             cf_sample,
         ):
             if use_vmap:
-                return jax.vmap(inference_fn, in_axes=(None, None, 0), out_axes=-2)(
+                return jax.vmap(inference_fn, in_axes=(0, None, None, 0), out_axes=-2)(
+                    stacked_rngs,
                     x,
                     sample_index,
                     cf_sample,
                 )
             else:
-                per_sample_inference_fn = lambda cf_sample: inference_fn(x, sample_index, cf_sample)
-                return jax.lax.transpose(jax.lax.map(per_sample_inference_fn, cf_sample), (1, 0, 2))
+
+                def per_sample_inference_fn(pair):
+                    rngs, cf_sample = pair
+                    return inference_fn(rngs, x, sample_index, cf_sample)
+
+                return jax.lax.transpose(jax.lax.map(per_sample_inference_fn, (stacked_rngs, cf_sample)), (1, 0, 2))
 
         reps = []
         for array_dict in tqdm(scdl):
@@ -277,7 +289,15 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             inputs = self.module._get_inference_input(
                 array_dict,
             )
+            # Generate a set of RNGs for every cf_sample.
+            rngs_list = [self.module.rngs for _ in range(cf_sample.shape[0])]
+            # Combine list of RNG dicts into a single list. This is necessary for vmap/map.
+            stacked_rngs = {
+                required_rng: jnp.concatenate([rngs_dict[required_rng][None] for rngs_dict in rngs_list], axis=0)
+                for required_rng in self.module.required_rngs
+            }
             zs = mapped_inference_fn(
+                stacked_rngs=stacked_rngs,
                 x=jnp.array(inputs["x"]),
                 sample_index=jnp.array(inputs["sample_index"]),
                 cf_sample=jnp.array(cf_sample),
@@ -299,6 +319,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         self,
         adata: Optional[AnnData] = None,
         batch_size: int = 256,
+        use_mean: bool = True,
         normalize_distances: bool = False,
         use_vmap: bool = True,
         groupby: Optional[Union[List[str], str]] = None,
@@ -317,9 +338,12 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             AnnData object to use for computing the local sample representation.
         batch_size
             Batch size to use for computing the local sample representation.
+        use_mean
+            Whether to use the mean of the latent representation as the local sample representation.
         normalize_distances
             Whether to normalize the local sample distances. Normalizes by
             the standard deviation of the original intra-sample distances.
+            Only works with ``use_mean=False``.
         use_vmap
             Whether to use vmap for computing the local sample representation.
             Disabling vmap can be useful if running out of memory on a GPU.
@@ -327,9 +351,13 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             List of categorical keys or single key of the anndata that is
             used to group the cells.
         """
-        reps_data = self.get_local_sample_representation(adata=adata, batch_size=batch_size, use_vmap=use_vmap)
+        reps_data = self.get_local_sample_representation(
+            adata=adata, batch_size=batch_size, use_mean=use_mean, use_vmap=use_vmap
+        )
         cell_dists_data = self.compute_distance_matrix_from_representations(reps_data)
         if normalize_distances:
+            if use_mean:
+                raise ValueError("normalize_distances can only be used with use_mean=False")
             local_baseline_means, local_baseline_vars = self._compute_local_baseline_dists(adata)
             local_baseline_means = local_baseline_means.reshape(-1, 1, 1)
             local_baseline_vars = local_baseline_vars.reshape(-1, 1, 1)
@@ -368,7 +396,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         )
 
     def _compute_local_baseline_dists(
-        self, adata: Optional[AnnData], mc_samples: int = 1000, batch_size: int = 256
+        self, adata: Optional[AnnData] = None, mc_samples: int = 1000, batch_size: int = 256
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
         Approximate the distributions used as baselines for normalizing the local sample distances.
@@ -394,36 +422,41 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
         jit_inference_fn = self.module.get_jit_inference_fn()
 
-        def get_A_s(module, sample_index):
-            A_s_embed = module.pz.get_variable("params", "A_s")["embedding"]
-            sample_index = sample_index.astype(int).flatten()
-            return jnp.take(A_s_embed, sample_index, axis=0)
+        def get_A_s(module, u, sample_covariate):
+            sample_covariate = sample_covariate.astype(int).flatten()
+            if not module.pz.use_nonlinear:
+                A_s = module.pz.A_s_enc(sample_covariate)
+            else:
+                # A_s output by a non-linear function without an explicit intercept
+                sample_one_hot = jax.nn.one_hot(sample_covariate, module.pz.n_sample)
+                A_s_dec_inputs = jnp.concatenate([u, sample_one_hot], axis=-1)
+                A_s = module.pz.A_s_enc(A_s_dec_inputs, training=False)
+            # cells by n_latent by n_latent
+            return A_s.reshape(sample_covariate.shape[0], module.pz.n_latent, module.pz.n_latent)
 
-        def apply_get_A_s(sample_index):
+        def apply_get_A_s(u, sample_covariate):
             vars_in = {"params": self.module.params, **self.module.state}
             rngs = self.module.rngs
-            A_s = self.module.apply(vars_in, rngs=rngs, method=get_A_s, sample_index=sample_index).reshape(
-                sample_index.shape[0], self.module.n_latent, self.module.n_latent
-            )
+            A_s = self.module.apply(vars_in, rngs=rngs, method=get_A_s, u=u, sample_covariate=sample_covariate)
             return A_s
 
         baseline_means = []
         baseline_vars = []
-        for array_dict in tqdm(scdl):
+        for array_dict in scdl:
             qu = jit_inference_fn(self.module.rngs, array_dict)["qu"]
             qu_vars_diag = jax.vmap(jnp.diag)(qu.variance)
 
             sample_index = self.module._get_inference_input(array_dict)["sample_index"]
-            A_s = apply_get_A_s(sample_index)
+            A_s = apply_get_A_s(qu.mean, sample_index)  # use mean of latent representation to compute the baseline
             B = jnp.expand_dims(jnp.eye(A_s.shape[1]), 0) + A_s
-            squared_l2_sigma = 2 * jnp.einsum(
+            u_diff_sigma = 2 * jnp.einsum(
                 "cij, cjk, clk -> cil", B, qu_vars_diag, B
-            )  # (I + A_s) @ qu_vars_diag @ (I + A_s).T
-            eigvals = jax.vmap(jnp.linalg.eigh)(squared_l2_sigma)[0].astype(float)
-            _ = self.module.rngs  # Regenerate seed_rng
+            )  # 2 * (I + A_s) @ qu_vars_diag @ (I + A_s).T
+            eigvals = jax.vmap(jnp.linalg.eigh)(u_diff_sigma)[0].astype(float)
+            normal_rng = self.module.rngs["params"]  # Hack to get new rng for normal samples.
             normal_samples = jax.random.normal(
-                self.module.seed_rng, shape=(eigvals.shape[0], mc_samples, eigvals.shape[1])
-            )
+                normal_rng, shape=(eigvals.shape[0], mc_samples, eigvals.shape[1])
+            )  # n_cells by mc_samples by n_latent
             squared_l2_dists = jnp.sum(jnp.einsum("cij, cj -> cij", (normal_samples**2), eigvals), axis=2)
             l2_dists = squared_l2_dists**0.5
             baseline_means.append(jnp.mean(l2_dists, axis=1))

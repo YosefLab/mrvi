@@ -9,6 +9,7 @@ from scvi.distributions import JaxNegativeBinomialMeanDisp as NegativeBinomial
 from scvi.module.base import JaxBaseModuleClass, LossOutput, flax_configure
 
 from ._components import (
+    MLP,
     ConditionalNormalization,
     Dense,
     FactorizedEmbedding,
@@ -70,34 +71,48 @@ class _DecoderUZ(nn.Module):
 
     n_latent: int
     n_sample: int
+    use_nonlinear: bool = False
     n_factorized_embed_dims: Optional[int] = None
     dropout_rate: float = 0.0
     training: Optional[bool] = None
 
-    @nn.compact
+    def setup(self):
+        self.dropout = nn.Dropout(self.dropout_rate)
+        if not self.use_nonlinear:
+            if self.n_factorized_embed_dims is None:
+                self.A_s_enc = nn.Embed(
+                    self.n_sample, self.n_latent * self.n_latent, embedding_init=_normal_initializer, name="A_s_enc"
+                )
+            else:
+                self.A_s = FactorizedEmbedding(
+                    self.n_sample,
+                    self.n_latent * self.n_latent,
+                    self.n_factorized_embed_dims,
+                    embedding_init=_normal_initializer,
+                    name="A_s_enc",
+                )
+        else:
+            self.A_s_enc = MLP(self.n_latent * self.n_latent, name="A_s_enc")
+        self.h3_embed = nn.Embed(self.n_sample, self.n_latent, embedding_init=_normal_initializer)
+
     def __call__(self, u: NdArray, sample_covariate: NdArray, training: Optional[bool] = None) -> jnp.ndarray:
         training = nn.merge_param("training", self.training, training)
-        u_drop = nn.Dropout(self.dropout_rate)(jax.lax.stop_gradient(u), deterministic=not training)
+        u_drop = self.dropout(jax.lax.stop_gradient(u), deterministic=not training)
         sample_covariate = sample_covariate.astype(int).flatten()
-        # cells by n_latent by n_latent
-        if self.n_factorized_embed_dims is None:
-            A_s = nn.Embed(
-                self.n_sample, self.n_latent * self.n_latent, embedding_init=_normal_initializer, name="A_s"
-            )(sample_covariate)
+        if not self.use_nonlinear:
+            A_s = self.A_s_enc(sample_covariate)
         else:
-            A_s = FactorizedEmbedding(
-                self.n_sample,
-                self.n_latent * self.n_latent,
-                self.n_factorized_embed_dims,
-                embedding_init=_normal_initializer,
-                name="A_s",
-            )(sample_covariate)
+            # A_s output by a non-linear function without an explicit intercept
+            sample_one_hot = jax.nn.one_hot(sample_covariate, self.n_sample)
+            A_s_dec_inputs = jnp.concatenate([u_drop, sample_one_hot], axis=-1)
+            A_s = self.A_s_enc(A_s_dec_inputs, training=training)
+        # cells by n_latent by n_latent
         A_s = A_s.reshape(sample_covariate.shape[0], self.n_latent, self.n_latent)
         if u_drop.ndim == 3:
             h2 = jnp.einsum("cgl,bcl->bcg", A_s, u_drop)
         else:
             h2 = jnp.einsum("cgl,cl->cg", A_s, u_drop)
-        h3 = nn.Embed(self.n_sample, self.n_latent, embedding_init=_normal_initializer)(sample_covariate)
+        h3 = self.h3_embed(sample_covariate)
         delta = h2 + h3
         return u + delta
 
@@ -135,7 +150,6 @@ class MrVAE(JaxBaseModuleClass):
     n_batch: int
     n_continuous_cov: int
     n_latent: int = 20
-    n_factorized_embed_dims: Optional[int] = None
     encoder_n_hidden: int = 128
     encoder_n_layers: int = 2
     z_u_prior: bool = True
@@ -166,7 +180,6 @@ class MrVAE(JaxBaseModuleClass):
         self.pz = _DecoderUZ(
             self.n_latent,
             self.n_sample,
-            self.n_factorized_embed_dims,
             **pz_kwargs,
         )
 

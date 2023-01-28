@@ -26,11 +26,6 @@ def test_mrvi():
     model.is_trained_ = True
     model.history
 
-    # Test memory efficient groupby.
-    grouped_dists_no_cell = model.get_local_sample_distances(keep_cell=False, groupby=["meta1", "meta2"])
-    grouped_dists_w_cell = model.get_local_sample_distances(groupby=["meta1", "meta2"])
-    assert np.allclose(grouped_dists_no_cell.meta1, grouped_dists_w_cell.meta1)
-    assert np.allclose(grouped_dists_no_cell.meta2, grouped_dists_w_cell.meta2)
     assert model.get_latent_representation().shape == (adata.shape[0], n_latent)
     local_vmap = model.get_local_sample_representation()
 
@@ -59,6 +54,21 @@ def test_mrvi():
         15,
     )
     assert np.allclose(local_normalized_dists[0].values, local_normalized_dists[0].values.T, atol=1e-6)
+
+    # Test memory efficient groupby.
+    grouped_dists_no_cell = model.get_local_sample_distances(keep_cell=False, groupby=["meta1", "meta2"])
+    grouped_dists_w_cell = model.get_local_sample_distances(groupby=["meta1", "meta2"])
+    assert np.allclose(grouped_dists_no_cell.meta1, grouped_dists_w_cell.meta1)
+    assert np.allclose(grouped_dists_no_cell.meta2, grouped_dists_w_cell.meta2)
+
+    grouped_normalized_dists = model.get_local_sample_distances(
+        use_mean=False, normalize_distances=True, keep_cell=False, groupby=["meta1", "meta2"]
+    )
+    assert grouped_normalized_dists.meta1.shape == (
+        2,
+        15,
+        15,
+    )
 
     # tests __repr__
     print(model)

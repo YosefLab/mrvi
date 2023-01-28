@@ -186,6 +186,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         metric: str = "euclidean",
         groups: Optional[Dict[str, List[np.ndarray]]] = None,
         keep_cell: bool = True,
+        normalization_means: Optional[np.ndarray] = None,
+        normalization_vars: Optional[np.ndarray] = None,
     ) -> xr.Dataset:
         """
         Compute distance matrices from counterfactual sample representations.
@@ -201,9 +203,18 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         keep_cell
             Whether to compute and keep per-cell distance matrices.
             Requires that ``groups`` is not ``None``.
+        normalization_means
+            Means to use for normalizing distance matrices.
+        normalization_vars
+            Variancess to use for normalizing distance matrices.
         """
         if (not keep_cell) and (groups is None):
             raise ValueError("`keep_cell` must be `True` if `groups` is `None`.")
+
+        normalize = normalization_means is not None and normalization_vars is not None
+        if normalize:
+            normalization_means = normalization_means.reshape(-1, 1, 1)
+            normalization_vars = normalization_vars.reshape(-1, 1, 1)
 
         n_cells, n_donors, _ = representations.shape
         data_arrays = {}
@@ -212,6 +223,10 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             for i, cell_rep in enumerate(representations):
                 d_ = pairwise_distances(cell_rep, metric=metric)
                 pairwise_dists[i, :, :] = d_
+            if normalize:
+                pairwise_dists = np.clip(pairwise_dists - normalization_means, a_min=0, a_max=None) / (
+                    normalization_vars**0.5
+                )
             data_arrays["cell"] = xr.DataArray(
                 pairwise_dists,
                 dims=["cell_name", "sample_x", "sample_y"],
@@ -236,9 +251,15 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 for group_cat in group_cats:
                     group_mask = (group == group_cat).values
                     group_reps = representations[group_mask, :, :]
+                    if normalize:
+                        masked_means = normalization_means[group_mask, :, :]
+                        masked_vars = normalization_vars[group_mask, :, :]
+
                     group_dist = np.zeros((1, n_donors, n_donors))
-                    for cell_rep in group_reps:
+                    for i, cell_rep in enumerate(group_reps):
                         d_ = pairwise_distances(cell_rep, metric=metric)
+                        if normalize:
+                            d_ = np.clip(d_ - masked_vars[i], a_min=0, a_max=None) / (masked_means[i] ** 0.5)
                         group_dist[0, :, :] += d_
                     group_dist /= len(group_reps)
                     group_dist_data_array = xr.DataArray(
@@ -409,25 +430,21 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             adata=adata, batch_size=batch_size, use_mean=use_mean, use_vmap=use_vmap
         )
         cell_groups = None
+
         if groupby is not None:
             if not isinstance(groupby, list):
                 groupby = [groupby]
             cell_groups = {groupby_key: adata.obs[groupby_key] for groupby_key in groupby}
-        dists_data = self.compute_distance_matrix_from_representations(
-            reps_data, keep_cell=keep_cell, groups=cell_groups
-        )
+
+        local_baseline_means, local_baseline_vars = None, None
         if normalize_distances:
             if use_mean:
                 raise ValueError("normalize_distances can only be used with use_mean=False")
             local_baseline_means, local_baseline_vars = self._compute_local_baseline_dists(adata)
-            local_baseline_means = local_baseline_means.reshape(-1, 1, 1)
-            local_baseline_vars = local_baseline_vars.reshape(-1, 1, 1)
 
-            for varname, data_arr in dists_data.data_vars.items():
-                dists_data[varname] = np.clip(data_arr - local_baseline_means, a_min=0, a_max=None) / (
-                    local_baseline_vars**0.5
-                )
-        return dists_data
+        return self.compute_distance_matrix_from_representations(
+            reps_data, keep_cell=keep_cell, groups=cell_groups, normalization_means=None, normalization_vars=None
+        )
 
     def _compute_local_baseline_dists(
         self, adata: Optional[AnnData] = None, mc_samples: int = 1000, batch_size: int = 256

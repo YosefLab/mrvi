@@ -103,7 +103,7 @@ class _DecoderUZ(nn.Module):
             A_s = self.A_s_enc(sample_covariate)
         else:
             # A_s output by a non-linear function without an explicit intercept.
-            u_drop = u  # No dropout or stop gradient for nonlinear.
+            u_drop = self.dropout(u, deterministic=not training)  # No stop gradient for nonlinear.
             sample_one_hot = jax.nn.one_hot(sample_covariate, self.n_sample)
             A_s_enc_inputs = jnp.concatenate([u_drop, sample_one_hot], axis=-1)
             A_s = self.A_s_enc(A_s_enc_inputs, training=training)

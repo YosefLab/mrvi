@@ -98,12 +98,11 @@ class _DecoderUZ(nn.Module):
     def __call__(self, u: NdArray, sample_covariate: NdArray, training: Optional[bool] = None) -> jnp.ndarray:
         training = nn.merge_param("training", self.training, training)
         sample_covariate = sample_covariate.astype(int).flatten()
+        u_drop = self.dropout(jax.lax.stop_gradient(u), deterministic=not training)
         if not self.use_nonlinear:
-            u_drop = self.dropout(jax.lax.stop_gradient(u), deterministic=not training)
             A_s = self.A_s_enc(sample_covariate)
         else:
             # A_s output by a non-linear function without an explicit intercept.
-            u_drop = self.dropout(u, deterministic=not training)  # No stop gradient for nonlinear.
             sample_one_hot = jax.nn.one_hot(sample_covariate, self.n_sample)
             A_s_enc_inputs = jnp.concatenate([u_drop, sample_one_hot], axis=-1)
             A_s = self.A_s_enc(A_s_enc_inputs, training=training)

@@ -92,7 +92,7 @@ class _DecoderUZ(nn.Module):
                     name="A_s_enc",
                 )
         else:
-            self.A_s_enc = MLP(self.n_latent * self.n_latent, name="A_s_enc")
+            self.A_s_enc = MLP(self.n_latent * self.n_latent, name="A_s_enc", activation=nn.gelu)
         self.h3_embed = nn.Embed(self.n_sample, self.n_latent, embedding_init=_normal_initializer)
 
     def __call__(self, u: NdArray, sample_covariate: NdArray, training: Optional[bool] = None) -> jnp.ndarray:

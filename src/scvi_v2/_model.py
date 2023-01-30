@@ -443,7 +443,11 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             local_baseline_means, local_baseline_vars = self._compute_local_baseline_dists(adata)
 
         return self.compute_distance_matrix_from_representations(
-            reps_data, keep_cell=keep_cell, groups=cell_groups, normalization_means=None, normalization_vars=None
+            reps_data,
+            keep_cell=keep_cell,
+            groups=cell_groups,
+            normalization_means=local_baseline_means,
+            normalization_vars=local_baseline_vars,
         )
 
     def _compute_local_baseline_dists(

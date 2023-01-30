@@ -554,7 +554,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         n_sample = self.summary_stats.n_sample
 
         vars_in = {"params": self.module.params, **self.module.state}
-        self.module.rngs
 
         sample_covariates_values = []
         for sample_covariate_key, sample_covariate_test in donor_keys:

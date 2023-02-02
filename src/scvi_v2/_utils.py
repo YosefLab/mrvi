@@ -4,6 +4,49 @@ from typing import Callable, Union
 import jax
 import jax.numpy as jnp
 import numpy as np
+from _types import ComputeLocalStatisticsConfig, _ComputeLocalStatisticsRequirements
+
+
+def _parse_local_statistics_config_requirements(
+    config: ComputeLocalStatisticsConfig,
+) -> _ComputeLocalStatisticsRequirements:
+    needs_mean_rep = False
+    needs_sampled_rep = False
+    needs_mean_dists = False
+    needs_sampled_dists = False
+    needs_normalized_dists = False
+
+    ungrouped_reductions = []
+    grouped_reductions = []
+
+    for r in config.reductions:
+        if r.input == "mean_representation":
+            needs_mean_rep = True
+        elif r.input == "sampled_representation":
+            needs_sampled_rep = True
+        elif r.input == "mean_distances":
+            needs_mean_rep = True
+            needs_mean_dists = True
+        elif r.input == "sampled_distances":
+            needs_sampled_rep = True
+            needs_sampled_dists = True
+        elif r.input == "normalized_distances":
+            needs_sampled_rep = True
+            needs_normalized_dists = True
+
+        if r.group_by is None:
+            ungrouped_reductions.append(r)
+        else:
+            grouped_reductions.append(r)
+
+    return _ComputeLocalStatisticsRequirements(
+        needs_mean_representations=needs_mean_rep,
+        needs_sampled_representations=needs_sampled_rep,
+        needs_mean_distances=needs_mean_dists,
+        needs_sampled_distances=needs_sampled_dists,
+        needs_normalized_distances=needs_normalized_dists,
+        grouped_reductions=grouped_reductions,
+    )
 
 
 def simple_reciprocal(w, eps=1e-6):

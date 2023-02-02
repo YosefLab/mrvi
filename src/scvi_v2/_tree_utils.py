@@ -1,4 +1,4 @@
-from typing import Union
+from typing import Optional, Union
 
 import ete3
 import matplotlib.pyplot as plt
@@ -10,6 +10,101 @@ from matplotlib.colors import rgb2hex
 from scipy.cluster import hierarchy as hc
 from scipy.cluster.hierarchy import to_tree
 from scipy.spatial.distance import squareform
+
+
+class TreeExplorer:
+    """Utility class to explore the tree structure of a dendrogram computed with scipy.cluster.hierarchy.linkage."""
+
+    def __init__(
+        self,
+        dendrogram: np.ndarray,
+        leaves_labels: Optional[np.ndarray] = None,
+    ):
+        self.dendrogram = dendrogram
+        self.n_points_total = dendrogram.shape[0] + 1
+
+        self.leaves_labels = np.array(leaves_labels) if leaves_labels is not None else np.arange(self.n_points_total)
+        self.node_labels = None
+        self.init_node_labels()
+
+        self._check_dendrogram_valid()
+
+    def init_node_labels(self):
+        """Initializes node labels."""
+        assert self.leaves_labels.shape[0] == self.n_points_total
+        self.node_labels = np.concatenate(
+            [
+                self.leaves_labels,
+                np.array(
+                    [
+                        f"node_{i}"
+                        for i in range(self.n_points_total, self.dendrogram.shape[0] + self.n_points_total + 1)
+                    ]
+                ),
+            ]
+        )
+
+    def get_children(self, node_id):
+        """Computes list of leaves under a node."""
+        if node_id < self.n_points_total:
+            return [node_id]
+        im = int(node_id - self.n_points_total)
+        left_children = self.dendrogram[im, 0]
+        right_children = self.dendrogram[im, 1]
+        return self.get_children(left_children) + self.get_children(right_children)
+
+    def get_partial_leaves(self, node_id, which):
+        """Computes list of leaves under the left or right child of a node."""
+        assert which in ["left", "right"]
+        idx = 0 if which == "left" else 1
+        leaves_nodeids = self.get_children(self.dendrogram[node_id - self.n_points_total, idx])
+        leaves_nodeids = self._check_indices_valid(leaves_nodeids)
+        return leaves_nodeids
+
+    def get_left_leaves(self, node_id):
+        """Computes list of leaves under the left child of a node."""
+        return self.get_partial_leaves(node_id, "left")
+
+    def get_right_leaves(self, node_id):
+        """Computes list of leaves under the right child of a node."""
+        return self.get_partial_leaves(node_id, "right")
+
+    def get_tree_splits(self, max_depth=5):
+        """Computes left and right children of each node in the tree starting from the root."""
+        children_pairs = []
+        # start id: 2n - 2
+
+        current_node_id = self.root_id
+        for _ in range(max_depth):
+            dendrogram_id = current_node_id - self.n_points_total
+            if dendrogram_id < 0:
+                break
+            children_pairs.append(
+                (
+                    self.get_left_leaves(current_node_id),
+                    self.get_right_leaves(current_node_id),
+                )
+            )
+            current_node_id -= 1
+        return children_pairs
+
+    @property
+    def root_id(self):
+        """Returns the id of the root node."""
+        return self.n_points_total * 2 - 2
+
+    def _check_dendrogram_valid(self):
+        necessary_condition = self.dendrogram.shape[1] == 4
+        if not necessary_condition:
+            raise ValueError("Dendrogram must have 4 columns. This is not the case for the dendrogram provided.")
+
+    @staticmethod
+    def _check_indices_valid(indices):
+        indices_int = np.array(indices)
+        indices_int = indices_int.astype(int)
+        if not np.all(indices_int == indices):
+            raise ValueError("Indices must be integers.")
+        return indices_int
 
 
 def linkage_to_ete(linkage_obj):

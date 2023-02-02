@@ -4,7 +4,8 @@ from typing import Callable, Union
 import jax
 import jax.numpy as jnp
 import numpy as np
-from _types import ComputeLocalStatisticsConfig, _ComputeLocalStatisticsRequirements
+
+from ._types import ComputeLocalStatisticsConfig, _ComputeLocalStatisticsRequirements
 
 
 def _parse_local_statistics_config_requirements(
@@ -20,9 +21,9 @@ def _parse_local_statistics_config_requirements(
     grouped_reductions = []
 
     for r in config.reductions:
-        if r.input == "mean_representation":
+        if r.input == "mean_representations":
             needs_mean_rep = True
-        elif r.input == "sampled_representation":
+        elif r.input == "sampled_representations":
             needs_sampled_rep = True
         elif r.input == "mean_distances":
             needs_mean_rep = True
@@ -33,6 +34,8 @@ def _parse_local_statistics_config_requirements(
         elif r.input == "normalized_distances":
             needs_sampled_rep = True
             needs_normalized_dists = True
+        else:
+            raise ValueError(f"Unknown reduction input: {r.input}")
 
         if r.group_by is None:
             ungrouped_reductions.append(r)
@@ -46,6 +49,7 @@ def _parse_local_statistics_config_requirements(
         needs_sampled_distances=needs_sampled_dists,
         needs_normalized_distances=needs_normalized_dists,
         grouped_reductions=grouped_reductions,
+        ungrouped_reductions=ungrouped_reductions,
     )
 
 

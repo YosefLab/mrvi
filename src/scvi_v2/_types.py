@@ -43,7 +43,7 @@ class MrVIReduction:
     ]
     fn: Union[
         Callable[[MrVI, xr.DataArray], xr.DataArray], Callable[[MrVI, xr.DataArray, str], xr.DataArray]
-    ] = lambda _, x: x
+    ] = lambda _, x: xr.DataArray(x)
     map_by: Optional[str] = None
     group_by: Optional[str] = None
 
@@ -67,19 +67,9 @@ class _ComputeLocalStatisticsRequirements:
     """Utility class for the summarized requirements for ``MrVI.compute_local_statistics``."""
 
     needs_mean_representations: bool
-    mean_representations_reductions: Iterable[MrVIReduction]
-
     needs_mean_distances: bool
-    mean_distances_reductions: Iterable[MrVIReduction]
-
     needs_sampled_representations: bool
-    sampled_representations_reductions: Iterable[MrVIReduction]
-
     needs_sampled_distances: bool
-    sampled_distances_reductions: Iterable[MrVIReduction]
-
     needs_normalized_distances: bool
-    normalized_distances_reductions: Iterable[MrVIReduction]
-
     ungrouped_reductions: Iterable[MrVIReduction]
     grouped_reductions: Iterable[MrVIReduction]

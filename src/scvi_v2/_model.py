@@ -878,15 +878,16 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         vars_in = {"params": self.module.params, **self.module.state}
         rngs = self.module.rngs
 
-        h_inference_fn = partial(
-            self.h_inference_fn,
-            module=self.module,
-            vars_in=vars_in,
-            rngs=rngs,
-            mc_samples_per_obs=10,
-            give_mean=True,
+        inference_fn = jax.jit(
+            partial(
+                self.h_inference_fn,
+                module=self.module,
+                vars_in=vars_in,
+                rngs=rngs,
+                mc_samples_per_obs=10,
+                give_mean=True,
+            )
         )
-        inference_fn = jax.jit(h_inference_fn)
 
         @jax.jit
         def get_hs(inputs, cf_sample):

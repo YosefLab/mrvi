@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import Any, Callable, Iterable, Literal, Optional, Tuple, TypeVar, Union
+from typing import Any, Callable, Iterable, Literal, Optional, Tuple, Union
 
 import jax.numpy as jnp
 import numpy as np
@@ -9,7 +9,6 @@ NdArray = Union[np.ndarray, jnp.ndarray]
 PRNGKey = Any
 Shape = Tuple[int, ...]
 Dtype = Any
-MrVI = TypeVar("MrVI")
 
 
 @dataclass(frozen=True)
@@ -25,9 +24,6 @@ class MrVIReduction:
         Type of input data.
     fn
         Function that computes the reduction.
-    map_by
-        Covariate name that parameterizes the ``fn``. If provided, ``fn`` must
-        accept a third argument, ``map_by``.
     group_by
         Covariate name by which to average the computed statistics by. If ``None``,
         the outputs are left at the per-cell granularity.
@@ -41,10 +37,7 @@ class MrVIReduction:
         Literal["sampled_distances"],
         Literal["normalized_distances"],
     ]
-    fn: Union[
-        Callable[[MrVI, xr.DataArray], xr.DataArray], Callable[[MrVI, xr.DataArray, str], xr.DataArray]
-    ] = lambda _, x: xr.DataArray(x)
-    map_by: Optional[str] = None
+    fn: Callable[[xr.DataArray], xr.DataArray] = lambda x: xr.DataArray(x)
     group_by: Optional[str] = None
 
 

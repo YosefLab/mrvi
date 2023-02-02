@@ -128,9 +128,15 @@ def test_mrvi_stratifications():
         ("meta2", "geary"),
     ]
     pvals = model.compute_cell_scores(donor_keys=donor_keys)
-    assert pvals.shape == (adata.shape[0], 2)
+    assert len(pvals.data_vars) == 2
+    assert pvals.data_vars["meta1_nn_pval"].shape == (adata.shape[0],)
+    assert pvals.data_vars["meta2_geary_pval"].shape == (adata.shape[0],)
+    assert (pvals.data_vars["meta1_nn_pval"].values != pvals.data_vars["meta2_geary_pval"].values).all()
     es = model.compute_cell_scores(donor_keys=donor_keys, compute_pval=False)
-    assert es.shape == (adata.shape[0], 2)
+    assert len(es.data_vars) == 2
+    assert es.data_vars["meta1_nn_effect_size"].shape == (adata.shape[0],)
+    assert es.data_vars["meta2_geary_effect_size"].shape == (adata.shape[0],)
+    assert (es.data_vars["meta1_nn_effect_size"].values != es.data_vars["meta2_geary_effect_size"].values).all()
 
 
 def test_mrvi_nonlinear():

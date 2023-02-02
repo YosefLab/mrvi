@@ -357,11 +357,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 else:
                     raise ValueError(f"Unknown reduction input: {r.input}")
 
-                if r.map_by is not None:
-                    map_by = adata.obs[r.map_by][indices]
-                    outputs = r.fn(self, inputs, map_by)
-                else:
-                    outputs = r.fn(self, inputs)
+                outputs = r.fn(inputs)
 
                 if r.group_by is not None:
                     group_by = adata.obs[r.group_by][indices]
@@ -423,7 +419,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 MrVIReduction(
                     name="sample_representations",
                     input="mean_representations" if use_mean else "sampled_representations",
-                    fn=lambda _, x: x,
+                    fn=lambda x: x,
                     group_by=None,
                 )
             ]
@@ -478,6 +474,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             input = "normalized_distances"
         if groupby and not isinstance(groupby, list):
             groupby = [groupby]
+
         reductions = []
         if not keep_cell and not groupby:
             raise ValueError("Undefined computation because not keep_cell and no groupby.")
@@ -486,7 +483,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 MrVIReduction(
                     name="cell",
                     input=input,
-                    fn=lambda _, x: x,
+                    fn=lambda x: x,
                 )
             )
         if groupby:
@@ -563,7 +560,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         use_vmap: bool = True,
         n_mc_samples: int = 200,
         compute_pval: bool = True,
-    ):
+    ) -> xr.Dataset:
         """Computes for each cell a statistic (effect size or p-value)
 
         Parameters
@@ -583,64 +580,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         compute_pval
             Whether to compute p-values or effect sizes.
         """
-        adata = self.adata if adata is None else adata
-        self._check_if_trained(warn=False)
-        adata = self._validate_anndata(adata)
-        scdl = self._make_data_loader(adata=adata, indices=None, batch_size=batch_size, iter_ndarray=True)
-        n_sample = self.summary_stats.n_sample
-
-        vars_in = {"params": self.module.params, **self.module.state}
-
-        sample_covariates_values = []
-        for sample_covariate_key, sample_covariate_test in donor_keys:
-            x = self.donor_info[sample_covariate_key].values
-            if sample_covariate_test == "nn":
-                x = pd.Categorical(x).codes
-            x = jnp.array(x)
-            sample_covariates_values.append(x)
-        sample_covariate_tests = [key[1] for key in donor_keys]
-
-        def inference_fn(
-            rngs,
-            x,
-            sample_index,
-            cf_sample,
-        ):
-            return self.module.apply(
-                vars_in,
-                rngs=rngs,
-                method=self.module.inference,
-                x=x,
-                sample_index=sample_index,
-                cf_sample=cf_sample,
-                use_mean=True,
-            )["z"]
-
-        @jax.jit
-        def mapped_inference_fn(
-            stacked_rngs,
-            x,
-            sample_index,
-            cf_sample,
-        ):
-            if use_vmap:
-                reps = jax.vmap(inference_fn, in_axes=(0, None, None, 0), out_axes=-2)(
-                    stacked_rngs,
-                    x,
-                    sample_index,
-                    cf_sample,
-                )
-            else:
-
-                def per_sample_inference_fn(pair):
-                    rngs, cf_sample = pair
-                    return inference_fn(rngs, x, sample_index, cf_sample)
-
-                reps = jax.lax.transpose(jax.lax.map(per_sample_inference_fn, (stacked_rngs, cf_sample)), (1, 0, 2))
-
-            euclid_d = lambda x: jnp.sqrt(((x[:, None] - x[None, :]) ** 2).sum(-1))
-            dists = jax.vmap(euclid_d, in_axes=0)(reps)
-            return dists
+        test_out = "pval" if compute_pval else "effect_size"
 
         # not jitted because the statistic arg is causing troubles
         def _get_scores(w, x, statistic):
@@ -650,38 +590,30 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 fn = lambda w, x: compute_statistic(w, x, statistic=statistic)
             return jax.vmap(fn, in_axes=(0, None))(w, x)
 
-        sigs = []
-        for array_dict in tqdm(scdl):
-            n_cells = array_dict[REGISTRY_KEYS.X_KEY].shape[0]
-            cf_sample = np.broadcast_to(np.arange(n_sample)[:, None, None], (n_sample, n_cells, 1))
-            inputs = self.module._get_inference_input(
-                array_dict,
-            )
-            # Generate a set of RNGs for every cf_sample.
-            rngs_list = [self.module.rngs for _ in range(cf_sample.shape[0])]
-            # Combine list of RNG dicts into a single list. This is necessary for vmap/map.
-            stacked_rngs = {
-                required_rng: jnp.concatenate([rngs_dict[required_rng][None] for rngs_dict in rngs_list], axis=0)
-                for required_rng in self.module.required_rngs
-            }
-            dists = mapped_inference_fn(
-                stacked_rngs=stacked_rngs,
-                x=jnp.array(inputs["x"]),
-                sample_index=jnp.array(inputs["sample_index"]),
-                cf_sample=jnp.array(cf_sample),
+        def get_scores_data_arr_fn(cov, sample_covariate_test):
+            return lambda x: xr.DataArray(
+                _get_scores(x.data, cov, sample_covariate_test),
+                dims=["cell_name"],
+                coords={"cell_name": x.coords["cell_name"]},
             )
 
-            all_pvals = []
-            for x, sample_covariate_test in zip(sample_covariates_values, sample_covariate_tests):
-                pvals = _get_scores(dists, x, sample_covariate_test)
-                all_pvals.append(pvals)
-            all_pvals = jnp.stack(all_pvals, axis=-1)
-            sigs.append(np.array(jax.device_get(all_pvals)))
-        sigs = np.concatenate(sigs, axis=0)
-        prepand = "pval_" if compute_pval else "effect_size_"
-        columns = [prepand + key[0] for key in donor_keys]
-        sigs = pd.DataFrame(sigs, columns=columns)
-        return sigs
+        reductions = []
+        for sample_covariate_key, sample_covariate_test in donor_keys:
+            cov = self.donor_info[sample_covariate_key].values
+            if sample_covariate_test == "nn":
+                cov = pd.Categorical(cov).codes
+            cov = jnp.array(cov)
+            fn = get_scores_data_arr_fn(cov, sample_covariate_test)
+            reductions.append(
+                MrVIReduction(
+                    name=f"{sample_covariate_key}_{sample_covariate_test}_{test_out}",
+                    input="mean_distances",
+                    fn=fn,
+                )
+            )
+
+        config = ComputeLocalStatisticsConfig(reductions=reductions)
+        return self.compute_local_statistics(adata, batch_size=batch_size, use_vmap=use_vmap, config=config)
 
     @property
     def original_donor_key(self):

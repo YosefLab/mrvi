@@ -2,7 +2,7 @@ import logging
 import os
 from copy import deepcopy
 from functools import partial
-from typing import List, Optional, Sequence, Tuple, Union
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 import jax
 import jax.numpy as jnp
@@ -100,6 +100,14 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
     def to_device(self, device):  # noqa: #D102
         # TODO(jhong): remove this once we have a better way to handle device.
         pass
+
+    def _generate_stacked_rngs(self, n_sets: int) -> Dict[str, jax.random.PRNGKey]:
+        rngs_list = [self.module.rngs for _ in range(n_sets)]
+        # Combine list of RNG dicts into a single list. This is necessary for vmap/map.
+        return {
+            required_rng: jnp.concatenate([rngs_dict[required_rng][None] for rngs_dict in rngs_list], axis=0)
+            for required_rng in self.module.required_rngs
+        }
 
     @classmethod
     def setup_anndata(  # noqa: #D102
@@ -264,13 +272,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             inf_inputs = self.module._get_inference_input(
                 array_dict,
             )
-            # Generate a set of RNGs for every cf_sample.
-            rngs_list = [self.module.rngs for _ in range(cf_sample.shape[0])]
-            # Combine list of RNG dicts into a single list. This is necessary for vmap/map.
-            stacked_rngs = {
-                required_rng: jnp.concatenate([rngs_dict[required_rng][None] for rngs_dict in rngs_list], axis=0)
-                for required_rng in self.module.required_rngs
-            }
+            stacked_rngs = self._generate_stacked_rngs(cf_sample.shape[0])
 
             # Compute necessary inputs.
             if config_requirements.needs_mean_representations:
@@ -301,38 +303,10 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 )
 
             if config_requirements.needs_mean_distances:
-                n_cells, n_donors, _ = mean_zs.shape
-                mean_dists = np.zeros((n_cells, n_donors, n_donors))
-                for i, cell_rep in enumerate(mean_zs):
-                    d_ = pairwise_distances(cell_rep.data, metric="euclidean")
-                    mean_dists[i, :, :] = d_
-                mean_dists = xr.DataArray(
-                    mean_dists,
-                    dims=["cell_name", "sample_x", "sample_y"],
-                    coords={
-                        "cell_name": adata.obs_names[indices],
-                        "sample_x": self.sample_order,
-                        "sample_y": self.sample_order,
-                    },
-                    name="sample_distances",
-                )
+                mean_dists = self._compute_distances_from_representations(mean_zs, indices)
 
             if config_requirements.needs_sampled_distances or config_requirements.needs_normalized_distances:
-                n_cells, n_donors, _ = sampled_zs.shape
-                sampled_dists = np.zeros((n_cells, n_donors, n_donors))
-                for i, cell_rep in enumerate(sampled_zs):
-                    d_ = pairwise_distances(cell_rep.data, metric="euclidean")
-                    sampled_dists[i, :, :] = d_
-                sampled_dists = xr.DataArray(
-                    sampled_dists,
-                    dims=["cell_name", "sample_x", "sample_y"],
-                    coords={
-                        "cell_name": adata.obs_names[indices],
-                        "sample_x": self.sample_order,
-                        "sample_y": self.sample_order,
-                    },
-                    name="sample_distances",
-                )
+                sampled_dists = self._compute_distances_from_representations(sampled_zs, indices)
 
                 if config_requirements.needs_normalized_distances:
                     normalization_means, normalization_vars = self._compute_local_baseline_dists(array_dict)
@@ -389,6 +363,77 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             final_data_arrs[gr.name] = final_data_arr
 
         return xr.Dataset(data_vars=final_data_arrs)
+
+    def _compute_local_baseline_dists(self, batch: dict, mc_samples: int = 1000) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Approximate the distributions used as baselines for normalizing the local sample distances.
+
+        Approximates the means and variances of the Euclidean distance between two samples of
+        the z latent representation for the original sample for each cell in ``adata``.
+
+        Reference: https://www.overleaf.com/read/mhdxcrknzxpm.
+
+        Parameters
+        ----------
+        batch
+            Batch of data to compute the local sample representation for.
+        mc_samples
+            Number of Monte Carlo samples to use for computing the local baseline distributions.
+        """
+
+        def get_A_s(module, u, sample_covariate):
+            sample_covariate = sample_covariate.astype(int).flatten()
+            if not module.pz.use_nonlinear:
+                A_s = module.pz.A_s_enc(sample_covariate)
+            else:
+                # A_s output by a non-linear function without an explicit intercept
+                sample_one_hot = jax.nn.one_hot(sample_covariate, module.pz.n_sample)
+                A_s_dec_inputs = jnp.concatenate([u, sample_one_hot], axis=-1)
+                A_s = module.pz.A_s_enc(A_s_dec_inputs, training=False)
+            # cells by n_latent by n_latent
+            return A_s.reshape(sample_covariate.shape[0], module.pz.n_latent, module.pz.n_latent)
+
+        def apply_get_A_s(u, sample_covariate):
+            vars_in = {"params": self.module.params, **self.module.state}
+            rngs = self.module.rngs
+            A_s = self.module.apply(vars_in, rngs=rngs, method=get_A_s, u=u, sample_covariate=sample_covariate)
+            return A_s
+
+        jit_inference_fn = self.module.get_jit_inference_fn()
+        qu = jit_inference_fn(self.module.rngs, batch)["qu"]
+        qu_vars_diag = jax.vmap(jnp.diag)(qu.variance)
+
+        sample_index = self.module._get_inference_input(batch)["sample_index"]
+        A_s = apply_get_A_s(qu.mean, sample_index)  # use mean of latent representation to compute the baseline
+        B = jnp.expand_dims(jnp.eye(A_s.shape[1]), 0) + A_s
+        u_diff_sigma = 2 * jnp.einsum(
+            "cij, cjk, clk -> cil", B, qu_vars_diag, B
+        )  # 2 * (I + A_s) @ qu_vars_diag @ (I + A_s).T
+        eigvals = jax.vmap(jnp.linalg.eigh)(u_diff_sigma)[0].astype(float)
+        normal_rng = self.module.rngs["params"]  # Hack to get new rng for normal samples.
+        normal_samples = jax.random.normal(
+            normal_rng, shape=(eigvals.shape[0], mc_samples, eigvals.shape[1])
+        )  # n_cells by mc_samples by n_latent
+        squared_l2_dists = jnp.sum(jnp.einsum("cij, cj -> cij", (normal_samples**2), eigvals), axis=2)
+        l2_dists = squared_l2_dists**0.5
+        return np.array(jnp.mean(l2_dists, axis=1)), np.array(jnp.var(l2_dists, axis=1))
+
+    def _compute_distances_from_representations(self, reps, indices):
+        n_cells, n_donors, _ = reps.shape
+        dists = np.zeros((n_cells, n_donors, n_donors))
+        for i, cell_rep in enumerate(reps):
+            d_ = pairwise_distances(cell_rep.data, metric="euclidean")
+            dists[i, :, :] = d_
+        return xr.DataArray(
+            dists,
+            dims=["cell_name", "sample_x", "sample_y"],
+            coords={
+                "cell_name": self.adata.obs_names[indices],
+                "sample_x": self.sample_order,
+                "sample_y": self.sample_order,
+            },
+            name="sample_distances",
+        )
 
     def get_local_sample_representation(
         self,
@@ -497,60 +542,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 )
         config = ComputeLocalStatisticsConfig(reductions=reductions)
         return self.compute_local_statistics(adata, batch_size=batch_size, use_vmap=use_vmap, config=config)
-
-    def _compute_local_baseline_dists(self, batch: dict, mc_samples: int = 1000) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Approximate the distributions used as baselines for normalizing the local sample distances.
-
-        Approximates the means and variances of the Euclidean distance between two samples of
-        the z latent representation for the original sample for each cell in ``adata``.
-
-        Reference: https://www.overleaf.com/read/mhdxcrknzxpm.
-
-        Parameters
-        ----------
-        batch
-            Batch of data to compute the local sample representation for.
-        mc_samples
-            Number of Monte Carlo samples to use for computing the local baseline distributions.
-        """
-
-        def get_A_s(module, u, sample_covariate):
-            sample_covariate = sample_covariate.astype(int).flatten()
-            if not module.pz.use_nonlinear:
-                A_s = module.pz.A_s_enc(sample_covariate)
-            else:
-                # A_s output by a non-linear function without an explicit intercept
-                sample_one_hot = jax.nn.one_hot(sample_covariate, module.pz.n_sample)
-                A_s_dec_inputs = jnp.concatenate([u, sample_one_hot], axis=-1)
-                A_s = module.pz.A_s_enc(A_s_dec_inputs, training=False)
-            # cells by n_latent by n_latent
-            return A_s.reshape(sample_covariate.shape[0], module.pz.n_latent, module.pz.n_latent)
-
-        def apply_get_A_s(u, sample_covariate):
-            vars_in = {"params": self.module.params, **self.module.state}
-            rngs = self.module.rngs
-            A_s = self.module.apply(vars_in, rngs=rngs, method=get_A_s, u=u, sample_covariate=sample_covariate)
-            return A_s
-
-        jit_inference_fn = self.module.get_jit_inference_fn()
-        qu = jit_inference_fn(self.module.rngs, batch)["qu"]
-        qu_vars_diag = jax.vmap(jnp.diag)(qu.variance)
-
-        sample_index = self.module._get_inference_input(batch)["sample_index"]
-        A_s = apply_get_A_s(qu.mean, sample_index)  # use mean of latent representation to compute the baseline
-        B = jnp.expand_dims(jnp.eye(A_s.shape[1]), 0) + A_s
-        u_diff_sigma = 2 * jnp.einsum(
-            "cij, cjk, clk -> cil", B, qu_vars_diag, B
-        )  # 2 * (I + A_s) @ qu_vars_diag @ (I + A_s).T
-        eigvals = jax.vmap(jnp.linalg.eigh)(u_diff_sigma)[0].astype(float)
-        normal_rng = self.module.rngs["params"]  # Hack to get new rng for normal samples.
-        normal_samples = jax.random.normal(
-            normal_rng, shape=(eigvals.shape[0], mc_samples, eigvals.shape[1])
-        )  # n_cells by mc_samples by n_latent
-        squared_l2_dists = jnp.sum(jnp.einsum("cij, cj -> cij", (normal_samples**2), eigvals), axis=2)
-        l2_dists = squared_l2_dists**0.5
-        return np.array(jnp.mean(l2_dists, axis=1)), np.array(jnp.var(l2_dists, axis=1))
 
     def compute_cell_scores(
         self,

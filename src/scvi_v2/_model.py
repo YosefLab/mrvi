@@ -25,7 +25,13 @@ from ._tree_utils import (
     convert_pandas_to_colors,
     plot_distance_matrix,
 )
-from ._utils import compute_statistic, permutation_test
+from ._utils import (
+    compute_statistic,
+    get_all_inputs,
+    h_inference_fn,
+    permutation_test,
+    z_inference_fn,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -205,7 +211,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 "sample_x": representations.sample.values,
                 "sample_y": representations.sample.values,
             },
-            name="sample_distances",
+            name="per_gene_sample_distances",
         )
         return dists_data_array
 
@@ -238,8 +244,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
         vars_in = {"params": self.module.params, **self.module.state}
         rngs = self.module.rngs
-        z_partial_fn = partial(self.z_inference_fn, module=self.module, vars_in=vars_in, rngs=rngs)
-        inference_fn = jax.jit(z_partial_fn)
+        inference_fn = jax.jit(partial(z_inference_fn, module=self.module, vars_in=vars_in, rngs=rngs))
 
         @jax.jit
         def mapped_inference_fn(
@@ -454,8 +459,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
         vars_in = {"params": self.module.params, **self.module.state}
         rngs = self.module.rngs
-        z_partial_fn = partial(self.z_inference_fn, module=self.module, vars_in=vars_in, rngs=rngs)
-        inference_fn = jax.jit(z_partial_fn)
+        inference_fn = jax.jit(partial(z_inference_fn, module=self.module, vars_in=vars_in, rngs=rngs))
 
         sample_covariates_values = []
         for sample_covariate_key, sample_covariate_test in donor_keys:
@@ -599,15 +603,17 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
         vars_in = {"params": self.module.params, **self.module.state}
         rngs = self.module.rngs
-        h_inference_fn = partial(
-            self.h_inference_fn,
-            module=self.module,
-            vars_in=vars_in,
-            rngs=rngs,
-            mc_samples_per_obs=mc_samples_per_obs,
-            give_mean=False,
+
+        inference_fn = jax.jit(
+            partial(
+                h_inference_fn,
+                module=self.module,
+                vars_in=vars_in,
+                rngs=rngs,
+                mc_samples_per_obs=mc_samples_per_obs,
+                give_mean=False,
+            )
         )
-        inference_fn = jax.jit(h_inference_fn)
 
         @jax.jit
         def get_hs(inputs, cf_sample):
@@ -637,7 +643,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
         for array_dict in tqdm(scdl):
             n_cells = array_dict[REGISTRY_KEYS.X_KEY].shape[0]
-            inputs = self._get_all_inputs(
+            inputs = get_all_inputs(
                 array_dict,
             )
             cf_sample_a = jnp.array(
@@ -880,7 +886,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
         inference_fn = jax.jit(
             partial(
-                self.h_inference_fn,
+                h_inference_fn,
                 module=self.module,
                 vars_in=vars_in,
                 rngs=rngs,
@@ -922,7 +928,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             # Compute mean expression levels
             for array_dict in tqdm(scdl_):
                 n_cells = array_dict[REGISTRY_KEYS.X_KEY].shape[0]
-                inputs = self._get_all_inputs(
+                inputs = get_all_inputs(
                     array_dict,
                 )
                 samples = jnp.array(np.broadcast_to(np.arange(n_sample)[:, None, None], (n_sample, n_cells, 1)))
@@ -948,71 +954,5 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 "sample_x": sample_order,
                 "sample_y": sample_order,
             },
-            name="sample_distances",
+            name="per_gene_sample_distances",
         )
-
-    @staticmethod
-    def _get_all_inputs(
-        inputs,
-    ):
-        x = jnp.array(inputs[REGISTRY_KEYS.X_KEY])
-        sample_index = jnp.array(inputs[MRVI_REGISTRY_KEYS.SAMPLE_KEY])
-        batch_index = jnp.array(inputs[REGISTRY_KEYS.BATCH_KEY])
-        continuous_covs = inputs.get(REGISTRY_KEYS.CONT_COVS_KEY, None)
-        if continuous_covs is not None:
-            continuous_covs = jnp.array(continuous_covs)
-        return {
-            "x": x,
-            "sample_index": sample_index,
-            "batch_index": batch_index,
-            "continuous_covs": continuous_covs,
-        }
-
-    @staticmethod
-    def z_inference_fn(
-        x,
-        sample_index,
-        cf_sample,
-        module,
-        vars_in,
-        rngs,
-    ):
-        """Generic inference function to compute latent z."""
-        return module.apply(
-            vars_in,
-            rngs=rngs,
-            method=module.inference,
-            x=x,
-            sample_index=sample_index,
-            cf_sample=cf_sample,
-            use_mean=True,
-        )["z"]
-
-    @staticmethod
-    def h_inference_fn(
-        x,
-        sample_index,
-        batch_index,
-        cf_sample,
-        continuous_covs,
-        module,
-        vars_in,
-        rngs,
-        mc_samples_per_obs,
-        give_mean,
-    ):
-        """Generic inference function to compute normalized expression levels."""
-        hs = module.apply(
-            vars_in,
-            rngs=rngs,
-            method=module.compute_h_from_x,
-            x=x,
-            sample_index=sample_index,
-            batch_index=batch_index,
-            cf_sample=cf_sample,
-            continuous_covs=continuous_covs,
-            mc_samples=mc_samples_per_obs,
-        )
-        if give_mean:
-            hs = jnp.mean(hs, axis=0)
-        return hs

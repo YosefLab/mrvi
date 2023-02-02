@@ -4,6 +4,9 @@ from typing import Callable, Union
 import jax
 import jax.numpy as jnp
 import numpy as np
+from scvi import REGISTRY_KEYS
+
+from ._constants import MRVI_REGISTRY_KEYS
 
 
 def simple_reciprocal(w, eps=1e-6):
@@ -165,3 +168,70 @@ def permutation_test(
         raise ValueError("alternative must be 'greater' or 'less'")
     pval = (1.0 + cdt.sum()) / (1.0 + n_mc_samples)
     return pval
+
+
+def get_all_inputs(
+    inputs,
+):
+    """Gather all inputs."""
+    x = jnp.array(inputs[REGISTRY_KEYS.X_KEY])
+    sample_index = jnp.array(inputs[MRVI_REGISTRY_KEYS.SAMPLE_KEY])
+    batch_index = jnp.array(inputs[REGISTRY_KEYS.BATCH_KEY])
+    continuous_covs = inputs.get(REGISTRY_KEYS.CONT_COVS_KEY, None)
+    if continuous_covs is not None:
+        continuous_covs = jnp.array(continuous_covs)
+    return {
+        "x": x,
+        "sample_index": sample_index,
+        "batch_index": batch_index,
+        "continuous_covs": continuous_covs,
+    }
+
+
+def z_inference_fn(
+    x,
+    sample_index,
+    cf_sample,
+    module,
+    vars_in,
+    rngs,
+):
+    """Generic inference function to compute latent z."""
+    return module.apply(
+        vars_in,
+        rngs=rngs,
+        method=module.inference,
+        x=x,
+        sample_index=sample_index,
+        cf_sample=cf_sample,
+        use_mean=True,
+    )["z"]
+
+
+def h_inference_fn(
+    x,
+    sample_index,
+    batch_index,
+    cf_sample,
+    continuous_covs,
+    module,
+    vars_in,
+    rngs,
+    mc_samples_per_obs,
+    give_mean,
+):
+    """Generic inference function to compute normalized expression levels."""
+    hs = module.apply(
+        vars_in,
+        rngs=rngs,
+        method=module.compute_h_from_x,
+        x=x,
+        sample_index=sample_index,
+        batch_index=batch_index,
+        cf_sample=cf_sample,
+        continuous_covs=continuous_covs,
+        mc_samples=mc_samples_per_obs,
+    )
+    if give_mean:
+        hs = jnp.mean(hs, axis=0)
+    return hs

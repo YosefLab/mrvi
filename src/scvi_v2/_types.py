@@ -42,20 +42,6 @@ class MrVIReduction:
 
 
 @dataclass(frozen=True)
-class ComputeLocalStatisticsConfig:
-    """
-    A configuration object for ``MrVI.compute_local_statistics``.
-
-    Parameters
-    ----------
-        reductions
-            List of `MrVIReduction` objects defining values to compute over each cell.
-    """
-
-    reductions: Iterable[MrVIReduction] = (MrVIReduction(name="mean_representations", input="mean_representations"),)
-
-
-@dataclass(frozen=True)
 class _ComputeLocalStatisticsRequirements:
     """Utility class for the summarized requirements for ``MrVI.compute_local_statistics``."""
 

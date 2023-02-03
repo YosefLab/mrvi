@@ -30,9 +30,9 @@ from ._tree_utils import (
     compute_dendrogram_from_distance_matrix,
     convert_pandas_to_colors,
 )
-from ._types import ComputeLocalStatisticsConfig, MrVIReduction
+from ._types import MrVIReduction
 from ._utils import (
-    _parse_local_statistics_config_requirements,
+    _parse_local_statistics_requirements,
     compute_statistic,
     permutation_test,
 )
@@ -205,20 +205,45 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
     def compute_local_statistics(
         self,
-        adata: AnnData,
+        reductions: List[MrVIReduction],
+        adata: Optional[AnnData] = None,
         indices: Optional[Sequence[int]] = None,
         batch_size: Optional[int] = None,
         use_vmap: bool = True,
-        config: ComputeLocalStatisticsConfig = ComputeLocalStatisticsConfig(),
     ) -> xr.Dataset:
-        """Compute local statistics from counterfactual sample representations."""
+        """
+        Compute local statistics from counterfactual sample representations.
+
+        Local statistics are reductions over either the local counterfactual latent representations
+        or the resulting local sample distance matrices. For a large number of cells and/or samples,
+        this method can avoid scalability issues by grouping over cell-level covariates.
+
+        Parameters
+        ----------
+        reductions
+            List of reductions to compute over local counterfactual sample representations.
+        adata
+            AnnData object to use.
+        indices
+            Indices of cells to use.
+        batch_size
+            Batch size to use for computing the local statistics.
+        use_vmap
+            Whether to use vmap to compute the local statistics.
+        """
+        if not reductions or len(reductions) == 0:
+            raise ValueError("At least one reduction must be provided.")
+
         adata = self.adata if adata is None else adata
         self._check_if_trained(warn=False)
+        # Hack to ensure new AnnDatas have indices.
+        if "_indices" not in adata.obs:
+            adata.obs["_indices"] = np.arange(adata.n_obs).astype(int)
         adata = self._validate_anndata(adata)
         scdl = self._make_data_loader(adata=adata, indices=indices, batch_size=batch_size, iter_ndarray=True)
         n_sample = self.summary_stats.n_sample
 
-        config_requirements = _parse_local_statistics_config_requirements(config)
+        reqs = _parse_local_statistics_requirements(reductions)
 
         vars_in = {"params": self.module.params, **self.module.state}
 
@@ -260,9 +285,9 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
         ungrouped_data_arrs = {}
         grouped_data_arrs = {}
-        for ur in config_requirements.ungrouped_reductions:
+        for ur in reqs.ungrouped_reductions:
             ungrouped_data_arrs[ur.name] = []
-        for gr in config_requirements.grouped_reductions:
+        for gr in reqs.grouped_reductions:
             grouped_data_arrs[gr.name] = {}  # Will map group category to running group sum.
 
         for array_dict in tqdm(scdl):
@@ -275,7 +300,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             stacked_rngs = self._generate_stacked_rngs(cf_sample.shape[0])
 
             # Compute necessary inputs.
-            if config_requirements.needs_mean_representations:
+            if reqs.needs_mean_representations:
                 mean_zs = xr.DataArray(
                     mapped_inference_fn(
                         stacked_rngs=stacked_rngs,
@@ -288,7 +313,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                     coords={"cell_name": adata.obs_names[indices], "sample": self.sample_order},
                     name="sample_representations",
                 )
-            if config_requirements.needs_sampled_representations:
+            if reqs.needs_sampled_representations:
                 sampled_zs = xr.DataArray(
                     mapped_inference_fn(
                         stacked_rngs=stacked_rngs,  # OK to use stacked rngs here since there is no stochasticity for mean rep.
@@ -302,13 +327,13 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                     name="sample_representations",
                 )
 
-            if config_requirements.needs_mean_distances:
+            if reqs.needs_mean_distances:
                 mean_dists = self._compute_distances_from_representations(mean_zs, indices)
 
-            if config_requirements.needs_sampled_distances or config_requirements.needs_normalized_distances:
+            if reqs.needs_sampled_distances or reqs.needs_normalized_distances:
                 sampled_dists = self._compute_distances_from_representations(sampled_zs, indices)
 
-                if config_requirements.needs_normalized_distances:
+                if reqs.needs_normalized_distances:
                     normalization_means, normalization_vars = self._compute_local_baseline_dists(array_dict)
                     normalization_means = normalization_means.reshape(-1, 1, 1)
                     normalization_vars = normalization_vars.reshape(-1, 1, 1)
@@ -317,7 +342,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                     )
 
             # Compute each reduction
-            for r in config.reductions:
+            for r in reductions:
                 if r.input == "mean_representations":
                     inputs = mean_zs
                 elif r.input == "sampled_representations":
@@ -353,7 +378,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         for ur_name, ur_outputs in ungrouped_data_arrs.items():
             final_data_arrs[ur_name] = xr.concat(ur_outputs, dim="cell_name")
 
-        for gr in config_requirements.grouped_reductions:
+        for gr in reqs.grouped_reductions:
             group_by = adata.obs[gr.group_by]
             group_by_counts = group_by.value_counts()
             averaged_grouped_data_arrs = []
@@ -459,18 +484,16 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             Whether to use vmap for computing the local sample representation.
             Disabling vmap can be useful if running out of memory on a GPU.
         """
-        config = ComputeLocalStatisticsConfig(
-            reductions=[
-                MrVIReduction(
-                    name="sample_representations",
-                    input="mean_representations" if use_mean else "sampled_representations",
-                    fn=lambda x: x,
-                    group_by=None,
-                )
-            ]
-        )
+        reductions = [
+            MrVIReduction(
+                name="sample_representations",
+                input="mean_representations" if use_mean else "sampled_representations",
+                fn=lambda x: x,
+                group_by=None,
+            )
+        ]
         return self.compute_local_statistics(
-            adata, batch_size=batch_size, use_vmap=use_vmap, config=config
+            reductions, adata=adata, batch_size=batch_size, use_vmap=use_vmap
         ).sample_representations
 
     def get_local_sample_distances(
@@ -540,8 +563,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                         group_by=groupby_key,
                     )
                 )
-        config = ComputeLocalStatisticsConfig(reductions=reductions)
-        return self.compute_local_statistics(adata, batch_size=batch_size, use_vmap=use_vmap, config=config)
+        return self.compute_local_statistics(reductions, adata=adata, batch_size=batch_size, use_vmap=use_vmap)
 
     def compute_cell_scores(
         self,
@@ -603,8 +625,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 )
             )
 
-        config = ComputeLocalStatisticsConfig(reductions=reductions)
-        return self.compute_local_statistics(adata, batch_size=batch_size, use_vmap=use_vmap, config=config)
+        return self.compute_local_statistics(reductions, adata=adata, batch_size=batch_size, use_vmap=use_vmap)
 
     @property
     def original_donor_key(self):

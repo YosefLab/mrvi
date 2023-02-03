@@ -1,15 +1,15 @@
 from functools import partial
-from typing import Callable, Union
+from typing import Callable, List, Union
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 
-from ._types import ComputeLocalStatisticsConfig, _ComputeLocalStatisticsRequirements
+from ._types import MrVIReduction, _ComputeLocalStatisticsRequirements
 
 
-def _parse_local_statistics_config_requirements(
-    config: ComputeLocalStatisticsConfig,
+def _parse_local_statistics_requirements(
+    reductions: List[MrVIReduction],
 ) -> _ComputeLocalStatisticsRequirements:
     needs_mean_rep = False
     needs_sampled_rep = False
@@ -20,7 +20,7 @@ def _parse_local_statistics_config_requirements(
     ungrouped_reductions = []
     grouped_reductions = []
 
-    for r in config.reductions:
+    for r in reductions:
         if r.input == "mean_representations":
             needs_mean_rep = True
         elif r.input == "sampled_representations":

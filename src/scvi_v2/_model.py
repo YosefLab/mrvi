@@ -1,7 +1,8 @@
 import logging
 import os
 from copy import deepcopy
-from typing import Dict, List, Optional, Tuple, Union
+from functools import partial
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 import jax
 import jax.numpy as jnp
@@ -13,7 +14,12 @@ import xarray as xr
 from anndata import AnnData
 from scvi import REGISTRY_KEYS
 from scvi.data import AnnDataManager
-from scvi.data.fields import CategoricalObsField, LayerField, NumericalJointObsField
+from scvi.data.fields import (
+    CategoricalObsField,
+    LayerField,
+    NumericalJointObsField,
+    NumericalObsField,
+)
 from scvi.model.base import BaseModelClass, JaxTrainingMixin
 from sklearn.metrics import pairwise_distances
 from tqdm import tqdm
@@ -24,7 +30,12 @@ from ._tree_utils import (
     compute_dendrogram_from_distance_matrix,
     convert_pandas_to_colors,
 )
-from ._utils import compute_statistic, permutation_test
+from ._types import MrVIReduction
+from ._utils import (
+    _parse_local_statistics_requirements,
+    compute_statistic,
+    permutation_test,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -84,10 +95,19 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         obs_df = adata.obs.copy()
         obs_df = obs_df.loc[~obs_df._scvi_sample.duplicated("first")]
         self.donor_info = obs_df.set_index("_scvi_sample").sort_index()
+        self.sample_order = self.adata_manager.get_state_registry(MRVI_REGISTRY_KEYS.SAMPLE_KEY).categorical_mapping
 
     def to_device(self, device):  # noqa: #D102
         # TODO(jhong): remove this once we have a better way to handle device.
         pass
+
+    def _generate_stacked_rngs(self, n_sets: int) -> Dict[str, jax.random.PRNGKey]:
+        rngs_list = [self.module.rngs for _ in range(n_sets)]
+        # Combine list of RNG dicts into a single list. This is necessary for vmap/map.
+        return {
+            required_rng: jnp.concatenate([rngs_dict[required_rng][None] for rngs_dict in rngs_list], axis=0)
+            for required_rng in self.module.required_rngs
+        }
 
     @classmethod
     def setup_anndata(  # noqa: #D102
@@ -100,11 +120,14 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         **kwargs,
     ):
         setup_method_args = cls._get_setup_method_args(**locals())
+        # Add index for batched computation of local statistics.
+        adata.obs["_indices"] = np.arange(adata.n_obs).astype(int)
         anndata_fields = [
             LayerField(REGISTRY_KEYS.X_KEY, layer, is_count_data=True),
             CategoricalObsField(MRVI_REGISTRY_KEYS.SAMPLE_KEY, sample_key),
             CategoricalObsField(REGISTRY_KEYS.BATCH_KEY, batch_key),
             NumericalJointObsField(REGISTRY_KEYS.CONT_COVS_KEY, continuous_covariate_keys),
+            NumericalObsField(REGISTRY_KEYS.INDICES_KEY, "_indices"),
         ]
         adata_manager = AnnDataManager(fields=anndata_fields, setup_method_args=setup_method_args)
         adata_manager.register_fields(adata, **kwargs)
@@ -180,104 +203,261 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         z = np.array(jax.device_get(jnp.concatenate(zs, axis=0)))
         return z if give_z else u
 
-    @staticmethod
-    def compute_distance_matrix_from_representations(
-        representations: xr.DataArray,
-        metric: str = "euclidean",
-        groups: Optional[Dict[str, List[np.ndarray]]] = None,
-        keep_cell: bool = True,
-        normalization_means: Optional[np.ndarray] = None,
-        normalization_vars: Optional[np.ndarray] = None,
+    def compute_local_statistics(
+        self,
+        reductions: List[MrVIReduction],
+        adata: Optional[AnnData] = None,
+        indices: Optional[Sequence[int]] = None,
+        batch_size: Optional[int] = None,
+        use_vmap: bool = True,
     ) -> xr.Dataset:
         """
-        Compute distance matrices from counterfactual sample representations.
+        Compute local statistics from counterfactual sample representations.
+
+        Local statistics are reductions over either the local counterfactual latent representations
+        or the resulting local sample distance matrices. For a large number of cells and/or samples,
+        this method can avoid scalability issues by grouping over cell-level covariates.
 
         Parameters
         ----------
-        representations
-            Counterfactual sample representations of shape (n_cells, n_sample, n_features).
-        metric
-            Metric to use for computing distance matrix.
-        groups
-            ``n_cells``-length vectors indicating the groups for each cell.
-        keep_cell
-            Whether to compute and keep per-cell distance matrices.
-            Requires that ``groups`` is not ``None``.
-        normalization_means
-            Means to use for normalizing distance matrices.
-        normalization_vars
-            Variancess to use for normalizing distance matrices.
+        reductions
+            List of reductions to compute over local counterfactual sample representations.
+        adata
+            AnnData object to use.
+        indices
+            Indices of cells to use.
+        batch_size
+            Batch size to use for computing the local statistics.
+        use_vmap
+            Whether to use vmap to compute the local statistics.
         """
-        if (not keep_cell) and (groups is None):
-            raise ValueError("`keep_cell` must be `True` if `groups` is `None`.")
+        if not reductions or len(reductions) == 0:
+            raise ValueError("At least one reduction must be provided.")
 
-        normalize = normalization_means is not None and normalization_vars is not None
-        if normalize:
-            normalization_means = normalization_means.reshape(-1, 1, 1)
-            normalization_vars = normalization_vars.reshape(-1, 1, 1)
+        adata = self.adata if adata is None else adata
+        self._check_if_trained(warn=False)
+        # Hack to ensure new AnnDatas have indices.
+        if "_indices" not in adata.obs:
+            adata.obs["_indices"] = np.arange(adata.n_obs).astype(int)
+        adata = self._validate_anndata(adata)
+        scdl = self._make_data_loader(adata=adata, indices=indices, batch_size=batch_size, iter_ndarray=True)
+        n_sample = self.summary_stats.n_sample
 
-        n_cells, n_donors, _ = representations.shape
-        data_arrays = {}
-        if keep_cell:
-            pairwise_dists = np.zeros((n_cells, n_donors, n_donors))
-            for i, cell_rep in enumerate(representations):
-                d_ = pairwise_distances(cell_rep, metric=metric)
-                pairwise_dists[i, :, :] = d_
-            if normalize:
-                pairwise_dists = np.clip(pairwise_dists - normalization_means, a_min=0, a_max=None) / (
-                    normalization_vars**0.5
+        reqs = _parse_local_statistics_requirements(reductions)
+
+        vars_in = {"params": self.module.params, **self.module.state}
+
+        @partial(jax.jit, static_argnames=["use_mean"])
+        def mapped_inference_fn(
+            stacked_rngs,
+            x,
+            sample_index,
+            cf_sample,
+            use_mean,
+        ):
+            # TODO: use `self.module.get_jit_inference_fn` when it supports traced values.
+            def inference_fn(
+                rngs,
+                cf_sample,
+            ):
+                return self.module.apply(
+                    vars_in,
+                    rngs=rngs,
+                    method=self.module.inference,
+                    x=x,
+                    sample_index=sample_index,
+                    cf_sample=cf_sample,
+                    use_mean=use_mean,
+                )["z"]
+
+            if use_vmap:
+                return jax.vmap(inference_fn, in_axes=(0, 0), out_axes=-2)(
+                    stacked_rngs,
+                    cf_sample,
                 )
-            data_arrays["cell"] = xr.DataArray(
-                pairwise_dists,
-                dims=["cell_name", "sample_x", "sample_y"],
-                coords={
-                    "cell_name": representations.cell_name.values,
-                    "sample_x": representations.sample.values,
-                    "sample_y": representations.sample.values,
-                },
+            else:
+
+                def per_sample_inference_fn(pair):
+                    rngs, cf_sample = pair
+                    return inference_fn(rngs, cf_sample)
+
+                return jax.lax.transpose(jax.lax.map(per_sample_inference_fn, (stacked_rngs, cf_sample)), (1, 0, 2))
+
+        ungrouped_data_arrs = {}
+        grouped_data_arrs = {}
+        for ur in reqs.ungrouped_reductions:
+            ungrouped_data_arrs[ur.name] = []
+        for gr in reqs.grouped_reductions:
+            grouped_data_arrs[gr.name] = {}  # Will map group category to running group sum.
+
+        for array_dict in tqdm(scdl):
+            indices = array_dict[REGISTRY_KEYS.INDICES_KEY].astype(int).flatten()
+            n_cells = array_dict[REGISTRY_KEYS.X_KEY].shape[0]
+            cf_sample = np.broadcast_to(np.arange(n_sample)[:, None, None], (n_sample, n_cells, 1))
+            inf_inputs = self.module._get_inference_input(
+                array_dict,
             )
-        if groups is not None:
-            if "cell" in list(groups.keys()):
-                raise ValueError("`cell` is an ambiguous dimension name. Please rename the dimension name.")
+            stacked_rngs = self._generate_stacked_rngs(cf_sample.shape[0])
 
-            for groupby_key, group in groups.items():
-                group_cats = group.unique()
-                group_dists = []
-                new_dimension_key = (
-                    f"{groupby_key}_name"  # needs to be different from groupby_key name to construct a valid dataset
+            # Compute necessary inputs.
+            if reqs.needs_mean_representations:
+                mean_zs = xr.DataArray(
+                    mapped_inference_fn(
+                        stacked_rngs=stacked_rngs,
+                        x=jnp.array(inf_inputs["x"]),
+                        sample_index=jnp.array(inf_inputs["sample_index"]),
+                        cf_sample=jnp.array(cf_sample),
+                        use_mean=True,
+                    ),
+                    dims=["cell_name", "sample", "latent_dim"],
+                    coords={"cell_name": adata.obs_names[indices], "sample": self.sample_order},
+                    name="sample_representations",
+                )
+            if reqs.needs_sampled_representations:
+                sampled_zs = xr.DataArray(
+                    mapped_inference_fn(
+                        stacked_rngs=stacked_rngs,  # OK to use stacked rngs here since there is no stochasticity for mean rep.
+                        x=jnp.array(inf_inputs["x"]),
+                        sample_index=jnp.array(inf_inputs["sample_index"]),
+                        cf_sample=jnp.array(cf_sample),
+                        use_mean=False,
+                    ),
+                    dims=["cell_name", "sample", "latent_dim"],
+                    coords={"cell_name": adata.obs_names[indices], "sample": self.sample_order},
+                    name="sample_representations",
                 )
 
-                # Computing the mean distance matrix for each group
-                for group_cat in group_cats:
-                    group_mask = (group == group_cat).values
-                    group_reps = representations[group_mask, :, :]
-                    if normalize:
-                        masked_means = normalization_means[group_mask, :, :]
-                        masked_vars = normalization_vars[group_mask, :, :]
+            if reqs.needs_mean_distances:
+                mean_dists = self._compute_distances_from_representations(mean_zs, indices)
 
-                    group_dist = np.zeros((1, n_donors, n_donors))
-                    for i, cell_rep in enumerate(group_reps):
-                        d_ = pairwise_distances(cell_rep, metric=metric)
-                        if normalize:
-                            d_ = np.clip(d_ - masked_vars[i], a_min=0, a_max=None) / (masked_means[i] ** 0.5)
-                        group_dist[0, :, :] += d_
-                    group_dist /= len(group_reps)
-                    group_dist_data_array = xr.DataArray(
-                        group_dist,
-                        dims=[new_dimension_key, "sample_x", "sample_y"],
-                        coords={
-                            new_dimension_key: [group_cat],
-                            "sample_x": representations.sample.values,
-                            "sample_y": representations.sample.values,
-                        },
+            if reqs.needs_sampled_distances or reqs.needs_normalized_distances:
+                sampled_dists = self._compute_distances_from_representations(sampled_zs, indices)
+
+                if reqs.needs_normalized_distances:
+                    normalization_means, normalization_vars = self._compute_local_baseline_dists(array_dict)
+                    normalization_means = normalization_means.reshape(-1, 1, 1)
+                    normalization_vars = normalization_vars.reshape(-1, 1, 1)
+                    normalized_dists = np.clip(sampled_dists - normalization_means, a_min=0, a_max=None) / (
+                        normalization_vars**0.5
                     )
-                    group_dists.append(group_dist_data_array)
-                group_dist_data = xr.concat(group_dists, dim=new_dimension_key)
-                data_arrays[groupby_key] = group_dist_data
-        return xr.Dataset(
-            {
-                **data_arrays,
-            }
+
+            # Compute each reduction
+            for r in reductions:
+                if r.input == "mean_representations":
+                    inputs = mean_zs
+                elif r.input == "sampled_representations":
+                    inputs = sampled_zs
+                elif r.input == "mean_distances":
+                    inputs = mean_dists
+                elif r.input == "sampled_distances":
+                    inputs = sampled_dists
+                elif r.input == "normalized_distances":
+                    inputs = normalized_dists
+                else:
+                    raise ValueError(f"Unknown reduction input: {r.input}")
+
+                outputs = r.fn(inputs)
+
+                if r.group_by is not None:
+                    group_by = adata.obs[r.group_by][indices]
+                    group_by_cats = group_by.unique()
+                    for cat in group_by_cats:
+                        cat_summed_outputs = outputs.sel(
+                            cell_name=adata.obs_names[indices][group_by == cat].values
+                        ).sum(dim="cell_name")
+                        cat_summed_outputs = cat_summed_outputs.assign_coords({f"{r.group_by}_name": cat})
+                        if cat not in grouped_data_arrs[r.name]:
+                            grouped_data_arrs[r.name][cat] = cat_summed_outputs
+                        else:
+                            grouped_data_arrs[r.name][cat] += cat_summed_outputs
+                else:
+                    ungrouped_data_arrs[r.name].append(outputs)
+
+        # Combine all outputs.
+        final_data_arrs = {}
+        for ur_name, ur_outputs in ungrouped_data_arrs.items():
+            final_data_arrs[ur_name] = xr.concat(ur_outputs, dim="cell_name")
+
+        for gr in reqs.grouped_reductions:
+            group_by = adata.obs[gr.group_by]
+            group_by_counts = group_by.value_counts()
+            averaged_grouped_data_arrs = []
+            for cat, count in group_by_counts.items():
+                averaged_grouped_data_arrs.append(grouped_data_arrs[gr.name][cat] / count)
+            final_data_arr = xr.concat(averaged_grouped_data_arrs, dim=f"{gr.group_by}_name")
+            final_data_arrs[gr.name] = final_data_arr
+
+        return xr.Dataset(data_vars=final_data_arrs)
+
+    def _compute_local_baseline_dists(self, batch: dict, mc_samples: int = 1000) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Approximate the distributions used as baselines for normalizing the local sample distances.
+
+        Approximates the means and variances of the Euclidean distance between two samples of
+        the z latent representation for the original sample for each cell in ``adata``.
+
+        Reference: https://www.overleaf.com/read/mhdxcrknzxpm.
+
+        Parameters
+        ----------
+        batch
+            Batch of data to compute the local sample representation for.
+        mc_samples
+            Number of Monte Carlo samples to use for computing the local baseline distributions.
+        """
+
+        def get_A_s(module, u, sample_covariate):
+            sample_covariate = sample_covariate.astype(int).flatten()
+            if not module.pz.use_nonlinear:
+                A_s = module.pz.A_s_enc(sample_covariate)
+            else:
+                # A_s output by a non-linear function without an explicit intercept
+                sample_one_hot = jax.nn.one_hot(sample_covariate, module.pz.n_sample)
+                A_s_dec_inputs = jnp.concatenate([u, sample_one_hot], axis=-1)
+                A_s = module.pz.A_s_enc(A_s_dec_inputs, training=False)
+            # cells by n_latent by n_latent
+            return A_s.reshape(sample_covariate.shape[0], module.pz.n_latent, module.pz.n_latent)
+
+        def apply_get_A_s(u, sample_covariate):
+            vars_in = {"params": self.module.params, **self.module.state}
+            rngs = self.module.rngs
+            A_s = self.module.apply(vars_in, rngs=rngs, method=get_A_s, u=u, sample_covariate=sample_covariate)
+            return A_s
+
+        jit_inference_fn = self.module.get_jit_inference_fn()
+        qu = jit_inference_fn(self.module.rngs, batch)["qu"]
+        qu_vars_diag = jax.vmap(jnp.diag)(qu.variance)
+
+        sample_index = self.module._get_inference_input(batch)["sample_index"]
+        A_s = apply_get_A_s(qu.mean, sample_index)  # use mean of latent representation to compute the baseline
+        B = jnp.expand_dims(jnp.eye(A_s.shape[1]), 0) + A_s
+        u_diff_sigma = 2 * jnp.einsum(
+            "cij, cjk, clk -> cil", B, qu_vars_diag, B
+        )  # 2 * (I + A_s) @ qu_vars_diag @ (I + A_s).T
+        eigvals = jax.vmap(jnp.linalg.eigh)(u_diff_sigma)[0].astype(float)
+        normal_rng = self.module.rngs["params"]  # Hack to get new rng for normal samples.
+        normal_samples = jax.random.normal(
+            normal_rng, shape=(eigvals.shape[0], mc_samples, eigvals.shape[1])
+        )  # n_cells by mc_samples by n_latent
+        squared_l2_dists = jnp.sum(jnp.einsum("cij, cj -> cij", (normal_samples**2), eigvals), axis=2)
+        l2_dists = squared_l2_dists**0.5
+        return np.array(jnp.mean(l2_dists, axis=1)), np.array(jnp.var(l2_dists, axis=1))
+
+    def _compute_distances_from_representations(self, reps, indices):
+        n_cells, n_donors, _ = reps.shape
+        dists = np.zeros((n_cells, n_donors, n_donors))
+        for i, cell_rep in enumerate(reps):
+            d_ = pairwise_distances(cell_rep.data, metric="euclidean")
+            dists[i, :, :] = d_
+        return xr.DataArray(
+            dists,
+            dims=["cell_name", "sample_x", "sample_y"],
+            coords={
+                "cell_name": self.adata.obs_names[indices],
+                "sample_x": self.sample_order,
+                "sample_y": self.sample_order,
+            },
+            name="sample_distances",
         )
 
     def get_local_sample_representation(
@@ -304,85 +484,17 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             Whether to use vmap for computing the local sample representation.
             Disabling vmap can be useful if running out of memory on a GPU.
         """
-        adata = self.adata if adata is None else adata
-        self._check_if_trained(warn=False)
-        adata = self._validate_anndata(adata)
-        scdl = self._make_data_loader(adata=adata, indices=None, batch_size=batch_size, iter_ndarray=True)
-        n_sample = self.summary_stats.n_sample
-
-        vars_in = {"params": self.module.params, **self.module.state}
-
-        # TODO: use `self.module.get_jit_inference_fn` when it supports traced values.
-        def inference_fn(
-            rngs,
-            x,
-            sample_index,
-            cf_sample,
-        ):
-            return self.module.apply(
-                vars_in,
-                rngs=rngs,
-                method=self.module.inference,
-                x=x,
-                sample_index=sample_index,
-                cf_sample=cf_sample,
-                use_mean=use_mean,
-            )["z"]
-
-        @jax.jit
-        def mapped_inference_fn(
-            stacked_rngs,
-            x,
-            sample_index,
-            cf_sample,
-        ):
-            if use_vmap:
-                return jax.vmap(inference_fn, in_axes=(0, None, None, 0), out_axes=-2)(
-                    stacked_rngs,
-                    x,
-                    sample_index,
-                    cf_sample,
-                )
-            else:
-
-                def per_sample_inference_fn(pair):
-                    rngs, cf_sample = pair
-                    return inference_fn(rngs, x, sample_index, cf_sample)
-
-                return jax.lax.transpose(jax.lax.map(per_sample_inference_fn, (stacked_rngs, cf_sample)), (1, 0, 2))
-
-        reps = []
-        for array_dict in tqdm(scdl):
-            n_cells = array_dict[REGISTRY_KEYS.X_KEY].shape[0]
-            cf_sample = np.broadcast_to(np.arange(n_sample)[:, None, None], (n_sample, n_cells, 1))
-            inputs = self.module._get_inference_input(
-                array_dict,
+        reductions = [
+            MrVIReduction(
+                name="sample_representations",
+                input="mean_representations" if use_mean else "sampled_representations",
+                fn=lambda x: x,
+                group_by=None,
             )
-            # Generate a set of RNGs for every cf_sample.
-            rngs_list = [self.module.rngs for _ in range(cf_sample.shape[0])]
-            # Combine list of RNG dicts into a single list. This is necessary for vmap/map.
-            stacked_rngs = {
-                required_rng: jnp.concatenate([rngs_dict[required_rng][None] for rngs_dict in rngs_list], axis=0)
-                for required_rng in self.module.required_rngs
-            }
-            zs = mapped_inference_fn(
-                stacked_rngs=stacked_rngs,
-                x=jnp.array(inputs["x"]),
-                sample_index=jnp.array(inputs["sample_index"]),
-                cf_sample=jnp.array(cf_sample),
-            )
-            reps.append(zs)
-
-        reps = np.array(jax.device_get(jnp.concatenate(reps, axis=0)))
-        sample_order = self.adata_manager.get_state_registry(MRVI_REGISTRY_KEYS.SAMPLE_KEY).categorical_mapping
-        reps_data_array = xr.DataArray(
-            reps,
-            dims=["cell_name", "sample", "latent_dim"],
-            coords={"cell_name": adata.obs_names, "sample": sample_order},
-            name="sample_representation",
-        )
-
-        return reps_data_array
+        ]
+        return self.compute_local_statistics(
+            reductions, adata=adata, batch_size=batch_size, use_vmap=use_vmap
+        ).sample_representations
 
     def get_local_sample_distances(
         self,
@@ -423,101 +535,35 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         keep_cell
             Whether to keep the original cell sample-sample distance matrices.
         """
-        adata = self.adata if adata is None else adata
-        self._check_if_trained(warn=False)
-        adata = self._validate_anndata(adata)
-        reps_data = self.get_local_sample_representation(
-            adata=adata, batch_size=batch_size, use_mean=use_mean, use_vmap=use_vmap
-        )
-        cell_groups = None
-
-        if groupby is not None:
-            if not isinstance(groupby, list):
-                groupby = [groupby]
-            cell_groups = {groupby_key: adata.obs[groupby_key] for groupby_key in groupby}
-
-        local_baseline_means, local_baseline_vars = None, None
+        input = "mean_distances" if use_mean else "sampled_distances"
         if normalize_distances:
             if use_mean:
-                raise ValueError("normalize_distances can only be used with use_mean=False")
-            local_baseline_means, local_baseline_vars = self._compute_local_baseline_dists(adata)
+                raise ValueError("Cannot normalize distances when using mean representation.")
+            input = "normalized_distances"
+        if groupby and not isinstance(groupby, list):
+            groupby = [groupby]
 
-        return self.compute_distance_matrix_from_representations(
-            reps_data,
-            keep_cell=keep_cell,
-            groups=cell_groups,
-            normalization_means=local_baseline_means,
-            normalization_vars=local_baseline_vars,
-        )
-
-    def _compute_local_baseline_dists(
-        self, adata: Optional[AnnData] = None, mc_samples: int = 1000, batch_size: int = 256
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Approximate the distributions used as baselines for normalizing the local sample distances.
-
-        Approximates the means and variances of the Euclidean distance between two samples of
-        the z latent representation for the original sample for each cell in ``adata``.
-
-        Reference: https://www.overleaf.com/read/mhdxcrknzxpm.
-
-        Parameters
-        ----------
-        adata
-            AnnData object to use for computing the local baseline distributions.
-        mc_samples
-            Number of Monte Carlo samples to use for computing the local baseline distributions.
-        batch_size
-            Batch size to use for computing the local baseline distributions.
-        """
-        adata = self.adata if adata is None else adata
-        self._check_if_trained(warn=False)
-        adata = self._validate_anndata(adata)
-        scdl = self._make_data_loader(adata=adata, indices=None, batch_size=batch_size, iter_ndarray=True)
-
-        jit_inference_fn = self.module.get_jit_inference_fn()
-
-        def get_A_s(module, u, sample_covariate):
-            sample_covariate = sample_covariate.astype(int).flatten()
-            if not module.pz.use_nonlinear:
-                A_s = module.pz.A_s_enc(sample_covariate)
-            else:
-                # A_s output by a non-linear function without an explicit intercept
-                sample_one_hot = jax.nn.one_hot(sample_covariate, module.pz.n_sample)
-                A_s_dec_inputs = jnp.concatenate([u, sample_one_hot], axis=-1)
-                A_s = module.pz.A_s_enc(A_s_dec_inputs, training=False)
-            # cells by n_latent by n_latent
-            return A_s.reshape(sample_covariate.shape[0], module.pz.n_latent, module.pz.n_latent)
-
-        def apply_get_A_s(u, sample_covariate):
-            vars_in = {"params": self.module.params, **self.module.state}
-            rngs = self.module.rngs
-            A_s = self.module.apply(vars_in, rngs=rngs, method=get_A_s, u=u, sample_covariate=sample_covariate)
-            return A_s
-
-        baseline_means = []
-        baseline_vars = []
-        for array_dict in scdl:
-            qu = jit_inference_fn(self.module.rngs, array_dict)["qu"]
-            qu_vars_diag = jax.vmap(jnp.diag)(qu.variance)
-
-            sample_index = self.module._get_inference_input(array_dict)["sample_index"]
-            A_s = apply_get_A_s(qu.mean, sample_index)  # use mean of latent representation to compute the baseline
-            B = jnp.expand_dims(jnp.eye(A_s.shape[1]), 0) + A_s
-            u_diff_sigma = 2 * jnp.einsum(
-                "cij, cjk, clk -> cil", B, qu_vars_diag, B
-            )  # 2 * (I + A_s) @ qu_vars_diag @ (I + A_s).T
-            eigvals = jax.vmap(jnp.linalg.eigh)(u_diff_sigma)[0].astype(float)
-            normal_rng = self.module.rngs["params"]  # Hack to get new rng for normal samples.
-            normal_samples = jax.random.normal(
-                normal_rng, shape=(eigvals.shape[0], mc_samples, eigvals.shape[1])
-            )  # n_cells by mc_samples by n_latent
-            squared_l2_dists = jnp.sum(jnp.einsum("cij, cj -> cij", (normal_samples**2), eigvals), axis=2)
-            l2_dists = squared_l2_dists**0.5
-            baseline_means.append(jnp.mean(l2_dists, axis=1))
-            baseline_vars.append(jnp.var(l2_dists, axis=1))
-
-        return np.array(jnp.concatenate(baseline_means, axis=0)), np.array(jnp.concatenate(baseline_vars, axis=0))
+        reductions = []
+        if not keep_cell and not groupby:
+            raise ValueError("Undefined computation because not keep_cell and no groupby.")
+        if keep_cell:
+            reductions.append(
+                MrVIReduction(
+                    name="cell",
+                    input=input,
+                    fn=lambda x: x,
+                )
+            )
+        if groupby:
+            for groupby_key in groupby:
+                reductions.append(
+                    MrVIReduction(
+                        name=groupby_key,
+                        input=input,
+                        group_by=groupby_key,
+                    )
+                )
+        return self.compute_local_statistics(reductions, adata=adata, batch_size=batch_size, use_vmap=use_vmap)
 
     def compute_cell_scores(
         self,
@@ -527,7 +573,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         use_vmap: bool = True,
         n_mc_samples: int = 200,
         compute_pval: bool = True,
-    ):
+    ) -> xr.Dataset:
         """Computes for each cell a statistic (effect size or p-value)
 
         Parameters
@@ -547,65 +593,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         compute_pval
             Whether to compute p-values or effect sizes.
         """
-        adata = self.adata if adata is None else adata
-        self._check_if_trained(warn=False)
-        adata = self._validate_anndata(adata)
-        scdl = self._make_data_loader(adata=adata, indices=None, batch_size=batch_size, iter_ndarray=True)
-        n_sample = self.summary_stats.n_sample
-
-        vars_in = {"params": self.module.params, **self.module.state}
-        self.module.rngs
-
-        sample_covariates_values = []
-        for sample_covariate_key, sample_covariate_test in donor_keys:
-            x = self.donor_info[sample_covariate_key].values
-            if sample_covariate_test == "nn":
-                x = pd.Categorical(x).codes
-            x = jnp.array(x)
-            sample_covariates_values.append(x)
-        sample_covariate_tests = [key[1] for key in donor_keys]
-
-        def inference_fn(
-            rngs,
-            x,
-            sample_index,
-            cf_sample,
-        ):
-            return self.module.apply(
-                vars_in,
-                rngs=rngs,
-                method=self.module.inference,
-                x=x,
-                sample_index=sample_index,
-                cf_sample=cf_sample,
-                use_mean=True,
-            )["z"]
-
-        @jax.jit
-        def mapped_inference_fn(
-            stacked_rngs,
-            x,
-            sample_index,
-            cf_sample,
-        ):
-            if use_vmap:
-                reps = jax.vmap(inference_fn, in_axes=(0, None, None, 0), out_axes=-2)(
-                    stacked_rngs,
-                    x,
-                    sample_index,
-                    cf_sample,
-                )
-            else:
-
-                def per_sample_inference_fn(pair):
-                    rngs, cf_sample = pair
-                    return inference_fn(rngs, x, sample_index, cf_sample)
-
-                reps = jax.lax.transpose(jax.lax.map(per_sample_inference_fn, (stacked_rngs, cf_sample)), (1, 0, 2))
-
-            euclid_d = lambda x: jnp.sqrt(((x[:, None] - x[None, :]) ** 2).sum(-1))
-            dists = jax.vmap(euclid_d, in_axes=0)(reps)
-            return dists
+        test_out = "pval" if compute_pval else "effect_size"
 
         # not jitted because the statistic arg is causing troubles
         def _get_scores(w, x, statistic):
@@ -615,38 +603,29 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 fn = lambda w, x: compute_statistic(w, x, statistic=statistic)
             return jax.vmap(fn, in_axes=(0, None))(w, x)
 
-        sigs = []
-        for array_dict in tqdm(scdl):
-            n_cells = array_dict[REGISTRY_KEYS.X_KEY].shape[0]
-            cf_sample = np.broadcast_to(np.arange(n_sample)[:, None, None], (n_sample, n_cells, 1))
-            inputs = self.module._get_inference_input(
-                array_dict,
-            )
-            # Generate a set of RNGs for every cf_sample.
-            rngs_list = [self.module.rngs for _ in range(cf_sample.shape[0])]
-            # Combine list of RNG dicts into a single list. This is necessary for vmap/map.
-            stacked_rngs = {
-                required_rng: jnp.concatenate([rngs_dict[required_rng][None] for rngs_dict in rngs_list], axis=0)
-                for required_rng in self.module.required_rngs
-            }
-            dists = mapped_inference_fn(
-                stacked_rngs=stacked_rngs,
-                x=jnp.array(inputs["x"]),
-                sample_index=jnp.array(inputs["sample_index"]),
-                cf_sample=jnp.array(cf_sample),
+        def get_scores_data_arr_fn(cov, sample_covariate_test):
+            return lambda x: xr.DataArray(
+                _get_scores(x.data, cov, sample_covariate_test),
+                dims=["cell_name"],
+                coords={"cell_name": x.coords["cell_name"]},
             )
 
-            all_pvals = []
-            for x, sample_covariate_test in zip(sample_covariates_values, sample_covariate_tests):
-                pvals = _get_scores(dists, x, sample_covariate_test)
-                all_pvals.append(pvals)
-            all_pvals = jnp.stack(all_pvals, axis=-1)
-            sigs.append(np.array(jax.device_get(all_pvals)))
-        sigs = np.concatenate(sigs, axis=0)
-        prepand = "pval_" if compute_pval else "effect_size_"
-        columns = [prepand + key[0] for key in donor_keys]
-        sigs = pd.DataFrame(sigs, columns=columns)
-        return sigs
+        reductions = []
+        for sample_covariate_key, sample_covariate_test in donor_keys:
+            cov = self.donor_info[sample_covariate_key].values
+            if sample_covariate_test == "nn":
+                cov = pd.Categorical(cov).codes
+            cov = jnp.array(cov)
+            fn = get_scores_data_arr_fn(cov, sample_covariate_test)
+            reductions.append(
+                MrVIReduction(
+                    name=f"{sample_covariate_key}_{sample_covariate_test}_{test_out}",
+                    input="mean_distances",
+                    fn=fn,
+                )
+            )
+
+        return self.compute_local_statistics(reductions, adata=adata, batch_size=batch_size, use_vmap=use_vmap)
 
     @property
     def original_donor_key(self):

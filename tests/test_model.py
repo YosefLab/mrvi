@@ -3,7 +3,7 @@ from tempfile import TemporaryDirectory
 import numpy as np
 from scvi.data import synthetic_iid
 
-from scvi_v2 import MrVI
+from scvi_v2 import MrVI, MrVIReduction
 
 
 def test_mrvi():
@@ -128,9 +128,15 @@ def test_mrvi_stratifications():
         ("meta2", "geary"),
     ]
     pvals = model.compute_cell_scores(donor_keys=donor_keys)
-    assert pvals.shape == (adata.shape[0], 2)
+    assert len(pvals.data_vars) == 2
+    assert pvals.data_vars["meta1_nn_pval"].shape == (adata.shape[0],)
+    assert pvals.data_vars["meta2_geary_pval"].shape == (adata.shape[0],)
+    assert (pvals.data_vars["meta1_nn_pval"].values != pvals.data_vars["meta2_geary_pval"].values).all()
     es = model.compute_cell_scores(donor_keys=donor_keys, compute_pval=False)
-    assert es.shape == (adata.shape[0], 2)
+    assert len(es.data_vars) == 2
+    assert es.data_vars["meta1_nn_effect_size"].shape == (adata.shape[0],)
+    assert es.data_vars["meta2_geary_effect_size"].shape == (adata.shape[0],)
+    assert (es.data_vars["meta1_nn_effect_size"].values != es.data_vars["meta2_geary_effect_size"].values).all()
 
 
 def test_mrvi_nonlinear():
@@ -216,3 +222,56 @@ def test_de():
         return_dist=False,
     )
     assert de_results.shape == (n_genes, 3)
+
+
+def test_compute_local_statistics():
+    adata = synthetic_iid()
+    n_sample = 15
+    adata.obs["sample"] = np.random.choice(n_sample, size=adata.shape[0])
+    meta1 = np.random.randint(0, 2, size=n_sample)
+    adata.obs["meta1"] = meta1[adata.obs["sample"].values]
+    MrVI.setup_anndata(adata, sample_key="sample", batch_key="batch")
+    n_latent = 10
+    model = MrVI(
+        adata,
+        n_latent=n_latent,
+    )
+    model.train(1, check_val_every_n_epoch=1, train_size=0.5)
+    model.is_trained_ = True
+    model.history
+
+    reductions = [
+        MrVIReduction(
+            name="test1",
+            input="mean_representations",
+            fn=lambda x: x,
+            group_by=None,
+        ),
+        MrVIReduction(
+            name="test2",
+            input="sampled_representations",
+            fn=lambda x: x + 2,
+            group_by="meta1",
+        ),
+        MrVIReduction(
+            name="test3",
+            input="normalized_distances",
+            fn=lambda x: x + 3,
+            group_by="meta1",
+        ),
+    ]
+    outs = model.compute_local_statistics(reductions)
+    assert len(outs.data_vars) == 3
+    assert outs["test1"].shape == (adata.shape[0], n_sample, n_latent)
+    assert outs["test2"].shape == (2, n_sample, n_latent)
+    assert outs["test3"].shape == (2, n_sample, n_sample)
+
+    adata2 = synthetic_iid()
+    adata2.obs["sample"] = np.random.choice(15, size=adata.shape[0])
+    meta1_2 = np.random.randint(0, 2, size=15)
+    adata2.obs["meta1"] = meta1_2[adata2.obs["sample"].values]
+    outs2 = model.compute_local_statistics(reductions, adata=adata2)
+    assert len(outs2.data_vars) == 3
+    assert outs2["test1"].shape == (adata2.shape[0], n_sample, n_latent)
+    assert outs2["test2"].shape == (2, n_sample, n_latent)
+    assert outs2["test3"].shape == (2, n_sample, n_sample)

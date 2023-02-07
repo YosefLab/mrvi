@@ -310,7 +310,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                         use_mean=True,
                     ),
                     dims=["cell_name", "sample", "latent_dim"],
-                    coords={"cell_name": adata.obs_names[indices], "sample": self.sample_order},
+                    coords={"cell_name": self.adata.obs_names[indices], "sample": self.sample_order},
                     name="sample_representations",
                 )
             if reqs.needs_sampled_representations:
@@ -323,7 +323,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                         use_mean=False,
                     ),
                     dims=["cell_name", "sample", "latent_dim"],
-                    coords={"cell_name": adata.obs_names[indices], "sample": self.sample_order},
+                    coords={"cell_name": self.adata.obs_names[indices], "sample": self.sample_order},
                     name="sample_representations",
                 )
 

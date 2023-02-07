@@ -359,11 +359,11 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 outputs = r.fn(inputs)
 
                 if r.group_by is not None:
-                    group_by = adata.obs[r.group_by][indices]
+                    group_by = self.adata.obs[r.group_by][indices]
                     group_by_cats = group_by.unique()
                     for cat in group_by_cats:
                         cat_summed_outputs = outputs.sel(
-                            cell_name=adata.obs_names[indices][group_by == cat].values
+                            cell_name=self.adata.obs_names[indices][group_by == cat].values
                         ).sum(dim="cell_name")
                         cat_summed_outputs = cat_summed_outputs.assign_coords({f"{r.group_by}_name": cat})
                         if cat not in grouped_data_arrs[r.name]:

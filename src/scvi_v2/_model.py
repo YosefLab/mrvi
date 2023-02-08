@@ -210,6 +210,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         indices: Optional[Sequence[int]] = None,
         batch_size: Optional[int] = None,
         use_vmap: bool = True,
+        use_gpu_for_distances: bool = False,
     ) -> xr.Dataset:
         """
         Compute local statistics from counterfactual sample representations.
@@ -301,37 +302,47 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
             # Compute necessary inputs.
             if reqs.needs_mean_representations:
+                mean_zs_ = mapped_inference_fn(
+                    stacked_rngs=stacked_rngs,
+                    x=jnp.array(inf_inputs["x"]),
+                    sample_index=jnp.array(inf_inputs["sample_index"]),
+                    cf_sample=jnp.array(cf_sample),
+                    use_mean=True,
+                )
                 mean_zs = xr.DataArray(
-                    mapped_inference_fn(
-                        stacked_rngs=stacked_rngs,
-                        x=jnp.array(inf_inputs["x"]),
-                        sample_index=jnp.array(inf_inputs["sample_index"]),
-                        cf_sample=jnp.array(cf_sample),
-                        use_mean=True,
-                    ),
+                    mean_zs_,
                     dims=["cell_name", "sample", "latent_dim"],
                     coords={"cell_name": self.adata.obs_names[indices], "sample": self.sample_order},
                     name="sample_representations",
                 )
             if reqs.needs_sampled_representations:
+                sampled_zs_ = mapped_inference_fn(
+                    stacked_rngs=stacked_rngs,  # OK to use stacked rngs here since there is no stochasticity for mean rep.
+                    x=jnp.array(inf_inputs["x"]),
+                    sample_index=jnp.array(inf_inputs["sample_index"]),
+                    cf_sample=jnp.array(cf_sample),
+                    use_mean=False,
+                )
                 sampled_zs = xr.DataArray(
-                    mapped_inference_fn(
-                        stacked_rngs=stacked_rngs,  # OK to use stacked rngs here since there is no stochasticity for mean rep.
-                        x=jnp.array(inf_inputs["x"]),
-                        sample_index=jnp.array(inf_inputs["sample_index"]),
-                        cf_sample=jnp.array(cf_sample),
-                        use_mean=False,
-                    ),
+                    sampled_zs_,
                     dims=["cell_name", "sample", "latent_dim"],
                     coords={"cell_name": self.adata.obs_names[indices], "sample": self.sample_order},
                     name="sample_representations",
                 )
 
             if reqs.needs_mean_distances:
-                mean_dists = self._compute_distances_from_representations(mean_zs, indices)
+                mean_dists = (
+                    self._compute_distances_from_representations_gpu(mean_zs_, indices)
+                    if use_gpu_for_distances
+                    else self._compute_distances_from_representations(mean_zs, indices)
+                )
 
             if reqs.needs_sampled_distances or reqs.needs_normalized_distances:
-                sampled_dists = self._compute_distances_from_representations(sampled_zs, indices)
+                sampled_dists = (
+                    self._compute_distances_from_representations_gpu(sampled_zs_, indices)
+                    if use_gpu_for_distances
+                    else self._compute_distances_from_representations(sampled_zs, indices)
+                )
 
                 if reqs.needs_normalized_distances:
                     normalization_means, normalization_vars = self._compute_local_baseline_dists(array_dict)
@@ -443,6 +454,25 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         l2_dists = squared_l2_dists**0.5
         return np.array(jnp.mean(l2_dists, axis=1)), np.array(jnp.var(l2_dists, axis=1))
 
+    def _compute_distances_from_representations_gpu(self, reps, indices):
+        @jax.jit
+        def _compute_distance(rep):
+            res = (jnp.expand_dims(rep, 0) - jnp.expand_dims(rep, 1)) ** 2
+            res = res.sum(-1)
+            return jnp.sqrt(res)
+
+        dists = jax.vmap(_compute_distance)(reps)
+        return xr.DataArray(
+            dists,
+            dims=["cell_name", "sample_x", "sample_y"],
+            coords={
+                "cell_name": self.adata.obs_names[indices],
+                "sample_x": self.sample_order,
+                "sample_y": self.sample_order,
+            },
+            name="sample_distances",
+        )
+
     def _compute_distances_from_representations(self, reps, indices):
         n_cells, n_donors, _ = reps.shape
         dists = np.zeros((n_cells, n_donors, n_donors))
@@ -503,6 +533,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         use_mean: bool = True,
         normalize_distances: bool = False,
         use_vmap: bool = True,
+        use_gpu_for_distances: bool = True,
         groupby: Optional[Union[List[str], str]] = None,
         keep_cell: bool = True,
     ) -> xr.Dataset:
@@ -563,7 +594,13 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                         group_by=groupby_key,
                     )
                 )
-        return self.compute_local_statistics(reductions, adata=adata, batch_size=batch_size, use_vmap=use_vmap)
+        return self.compute_local_statistics(
+            reductions,
+            adata=adata,
+            batch_size=batch_size,
+            use_vmap=use_vmap,
+            use_gpu_for_distances=use_gpu_for_distances,
+        )
 
     def compute_cell_scores(
         self,

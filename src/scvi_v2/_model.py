@@ -858,6 +858,9 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         figure_dir: Optional[str] = None,
         show_figures: bool = False,
         sample_metadata: Optional[Union[str, List[str]]] = None,
+        cmap_name: str = "tab10",
+        cmap_requires_int: bool = True,
+        **sns_kwargs,
     ):
         """Analysis of distance matrix stratifications.
 
@@ -883,7 +886,10 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         colors = None
         if sample_metadata is not None:
             sample_metadata = [sample_metadata] if isinstance(sample_metadata, str) else sample_metadata
-            colors = convert_pandas_to_colors(self.donor_info.loc[:, sample_metadata])
+            donor_info_ = self.donor_info.set_index(self.registry_["setup_args"]["sample_key"])
+            colors = convert_pandas_to_colors(
+                donor_info_.loc[:, sample_metadata], cmap_name=cmap_name, cmap_requires_int=cmap_requires_int
+            )
 
         # Subsample distances if necessary
         distances_ = distances
@@ -902,7 +908,9 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             )
             assert dist.ndim == 2
 
-            fig = sns.clustermap(dist.to_pandas(), row_linkage=dendrogram, col_linkage=dendrogram, row_colors=colors)
+            fig = sns.clustermap(
+                dist.to_pandas(), row_linkage=dendrogram, col_linkage=dendrogram, row_colors=colors, **sns_kwargs
+            )
             fig.fig.suptitle(celltype_name)
             if figure_dir is not None:
                 fig.savefig(os.path.join(figure_dir, f"{celltype_name}.png"))

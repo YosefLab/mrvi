@@ -1,6 +1,7 @@
 from tempfile import TemporaryDirectory
 
 import numpy as np
+import jax.numpy as jnp
 from scvi.data import synthetic_iid
 
 from scvi_v2 import MrVI, MrVIReduction
@@ -38,7 +39,9 @@ def test_mrvi():
     )
     local_map = model.get_local_sample_representation(use_vmap=False)
     local_dist_map = model.get_local_sample_distances(use_vmap=False, use_gpu_for_distances=False)["cell"]
-    local_dist_map = model.get_local_sample_distances(use_vmap=False, use_gpu_for_distances=True)["cell"]
+    local_dist_map = model.get_local_sample_distances(use_vmap=False, use_gpu_for_distances=True, norm="l2")["cell"]
+    local_dist_map = model.get_local_sample_distances(use_vmap=False, use_gpu_for_distances=True, norm="l1")["cell"]
+    local_dist_map = model.get_local_sample_distances(use_vmap=False, use_gpu_for_distances=True, norm="linf")["cell"]
     assert local_map.shape == (adata.shape[0], 15, n_latent)
     assert local_dist_map.shape == (
         adata.shape[0],
@@ -76,6 +79,18 @@ def test_mrvi():
 
     # tests __repr__
     print(model)
+
+    mask = np.random.choice(n_latent, size=adata.shape[1])
+    mask = jnp.array(np.eye(n_latent)[mask])
+    px_kwargs = dict(
+        mask=mask,
+    )
+    model = MrVI(
+        adata,
+        n_latent=n_latent,
+        px_kwargs=px_kwargs,
+    )
+    model.train(1, check_val_every_n_epoch=1, train_size=0.5)
 
 
 def test_mrvi_stratifications():

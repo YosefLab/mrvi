@@ -211,6 +211,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         batch_size: Optional[int] = None,
         use_vmap: bool = True,
         use_gpu_for_distances: bool = False,
+        norm: str = "l2",
     ) -> xr.Dataset:
         """
         Compute local statistics from counterfactual sample representations.
@@ -332,14 +333,14 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
             if reqs.needs_mean_distances:
                 mean_dists = (
-                    self._compute_distances_from_representations_gpu(mean_zs_, indices)
+                    self._compute_distances_from_representations_gpu(mean_zs_, indices, norm=norm)
                     if use_gpu_for_distances
                     else self._compute_distances_from_representations(mean_zs, indices)
                 )
 
             if reqs.needs_sampled_distances or reqs.needs_normalized_distances:
                 sampled_dists = (
-                    self._compute_distances_from_representations_gpu(sampled_zs_, indices)
+                    self._compute_distances_from_representations_gpu(sampled_zs_, indices, norm=norm)
                     if use_gpu_for_distances
                     else self._compute_distances_from_representations(sampled_zs, indices)
                 )
@@ -454,12 +455,18 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         l2_dists = squared_l2_dists**0.5
         return np.array(jnp.mean(l2_dists, axis=1)), np.array(jnp.var(l2_dists, axis=1))
 
-    def _compute_distances_from_representations_gpu(self, reps, indices):
+    def _compute_distances_from_representations_gpu(self, reps, indices, norm="l2"):
         @jax.jit
         def _compute_distance(rep):
-            res = (jnp.expand_dims(rep, 0) - jnp.expand_dims(rep, 1)) ** 2
-            res = res.sum(-1)
-            return jnp.sqrt(res)
+            delta_mat = jnp.expand_dims(rep, 0) - jnp.expand_dims(rep, 1)
+            if norm == "l2":
+                res = delta_mat**2
+                res = jnp.sqrt(res.sum(-1))
+            elif norm == "l1":
+                res = jnp.abs(delta_mat).sum(-1)
+            else:
+                res = jnp.abs(delta_mat).max(-1)
+            return res
 
         dists = jax.vmap(_compute_distance)(reps)
         return xr.DataArray(
@@ -536,6 +543,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         use_gpu_for_distances: bool = True,
         groupby: Optional[Union[List[str], str]] = None,
         keep_cell: bool = True,
+        norm: str = "l2",
     ) -> xr.Dataset:
         """
         Computes local sample distances as `xr.Dataset`.
@@ -600,6 +608,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             batch_size=batch_size,
             use_vmap=use_vmap,
             use_gpu_for_distances=use_gpu_for_distances,
+            norm=norm,
         )
 
     def compute_cell_scores(

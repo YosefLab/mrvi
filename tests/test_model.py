@@ -39,9 +39,9 @@ def test_mrvi():
     )
     local_map = model.get_local_sample_representation(use_vmap=False)
     local_dist_map = model.get_local_sample_distances(use_vmap=False, use_gpu_for_distances=False)["cell"]
-    local_dist_map = model.get_local_sample_distances(use_vmap=False, use_gpu_for_distances=True, norm="l2")["cell"]
     local_dist_map = model.get_local_sample_distances(use_vmap=False, use_gpu_for_distances=True, norm="l1")["cell"]
     local_dist_map = model.get_local_sample_distances(use_vmap=False, use_gpu_for_distances=True, norm="linf")["cell"]
+    local_dist_map = model.get_local_sample_distances(use_vmap=False, use_gpu_for_distances=True, norm="l2")["cell"]
     assert local_map.shape == (adata.shape[0], 15, n_latent)
     assert local_dist_map.shape == (
         adata.shape[0],

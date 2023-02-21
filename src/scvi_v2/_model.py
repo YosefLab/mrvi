@@ -21,7 +21,6 @@ from scvi.data.fields import (
     NumericalObsField,
 )
 from scvi.model.base import BaseModelClass, JaxTrainingMixin
-from sklearn.metrics import pairwise_distances
 from tqdm import tqdm
 
 from ._constants import MRVI_REGISTRY_KEYS
@@ -210,6 +209,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         indices: Optional[Sequence[int]] = None,
         batch_size: Optional[int] = None,
         use_vmap: bool = True,
+        use_gpu_for_distances: bool = False,
+        norm: str = "l2",
     ) -> xr.Dataset:
         """
         Compute local statistics from counterfactual sample representations.
@@ -301,37 +302,39 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
             # Compute necessary inputs.
             if reqs.needs_mean_representations:
+                mean_zs_ = mapped_inference_fn(
+                    stacked_rngs=stacked_rngs,
+                    x=jnp.array(inf_inputs["x"]),
+                    sample_index=jnp.array(inf_inputs["sample_index"]),
+                    cf_sample=jnp.array(cf_sample),
+                    use_mean=True,
+                )
                 mean_zs = xr.DataArray(
-                    mapped_inference_fn(
-                        stacked_rngs=stacked_rngs,
-                        x=jnp.array(inf_inputs["x"]),
-                        sample_index=jnp.array(inf_inputs["sample_index"]),
-                        cf_sample=jnp.array(cf_sample),
-                        use_mean=True,
-                    ),
+                    mean_zs_,
                     dims=["cell_name", "sample", "latent_dim"],
-                    coords={"cell_name": adata.obs_names[indices], "sample": self.sample_order},
+                    coords={"cell_name": self.adata.obs_names[indices], "sample": self.sample_order},
                     name="sample_representations",
                 )
             if reqs.needs_sampled_representations:
+                sampled_zs_ = mapped_inference_fn(
+                    stacked_rngs=stacked_rngs,  # OK to use stacked rngs here since there is no stochasticity for mean rep.
+                    x=jnp.array(inf_inputs["x"]),
+                    sample_index=jnp.array(inf_inputs["sample_index"]),
+                    cf_sample=jnp.array(cf_sample),
+                    use_mean=False,
+                )
                 sampled_zs = xr.DataArray(
-                    mapped_inference_fn(
-                        stacked_rngs=stacked_rngs,  # OK to use stacked rngs here since there is no stochasticity for mean rep.
-                        x=jnp.array(inf_inputs["x"]),
-                        sample_index=jnp.array(inf_inputs["sample_index"]),
-                        cf_sample=jnp.array(cf_sample),
-                        use_mean=False,
-                    ),
+                    sampled_zs_,
                     dims=["cell_name", "sample", "latent_dim"],
-                    coords={"cell_name": adata.obs_names[indices], "sample": self.sample_order},
+                    coords={"cell_name": self.adata.obs_names[indices], "sample": self.sample_order},
                     name="sample_representations",
                 )
 
             if reqs.needs_mean_distances:
-                mean_dists = self._compute_distances_from_representations(mean_zs, indices)
+                mean_dists = self._compute_distances_from_representations(mean_zs_, indices, norm=norm)
 
             if reqs.needs_sampled_distances or reqs.needs_normalized_distances:
-                sampled_dists = self._compute_distances_from_representations(sampled_zs, indices)
+                sampled_dists = self._compute_distances_from_representations(sampled_zs_, indices, norm=norm)
 
                 if reqs.needs_normalized_distances:
                     normalization_means, normalization_vars = self._compute_local_baseline_dists(array_dict)
@@ -359,11 +362,11 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 outputs = r.fn(inputs)
 
                 if r.group_by is not None:
-                    group_by = adata.obs[r.group_by][indices]
+                    group_by = self.adata.obs[r.group_by][indices]
                     group_by_cats = group_by.unique()
                     for cat in group_by_cats:
                         cat_summed_outputs = outputs.sel(
-                            cell_name=adata.obs_names[indices][group_by == cat].values
+                            cell_name=self.adata.obs_names[indices][group_by == cat].values
                         ).sum(dim="cell_name")
                         cat_summed_outputs = cat_summed_outputs.assign_coords({f"{r.group_by}_name": cat})
                         if cat not in grouped_data_arrs[r.name]:
@@ -443,12 +446,22 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         l2_dists = squared_l2_dists**0.5
         return np.array(jnp.mean(l2_dists, axis=1)), np.array(jnp.var(l2_dists, axis=1))
 
-    def _compute_distances_from_representations(self, reps, indices):
-        n_cells, n_donors, _ = reps.shape
-        dists = np.zeros((n_cells, n_donors, n_donors))
-        for i, cell_rep in enumerate(reps):
-            d_ = pairwise_distances(cell_rep.data, metric="euclidean")
-            dists[i, :, :] = d_
+    def _compute_distances_from_representations(self, reps, indices, norm="l2"):
+        @jax.jit
+        def _compute_distance(rep):
+            delta_mat = jnp.expand_dims(rep, 0) - jnp.expand_dims(rep, 1)
+            if norm == "l2":
+                res = delta_mat**2
+                res = jnp.sqrt(res.sum(-1))
+            elif norm == "l1":
+                res = jnp.abs(delta_mat).sum(-1)
+            elif norm == "linf":
+                res = jnp.abs(delta_mat).max(-1)
+            else:
+                raise ValueError(f"norm {norm} not supported")
+            return res
+
+        dists = jax.vmap(_compute_distance)(reps)
         return xr.DataArray(
             dists,
             dims=["cell_name", "sample_x", "sample_y"],
@@ -503,8 +516,10 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         use_mean: bool = True,
         normalize_distances: bool = False,
         use_vmap: bool = True,
+        use_gpu_for_distances: bool = True,
         groupby: Optional[Union[List[str], str]] = None,
         keep_cell: bool = True,
+        norm: str = "l2",
     ) -> xr.Dataset:
         """
         Computes local sample distances as `xr.Dataset`.
@@ -563,7 +578,14 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                         group_by=groupby_key,
                     )
                 )
-        return self.compute_local_statistics(reductions, adata=adata, batch_size=batch_size, use_vmap=use_vmap)
+        return self.compute_local_statistics(
+            reductions,
+            adata=adata,
+            batch_size=batch_size,
+            use_vmap=use_vmap,
+            use_gpu_for_distances=use_gpu_for_distances,
+            norm=norm,
+        )
 
     def compute_cell_scores(
         self,
@@ -821,6 +843,9 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         figure_dir: Optional[str] = None,
         show_figures: bool = False,
         sample_metadata: Optional[Union[str, List[str]]] = None,
+        cmap_name: str = "tab10",
+        cmap_requires_int: bool = True,
+        **sns_kwargs,
     ):
         """Analysis of distance matrix stratifications.
 
@@ -846,7 +871,10 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         colors = None
         if sample_metadata is not None:
             sample_metadata = [sample_metadata] if isinstance(sample_metadata, str) else sample_metadata
-            colors = convert_pandas_to_colors(self.donor_info.loc[:, sample_metadata])
+            donor_info_ = self.donor_info.set_index(self.registry_["setup_args"]["sample_key"])
+            colors = convert_pandas_to_colors(
+                donor_info_.loc[:, sample_metadata], cmap_name=cmap_name, cmap_requires_int=cmap_requires_int
+            )
 
         # Subsample distances if necessary
         distances_ = distances
@@ -865,7 +893,9 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             )
             assert dist.ndim == 2
 
-            fig = sns.clustermap(dist.to_pandas(), row_linkage=dendrogram, col_linkage=dendrogram, row_colors=colors)
+            fig = sns.clustermap(
+                dist.to_pandas(), row_linkage=dendrogram, col_linkage=dendrogram, row_colors=colors, **sns_kwargs
+            )
             fig.fig.suptitle(celltype_name)
             if figure_dir is not None:
                 fig.savefig(os.path.join(figure_dir, f"{celltype_name}.png"))

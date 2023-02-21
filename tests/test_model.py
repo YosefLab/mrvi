@@ -37,7 +37,10 @@ def test_mrvi():
         15,
     )
     local_map = model.get_local_sample_representation(use_vmap=False)
-    local_dist_map = model.get_local_sample_distances(use_vmap=False)["cell"]
+    model.get_local_sample_distances(use_vmap=False, use_gpu_for_distances=False)["cell"]
+    model.get_local_sample_distances(use_vmap=False, use_gpu_for_distances=True, norm="l1")["cell"]
+    model.get_local_sample_distances(use_vmap=False, use_gpu_for_distances=True, norm="linf")["cell"]
+    local_dist_map = model.get_local_sample_distances(use_vmap=False, use_gpu_for_distances=True, norm="l2")["cell"]
     assert local_map.shape == (adata.shape[0], 15, n_latent)
     assert local_dist_map.shape == (
         adata.shape[0],
@@ -56,7 +59,10 @@ def test_mrvi():
     assert np.allclose(local_normalized_dists[0].values, local_normalized_dists[0].values.T, atol=1e-6)
 
     # Test memory efficient groupby.
-    grouped_dists_no_cell = model.get_local_sample_distances(keep_cell=False, groupby=["meta1", "meta2"])
+    model.get_local_sample_distances(keep_cell=False, groupby=["meta1", "meta2"])
+    grouped_dists_no_cell = model.get_local_sample_distances(
+        keep_cell=False, groupby=["meta1", "meta2"], use_gpu_for_distances=False
+    )
     grouped_dists_w_cell = model.get_local_sample_distances(groupby=["meta1", "meta2"])
     assert np.allclose(grouped_dists_no_cell.meta1, grouped_dists_w_cell.meta1)
     assert np.allclose(grouped_dists_no_cell.meta2, grouped_dists_w_cell.meta2)

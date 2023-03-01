@@ -81,20 +81,23 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         n_batch = self.summary_stats.n_batch
         n_continuous_cov = self.summary_stats.get("n_extra_continuous_covs", 0)
 
+        obs_df = adata.obs.copy()
+        obs_df = obs_df.loc[~obs_df._scvi_sample.duplicated("first")]
+        self.donor_info = obs_df.set_index("_scvi_sample").sort_index()
+        self.sample_order = self.adata_manager.get_state_registry(MRVI_REGISTRY_KEYS.SAMPLE_KEY).categorical_mapping
+
+        self.n_obs_per_sample = (jnp.array(adata.obs._scvi_sample.value_counts().sort_index().values))
+
         self.data_splitter = None
         self.module = MrVAE(
             n_input=self.summary_stats.n_vars,
             n_sample=n_sample,
             n_batch=n_batch,
             n_continuous_cov=n_continuous_cov,
+            n_obs_per_sample=self.n_obs_per_sample,
             **model_kwargs,
         )
         self.init_params_ = self._get_init_params(locals())
-
-        obs_df = adata.obs.copy()
-        obs_df = obs_df.loc[~obs_df._scvi_sample.duplicated("first")]
-        self.donor_info = obs_df.set_index("_scvi_sample").sort_index()
-        self.sample_order = self.adata_manager.get_state_registry(MRVI_REGISTRY_KEYS.SAMPLE_KEY).categorical_mapping
 
     def to_device(self, device):  # noqa: #D102
         # TODO(jhong): remove this once we have a better way to handle device.

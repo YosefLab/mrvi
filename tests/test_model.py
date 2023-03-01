@@ -18,6 +18,14 @@ def test_mrvi():
     adata.obs["cont_cov"] = np.random.normal(0, 1, size=adata.shape[0])
     MrVI.setup_anndata(adata, sample_key="sample", batch_key="batch", continuous_covariate_keys=["cont_cov"])
     n_latent = 10
+
+    model = MrVI(
+        adata,
+        n_latent=n_latent,
+        pz_kwargs=dict(use_dist=True, n_factorized_embed_dims=3),
+    )
+    model.train(1, check_val_every_n_epoch=1, train_size=0.5)
+
     model = MrVI(
         adata,
         n_latent=n_latent,

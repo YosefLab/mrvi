@@ -22,9 +22,10 @@ def test_mrvi():
     model = MrVI(
         adata,
         n_latent=n_latent,
-        pz_kwargs=dict(use_dist=True, n_factorized_embed_dims=3),
+        pz_kwargs={"use_dist": True, "n_factorized_embed_dims": 3},
     )
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)
+    model.get_local_sample_distances(use_mean=False, normalize_distances=True)
 
     model = MrVI(
         adata,

@@ -86,7 +86,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         self.donor_info = obs_df.set_index("_scvi_sample").sort_index()
         self.sample_order = self.adata_manager.get_state_registry(MRVI_REGISTRY_KEYS.SAMPLE_KEY).categorical_mapping
 
-        self.n_obs_per_sample = (jnp.array(adata.obs._scvi_sample.value_counts().sort_index().values))
+        self.n_obs_per_sample = jnp.array(adata.obs._scvi_sample.value_counts().sort_index().values)
 
         self.data_splitter = None
         self.module = MrVAE(
@@ -416,6 +416,9 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             sample_covariate = sample_covariate.astype(int).flatten()
             if not module.pz.use_nonlinear:
                 A_s = module.pz.A_s_enc(sample_covariate)
+                if module.pz.use_dist:
+                    n_latent = module.pz.n_latent
+                    A_s = A_s[..., : n_latent * n_latent]
             else:
                 # A_s output by a non-linear function without an explicit intercept
                 sample_one_hot = jax.nn.one_hot(sample_covariate, module.pz.n_sample)

@@ -416,9 +416,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             sample_covariate = sample_covariate.astype(int).flatten()
             if not module.pz.use_nonlinear:
                 A_s = module.pz.A_s_enc(sample_covariate)
-                if module.pz.use_dist:
-                    n_latent = module.pz.n_latent
-                    A_s = A_s[..., : n_latent * n_latent]
             else:
                 # A_s output by a non-linear function without an explicit intercept
                 sample_one_hot = jax.nn.one_hot(sample_covariate, module.pz.n_sample)

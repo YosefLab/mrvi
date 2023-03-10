@@ -330,19 +330,19 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                     name="sample_representations",
                 )
 
-            if reqs.needs_mean_distances:
-                mean_dists = self._compute_distances_from_representations(mean_zs_, indices, norm=norm)
-
-            if reqs.needs_sampled_distances or reqs.needs_normalized_distances:
-                sampled_dists = self._compute_distances_from_representations(sampled_zs_, indices, norm=norm)
+            if reqs.needs_mean_distances or reqs.needs_normalized_distances:
+                mean_dists = self._compute_distances_from_representations(mean_zs, indices)
 
                 if reqs.needs_normalized_distances:
                     normalization_means, normalization_vars = self._compute_local_baseline_dists(array_dict)
                     normalization_means = normalization_means.reshape(-1, 1, 1)
                     normalization_vars = normalization_vars.reshape(-1, 1, 1)
-                    normalized_dists = np.clip(sampled_dists - normalization_means, a_min=0, a_max=None) / (
+                    normalized_dists = np.clip(mean_dists - normalization_means, a_min=0, a_max=None) / (
                         normalization_vars**0.5
                     )
+
+            if reqs.needs_sampled_distances:
+                sampled_dists = self._compute_distances_from_representations(sampled_zs, indices)
 
             # Compute each reduction
             for r in reductions:

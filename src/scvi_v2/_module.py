@@ -118,6 +118,31 @@ class _EncoderUZ(nn.Module):
         return u + delta, A_s
 
 
+class _EncoderUZ2(nn.Module):
+    n_latent: int
+    n_sample: int
+    dropout_rate: float = 0.0
+    training: Optional[bool] = None
+    use_map: bool = False
+    n_hidden: int = 32
+    n_layers: int = 1
+
+    @nn.compact
+    def __call__(self, u: NdArray, sample_covariate: NdArray, training: Optional[bool] = None):
+        training = nn.merge_param("training", self.training, training)
+        sample_covariate = sample_covariate.astype(int).flatten()
+        u_drop = nn.Dropout(self.dropout_rate)(jax.lax.stop_gradient(u), deterministic=not training)
+
+        n_outs = 1 if self.use_map else 2
+        inputs = jnp.concatenate([u_drop, jax.nn.one_hot(sample_covariate, self.n_sample)], axis=-1)
+        eps_ = MLP(
+            n_out=n_outs * self.n_latent,
+            n_hidden=self.n_hidden,
+            training=training,
+        )(inputs=inputs)
+        return eps_
+
+
 class _EncoderXU(nn.Module):
     n_latent: int
     n_sample: int
@@ -156,6 +181,7 @@ class MrVAE(JaxBaseModuleClass):
     z_u_prior_scale: float = 1.0
     laplace_scale: float = None
     scale_observations: bool = False
+    qz_nn_flavor: str = False
     px_kwargs: Optional[dict] = None
     qz_kwargs: Optional[dict] = None
     qu_kwargs: Optional[dict] = None
@@ -180,7 +206,9 @@ class MrVAE(JaxBaseModuleClass):
             self.n_batch,
             **px_kwargs,
         )
-        self.qz = _EncoderUZ(
+
+        qz_cls = _EncoderUZ2 if self.qz_nn_flavor else _EncoderUZ
+        self.qz = qz_cls(
             self.n_latent,
             self.n_sample,
             **qz_kwargs,
@@ -197,7 +225,7 @@ class MrVAE(JaxBaseModuleClass):
 
     @property
     def required_rngs(self):  # noqa: D102
-        return ("params", "u", "dropout")
+        return ("params", "u", "dropout", "eps")
 
     def _get_inference_input(self, tensors: Dict[str, NdArray]) -> Dict[str, Any]:
         x = tensors[REGISTRY_KEYS.X_KEY]
@@ -215,11 +243,24 @@ class MrVAE(JaxBaseModuleClass):
             u = qu.rsample(u_rng, sample_shape=sample_shape)
 
         sample_index_cf = sample_index if cf_sample is None else cf_sample
-        z, As = self.qz(u, sample_index_cf, training=self.training)
+        if self.qz_nn_flavor:
+            eps = qeps_ = self.qz(u, sample_index_cf, training=self.training)
+
+            qeps = None
+            if qeps_.shape[-1] == 2 * self.n_latent:
+                loc_, scale_ = qeps_[..., : self.n_latent], qeps_[..., self.n_latent :]
+                qeps = dist.Normal(loc_, scale_)
+                eps = qeps.rsample(self.make_rng("eps"))
+            As = None
+            z = u + eps
+        else:
+            z, As = self.qz(u, sample_index_cf, training=self.training)
+            qeps = None
         library = jnp.log(x.sum(1, keepdims=True))
 
         return {
             "qu": qu,
+            "qeps": qeps,
             "As": As,
             "u": u,
             "z": z,
@@ -254,10 +295,18 @@ class MrVAE(JaxBaseModuleClass):
         """Compute the loss function value."""
         reconstruction_loss = -generative_outputs["px"].log_prob(tensors[REGISTRY_KEYS.X_KEY]).sum(-1)
         kl_u = dist.kl_divergence(inference_outputs["qu"], generative_outputs["pu"]).sum(-1)
-        if self.z_u_prior:
-            kl_z = -dist.Normal(inference_outputs["u"], self.z_u_prior_scale).log_prob(inference_outputs["z"]).sum(-1)
+        if self.qz_nn_flavor:
+            qeps = inference_outputs["qeps"]
+            eps = inference_outputs["z"] - inference_outputs["u"]
+            peps = dist.Normal(0, self.z_u_prior_scale)
+            kl_z = dist.kl_divergence(qeps, peps).sum(-1) if qeps is not None else -peps.log_prob(eps).sum(-1)
         else:
-            kl_z = 0
+            kl_z = (
+                -dist.Normal(inference_outputs["u"], self.z_u_prior_scale).log_prob(inference_outputs["z"]).sum(-1)
+                if self.z_u_prior_scale is not None
+                else 0
+            )
+
         weighted_kl_local = kl_weight * (kl_u + kl_z)
         loss = reconstruction_loss + weighted_kl_local
 

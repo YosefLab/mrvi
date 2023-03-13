@@ -204,6 +204,22 @@ def test_mrvi_nonlinear():
     )
     assert np.allclose(local_normalized_dists[0].values, local_normalized_dists[0].values.T, atol=1e-6)
 
+    model = MrVI(
+        adata,
+        n_latent=n_latent,
+        qz_nn_flavor=True,
+        qz_kwargs={"use_map": True},
+    )
+    model.train(1, check_val_every_n_epoch=1, train_size=0.5)
+
+    model = MrVI(
+        adata,
+        n_latent=n_latent,
+        qz_nn_flavor=True,
+        qz_kwargs={"use_map": False},
+    )
+    model.train(1, check_val_every_n_epoch=1, train_size=0.5)
+
 
 def test_de():
     adata = synthetic_iid()

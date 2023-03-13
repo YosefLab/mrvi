@@ -126,12 +126,16 @@ class _EncoderUZ2(nn.Module):
     use_map: bool = False
     n_hidden: int = 32
     n_layers: int = 1
+    stop_gradients: bool = False
 
     @nn.compact
     def __call__(self, u: NdArray, sample_covariate: NdArray, training: Optional[bool] = None):
         training = nn.merge_param("training", self.training, training)
         sample_covariate = sample_covariate.astype(int).flatten()
-        u_drop = nn.Dropout(self.dropout_rate)(jax.lax.stop_gradient(u), deterministic=not training)
+        # u_drop = nn.Dropout(self.dropout_rate)(jax.lax.stop_gradient(u), deterministic=not training)
+        u_ = u if not self.stop_gradients else jax.lax.stop_gradient(u)
+        u_drop = u_
+        # u_drop = nn.Dropout(self.dropout_rate)(u_, deterministic=not training)
 
         n_outs = 1 if self.use_map else 2
         inputs = jnp.concatenate([u_drop, jax.nn.one_hot(sample_covariate, self.n_sample)], axis=-1)
@@ -250,7 +254,7 @@ class MrVAE(JaxBaseModuleClass):
             if qeps_.shape[-1] == 2 * self.n_latent:
                 loc_, scale_ = qeps_[..., : self.n_latent], qeps_[..., self.n_latent :]
                 qeps = dist.Normal(loc_, scale_)
-                eps = qeps.rsample(self.make_rng("eps"))
+                eps = qeps.mean if use_mean else qeps.rsample(self.make_rng("eps"))
             As = None
             z = u + eps
         else:

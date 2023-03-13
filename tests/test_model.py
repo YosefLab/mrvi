@@ -22,9 +22,19 @@ def test_mrvi():
     model = MrVI(
         adata,
         n_latent=n_latent,
+        laplace_scale=1.0,
         pz_kwargs={"n_factorized_embed_dims": 3},
     )
-    model.train(1, check_val_every_n_epoch=1, train_size=0.5, plan_kwargs={"laplace_scale": 1.0})
+    model.train(1, check_val_every_n_epoch=1, train_size=0.5)
+    model.get_local_sample_distances(use_mean=False, normalize_distances=True)
+
+    model = MrVI(
+        adata,
+        n_latent=n_latent,
+        scale_observations=True,
+        pz_kwargs={"n_factorized_embed_dims": 3},
+    )
+    model.train(1, check_val_every_n_epoch=1, train_size=0.5)
     model.get_local_sample_distances(use_mean=False, normalize_distances=True)
 
     model = MrVI(

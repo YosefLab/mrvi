@@ -35,7 +35,6 @@ class _DecoderZX(nn.Module):
     activation: Callable = nn.softmax
     dropout_rate: float = 0.1
     training: Optional[bool] = None
-    mask: Optional[NdArray] = None
 
     @nn.compact
     def __call__(
@@ -53,9 +52,6 @@ class _DecoderZX(nn.Module):
         A_b = nn.Embed(self.n_batch, self.n_out * self.n_in, embedding_init=_normal_initializer, name="A_b")(
             batch_covariate
         ).reshape(batch_covariate.shape[0], self.n_out, self.n_in)
-
-        if self.mask is not None:
-            A_b = A_b * self.mask
         if z_drop.ndim == 3:
             h2 = jnp.einsum("cgl,bcl->bcg", A_b, z_drop)
         else:
@@ -159,6 +155,8 @@ class MrVAE(JaxBaseModuleClass):
     encoder_n_layers: int = 2
     z_u_prior: bool = True
     z_u_prior_scale: float = 1.0
+    laplace_scale: float = None
+    scale_observations: bool = False
     px_kwargs: Optional[dict] = None
     pz_kwargs: Optional[dict] = None
     qu_kwargs: Optional[dict] = None
@@ -253,39 +251,34 @@ class MrVAE(JaxBaseModuleClass):
         inference_outputs: Dict[str, Any],
         generative_outputs: Dict[str, Any],
         kl_weight: float = 1.0,
-        beta: float = None,
-        laplace_scale: float = None,
     ) -> jnp.ndarray:
         """Compute the loss function value."""
         reconstruction_loss = -generative_outputs["px"].log_prob(tensors[REGISTRY_KEYS.X_KEY]).sum(-1)
         kl_u = dist.kl_divergence(inference_outputs["qu"], generative_outputs["pu"]).sum(-1)
-
-        if beta is not None:
-            kl_weight = beta
-
         if self.z_u_prior:
             kl_z = -dist.Normal(inference_outputs["u"], self.z_u_prior_scale).log_prob(inference_outputs["z"]).sum(-1)
         else:
             kl_z = 0
         weighted_kl_local = kl_weight * (kl_u + kl_z)
         loss = reconstruction_loss + weighted_kl_local
-        loss = jnp.mean(loss)
 
-        if laplace_scale is not None:
+        if self.laplace_scale is not None:
             As = inference_outputs["As"]
             n_obs = As.shape[0]
             As = As.reshape((n_obs, -1))
-            p_As = dist.Laplace(0, laplace_scale).log_prob(As).sum(-1)
+            p_As = dist.Laplace(0, self.laplace_scale).log_prob(As).sum(-1)
 
             n_obs_total = self.n_obs_per_sample.sum()
-            sample_index = tensors[MRVI_REGISTRY_KEYS.SAMPLE_KEY].flatten()
-            sample_index = jax.nn.one_hot(sample_index, self.n_sample)
-            sample_sum = sample_index.sum(0)
-            prefactors = (sample_index * sample_sum).sum(-1)
-            prefactors = prefactors * n_obs_total
-            As_pen = -p_As / prefactors
+            As_pen = -p_As / n_obs_total
             As_pen = As_pen.sum()
             loss = loss + (kl_weight * As_pen)
+
+        if self.scale_observations:
+            sample_index = tensors[MRVI_REGISTRY_KEYS.SAMPLE_KEY].flatten().astype(int)
+            prefactors = self.n_obs_per_sample[sample_index]
+            loss = loss / prefactors
+
+        loss = jnp.mean(loss)
 
         return LossOutput(
             loss=loss,

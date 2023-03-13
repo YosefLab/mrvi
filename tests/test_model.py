@@ -23,7 +23,7 @@ def test_mrvi():
         adata,
         n_latent=n_latent,
         laplace_scale=1.0,
-        pz_kwargs={"n_factorized_embed_dims": 3},
+        qz_kwargs={"n_factorized_embed_dims": 3},
     )
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)
     model.get_local_sample_distances(use_mean=False, normalize_distances=True)
@@ -32,7 +32,7 @@ def test_mrvi():
         adata,
         n_latent=n_latent,
         scale_observations=True,
-        pz_kwargs={"n_factorized_embed_dims": 3},
+        qz_kwargs={"n_factorized_embed_dims": 3},
     )
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)
     model.get_local_sample_distances(use_mean=False, normalize_distances=True)
@@ -180,7 +180,7 @@ def test_mrvi_nonlinear():
     model = MrVI(
         adata,
         n_latent=n_latent,
-        pz_kwargs={"use_nonlinear": True},
+        qz_kwargs={"use_nonlinear": True},
     )
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)
     model.is_trained_ = True

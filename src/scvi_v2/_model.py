@@ -64,7 +64,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         Number of nodes per hidden layer in the encoder.
     px_kwargs
         Keyword args for :class:`~mrvi.DecoderZX`.
-    pz_kwargs
+    qz_kwargs
         Keyword args for :class:`~mrvi.DecoderUZ`.
     qu_kwargs
         Keyword args for :class:`~mrvi.EncoderXU`.
@@ -414,15 +414,15 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
         def get_A_s(module, u, sample_covariate):
             sample_covariate = sample_covariate.astype(int).flatten()
-            if not module.pz.use_nonlinear:
-                A_s = module.pz.A_s_enc(sample_covariate)
+            if not module.qz.use_nonlinear:
+                A_s = module.qz.A_s_enc(sample_covariate)
             else:
                 # A_s output by a non-linear function without an explicit intercept
-                sample_one_hot = jax.nn.one_hot(sample_covariate, module.pz.n_sample)
+                sample_one_hot = jax.nn.one_hot(sample_covariate, module.qz.n_sample)
                 A_s_dec_inputs = jnp.concatenate([u, sample_one_hot], axis=-1)
-                A_s = module.pz.A_s_enc(A_s_dec_inputs, training=False)
+                A_s = module.qz.A_s_enc(A_s_dec_inputs, training=False)
             # cells by n_latent by n_latent
-            return A_s.reshape(sample_covariate.shape[0], module.pz.n_latent, module.pz.n_latent)
+            return A_s.reshape(sample_covariate.shape[0], module.qz.n_latent, module.qz.n_latent)
 
         def apply_get_A_s(u, sample_covariate):
             vars_in = {"params": self.module.params, **self.module.state}

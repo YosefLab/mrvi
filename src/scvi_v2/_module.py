@@ -19,7 +19,7 @@ from ._constants import MRVI_REGISTRY_KEYS
 from ._types import NdArray
 
 DEFAULT_PX_KWARGS = {"n_hidden": 32}
-DEFAULT_PZ_KWARGS = {}
+DEFAULT_QZ_KWARGS = {}
 DEFAULT_QU_KWARGS = {}
 
 # Lower stddev leads to better initial loss values
@@ -67,7 +67,7 @@ class _DecoderZX(nn.Module):
         )
 
 
-class _DecoderUZ(nn.Module):
+class _EncoderUZ(nn.Module):
 
     n_latent: int
     n_sample: int
@@ -119,7 +119,6 @@ class _DecoderUZ(nn.Module):
 
 
 class _EncoderXU(nn.Module):
-
     n_latent: int
     n_sample: int
     n_hidden: int
@@ -158,7 +157,7 @@ class MrVAE(JaxBaseModuleClass):
     laplace_scale: float = None
     scale_observations: bool = False
     px_kwargs: Optional[dict] = None
-    pz_kwargs: Optional[dict] = None
+    qz_kwargs: Optional[dict] = None
     qu_kwargs: Optional[dict] = None
     training: bool = True
     n_obs_per_sample: Optional[jnp.ndarray] = None
@@ -167,9 +166,9 @@ class MrVAE(JaxBaseModuleClass):
         px_kwargs = DEFAULT_PX_KWARGS.copy()
         if self.px_kwargs is not None:
             px_kwargs.update(self.px_kwargs)
-        pz_kwargs = DEFAULT_PZ_KWARGS.copy()
-        if self.pz_kwargs is not None:
-            pz_kwargs.update(self.pz_kwargs)
+        qz_kwargs = DEFAULT_QZ_KWARGS.copy()
+        if self.qz_kwargs is not None:
+            qz_kwargs.update(self.qz_kwargs)
         qu_kwargs = DEFAULT_QU_KWARGS.copy()
         if self.qu_kwargs is not None:
             qu_kwargs.update(self.qu_kwargs)
@@ -181,10 +180,10 @@ class MrVAE(JaxBaseModuleClass):
             self.n_batch,
             **px_kwargs,
         )
-        self.pz = _DecoderUZ(
+        self.qz = _EncoderUZ(
             self.n_latent,
             self.n_sample,
-            **pz_kwargs,
+            **qz_kwargs,
         )
 
         # Inference model
@@ -216,7 +215,7 @@ class MrVAE(JaxBaseModuleClass):
             u = qu.rsample(u_rng, sample_shape=sample_shape)
 
         sample_index_cf = sample_index if cf_sample is None else cf_sample
-        z, As = self.pz(u, sample_index_cf, training=self.training)
+        z, As = self.qz(u, sample_index_cf, training=self.training)
         library = jnp.log(x.sum(1, keepdims=True))
 
         return {

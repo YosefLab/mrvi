@@ -89,6 +89,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         self.n_obs_per_sample = jnp.array(adata.obs._scvi_sample.value_counts().sort_index().values)
 
         self.data_splitter = None
+        self.can_compute_normalized_dists = ~model_kwargs.get("qz_nn_flavor", False)
         self.module = MrVAE(
             n_input=self.summary_stats.n_vars,
             n_sample=n_sample,

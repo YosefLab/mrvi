@@ -330,7 +330,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 )
 
             if reqs.needs_mean_distances or reqs.needs_normalized_distances:
-                mean_dists = self._compute_distances_from_representations(mean_zs, indices)
+                mean_dists = self._compute_distances_from_representations(mean_zs_, indices)
 
                 if reqs.needs_normalized_distances:
                     if norm != "l2":
@@ -343,7 +343,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                     )
 
             if reqs.needs_sampled_distances:
-                sampled_dists = self._compute_distances_from_representations(sampled_zs, indices)
+                sampled_dists = self._compute_distances_from_representations(sampled_zs_, indices)
 
             # Compute each reduction
             for r in reductions:

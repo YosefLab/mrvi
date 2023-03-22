@@ -65,7 +65,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
     px_kwargs
         Keyword args for :class:`~mrvi.DecoderZX`.
     qz_kwargs
-        Keyword args for :class:`~mrvi.DecoderUZ`.
+        Keyword args for :class:`~mrvi.EncoderUZ`.
     qu_kwargs
         Keyword args for :class:`~mrvi.EncoderXU`.
     """

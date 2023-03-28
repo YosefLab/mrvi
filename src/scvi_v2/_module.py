@@ -142,6 +142,7 @@ class _EncoderUZ2(nn.Module):
         eps_ = MLP(
             n_out=n_outs * self.n_latent,
             n_hidden=self.n_hidden,
+            n_layers=self.n_layers,
             training=training,
         )(inputs=inputs)
         return eps_

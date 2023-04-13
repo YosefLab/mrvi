@@ -243,6 +243,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         # Hack to ensure new AnnDatas have indices.
         if "_indices" not in adata.obs:
             adata.obs["_indices"] = np.arange(adata.n_obs).astype(int)
+
         adata = self._validate_anndata(adata)
         scdl = self._make_data_loader(adata=adata, indices=indices, batch_size=batch_size, iter_ndarray=True)
         n_sample = self.summary_stats.n_sample
@@ -466,7 +467,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
                 # figure out how to compute dists here
                 z = outputs["z"]
-                z = z.reshape((outputs.shape[0] // mc_samples_per_cell, mc_samples_per_cell, -1))
+                z = z.reshape((z.shape[0] // mc_samples_per_cell, mc_samples_per_cell, -1))
                 for cell_z in z:
                     first_half_cell_z, second_half_cell_z = cell_z[:mc_samples], cell_z[mc_samples:]
                     l2_dists_rows.append(
@@ -582,6 +583,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         """
         input = "mean_distances" if use_mean else "sampled_distances"
         if normalize_distances:
+            if not use_mean:
+                raise ValueError("Normalizing distances requires `use_mean=True`.")
             input = "normalized_distances"
         if groupby and not isinstance(groupby, list):
             groupby = [groupby]

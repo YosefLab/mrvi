@@ -196,7 +196,7 @@ def test_mrvi_nonlinear():
         15,
     )
 
-    local_normalized_dists = model.get_local_sample_distances(use_mean=False, normalize_distances=True)["cell"]
+    local_normalized_dists = model.get_local_sample_distances(normalize_distances=True)["cell"]
     assert local_normalized_dists.shape == (
         adata.shape[0],
         15,
@@ -211,6 +211,7 @@ def test_mrvi_nonlinear():
         qz_kwargs={"use_map": True},
     )
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)
+    model.get_local_sample_distances(normalize_distances=True)
 
     model = MrVI(
         adata,
@@ -219,6 +220,7 @@ def test_mrvi_nonlinear():
         qz_kwargs={"use_map": False},
     )
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)
+    model.get_local_sample_distances(normalize_distances=True)
 
     model = MrVI(
         adata,
@@ -228,6 +230,7 @@ def test_mrvi_nonlinear():
     )
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)
     model.get_local_sample_distances(use_mean=True)
+    model.get_local_sample_distances(normalize_distances=True)
 
     model = MrVI(
         adata,
@@ -239,6 +242,7 @@ def test_mrvi_nonlinear():
     model.get_latent_representation()
     model.get_local_sample_distances(use_mean=True)
     model.get_local_sample_distances(use_mean=False)
+    model.get_local_sample_distances(normalize_distances=True)
 
 
 def test_de():

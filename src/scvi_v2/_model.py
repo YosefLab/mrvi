@@ -396,7 +396,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
         return xr.Dataset(data_vars=final_data_arrs)
 
-    def _compute_local_baseline_dists(self, batch: dict, mc_samples: int = 1000) -> Tuple[np.ndarray, np.ndarray]:
+    def _compute_local_baseline_dists(self, batch: dict, mc_samples: int = 250) -> Tuple[np.ndarray, np.ndarray]:
         """
         Approximate the distributions used as baselines for normalizing the local sample distances.
 
@@ -416,7 +416,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         def get_A_s(module, u, sample_covariate):
             sample_covariate = sample_covariate.astype(int).flatten()
             if not module.qz.use_nonlinear:
-                A_s = module.qz.A_s_enc(sample_covariate)
+                A_s = module.qz.A_s_enc(sample_covariate, training=False)
             else:
                 # A_s output by a non-linear function without an explicit intercept
                 sample_one_hot = jax.nn.one_hot(sample_covariate, module.qz.n_sample)
@@ -431,23 +431,48 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             A_s = self.module.apply(vars_in, rngs=rngs, method=get_A_s, u=u, sample_covariate=sample_covariate)
             return A_s
 
-        jit_inference_fn = self.module.get_jit_inference_fn()
-        qu = jit_inference_fn(self.module.rngs, batch)["qu"]
-        qu_vars_diag = jax.vmap(jnp.diag)(qu.variance)
+        if self.can_compute_normalized_dists:
+            jit_inference_fn = self.module.get_jit_inference_fn()
+            qu = jit_inference_fn(self.module.rngs, batch)["qu"]
+            qu_vars_diag = jax.vmap(jnp.diag)(qu.variance)
 
-        sample_index = self.module._get_inference_input(batch)["sample_index"]
-        A_s = apply_get_A_s(qu.mean, sample_index)  # use mean of latent representation to compute the baseline
-        B = jnp.expand_dims(jnp.eye(A_s.shape[1]), 0) + A_s
-        u_diff_sigma = 2 * jnp.einsum(
-            "cij, cjk, clk -> cil", B, qu_vars_diag, B
-        )  # 2 * (I + A_s) @ qu_vars_diag @ (I + A_s).T
-        eigvals = jax.vmap(jnp.linalg.eigh)(u_diff_sigma)[0].astype(float)
-        normal_rng = self.module.rngs["params"]  # Hack to get new rng for normal samples.
-        normal_samples = jax.random.normal(
-            normal_rng, shape=(eigvals.shape[0], mc_samples, eigvals.shape[1])
-        )  # n_cells by mc_samples by n_latent
-        squared_l2_dists = jnp.sum(jnp.einsum("cij, cj -> cij", (normal_samples**2), eigvals), axis=2)
-        l2_dists = squared_l2_dists**0.5
+            sample_index = self.module._get_inference_input(batch)["sample_index"]
+            A_s = apply_get_A_s(qu.mean, sample_index)  # use mean of latent representation to compute the baseline
+            B = jnp.expand_dims(jnp.eye(A_s.shape[1]), 0) + A_s
+            u_diff_sigma = 2 * jnp.einsum(
+                "cij, cjk, clk -> cil", B, qu_vars_diag, B
+            )  # 2 * (I + A_s) @ qu_vars_diag @ (I + A_s).T
+            eigvals = jax.vmap(jnp.linalg.eigh)(u_diff_sigma)[0].astype(float)
+            normal_rng = self.module.rngs["params"]  # Hack to get new rng for normal samples.
+            normal_samples = jax.random.normal(
+                normal_rng, shape=(eigvals.shape[0], mc_samples, eigvals.shape[1])
+            )  # n_cells by mc_samples by n_latent
+            squared_l2_dists = jnp.sum(jnp.einsum("cij, cj -> cij", (normal_samples**2), eigvals), axis=2)
+            l2_dists = squared_l2_dists**0.5
+        else:
+            jit_inference_fn = self.module.get_jit_inference_fn(inference_kwargs={"use_mean": False})
+            mc_samples_per_cell = mc_samples * 2  # need double for pairs of samples to compute distance between
+            batch_size = batch[REGISTRY_KEYS.X_KEY].shape[0]
+            cells_per_batch = max(batch_size // mc_samples_per_cell, 1)
+
+            l2_dists_rows = []
+            for i in range(0, batch_size, cells_per_batch):
+                mc_sampling_batch = {}
+                for key in batch:
+                    mc_sampling_batch[key] = batch[key][np.repeat(range(i, i + cells_per_batch), mc_samples_per_cell)]
+
+                outputs = jit_inference_fn(self.module.rngs, mc_sampling_batch)
+
+                # figure out how to compute dists here
+                z = outputs["z"]
+                z = z.reshape((cells_per_batch, mc_samples_per_cell, -1))
+                for cell_z in z:
+                    first_half_cell_z, second_half_cell_z = cell_z[:mc_samples], cell_z[mc_samples:]
+                    l2_dists_rows.append(
+                        jnp.sqrt(jnp.sum((first_half_cell_z - second_half_cell_z) ** 2, axis=1)).reshape((1, -1))
+                    )
+            l2_dists = jnp.concatenate(l2_dists_rows, axis=0)
+
         return np.array(jnp.mean(l2_dists, axis=1)), np.array(jnp.var(l2_dists, axis=1))
 
     def _compute_distances_from_representations(self, reps, indices, norm="l2"):
@@ -480,6 +505,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
     def get_local_sample_representation(
         self,
         adata: Optional[AnnData] = None,
+        indices: Optional[List[str]] = None,
         batch_size: int = 256,
         use_mean: bool = True,
         use_vmap: bool = True,
@@ -510,7 +536,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             )
         ]
         return self.compute_local_statistics(
-            reductions, adata=adata, batch_size=batch_size, use_vmap=use_vmap
+            reductions, adata=adata, indices=indices, batch_size=batch_size, use_vmap=use_vmap
         ).sample_representations
 
     def get_local_sample_distances(

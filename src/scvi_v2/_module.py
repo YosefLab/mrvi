@@ -169,9 +169,9 @@ class _EncoderUZ2Attention(nn.Module):
             sample_covariate
         )  # (batch, n_latent * 5)
         sample_embed = nn.LayerNorm(name="sample_embed_ln")(sample_embed)
-        qmat = nn.Dense(self.n_latent * k, name="qmat", use_bias=False)(sample_embed)
-        kmat = nn.Dense(self.n_latent * k, name="kmat", use_bias=False)(u_)  # (batch, n_latent * 5)
-        vmat = nn.Dense(self.n_latent * k, name="vmat", use_bias=False)(u_)  # (batch, n_latent * 5)
+        qmat = nn.Dense(self.n_latent * k, name="qmat", use_bias=False)(u_)
+        kmat = nn.Dense(self.n_latent * k, name="kmat", use_bias=False)(sample_embed)  # (batch, n_latent * 5)
+        vmat = nn.Dense(self.n_latent * k, name="vmat", use_bias=False)(sample_embed)  # (batch, n_latent * 5)
 
         qmat = qmat.reshape(qmat.shape[0], self.n_latent, k)
         kmat = kmat.reshape(kmat.shape[0], self.n_latent, k)

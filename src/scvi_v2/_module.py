@@ -160,7 +160,7 @@ class _EncoderUZ2Attention(nn.Module):
     def __call__(self, u: NdArray, sample_covariate: NdArray, training: Optional[bool] = None):
         training = nn.merge_param("training", self.training, training)
         sample_covariate = sample_covariate.astype(int).flatten()
-        u_ = u
+        u_ = nn.LayerNorm(name="u_ln")(u)
         # u_ = u if not self.stop_gradients else jax.lax.stop_gradient(u)
         # u_drop = u_
 
@@ -168,14 +168,20 @@ class _EncoderUZ2Attention(nn.Module):
         sample_embed = nn.Embed(self.n_sample, 5, embedding_init=_normal_initializer)(
             sample_covariate
         )  # (batch, n_latent * 5)
-        qmat = nn.Dense(self.n_latent * k, name="qmat", use_bias=False)(sample_embed)
-        kmat = nn.Dense(self.n_latent * k, name="kmat", use_bias=False)(u_)  # (batch, n_latent * 5)
+        sample_embed = nn.LayerNorm(name="sample_embed_ln")(sample_embed)
+        qmat = nn.Dense(self.n_latent * k, name="qmat", use_bias=False)(u_)
+        kmat = nn.Dense(self.n_latent * k, name="kmat", use_bias=False)(sample_embed)  # (batch, n_latent * 5)
+        vmat = nn.Dense(self.n_latent * k, name="vmat", use_bias=False)(sample_embed)  # (batch, n_latent * 5)
 
         qmat = qmat.reshape(qmat.shape[0], self.n_latent, k)
         kmat = kmat.reshape(kmat.shape[0], self.n_latent, k)
+        vmat = vmat.reshape(vmat.shape[0], self.n_latent, k)
         att = jnp.einsum("nak,nbk->nab", qmat, kmat)
+        att /= jnp.sqrt(kmat.shape[-1])
         att = nn.softmax(att, axis=-1)
-        eps = jnp.einsum("nab,nb->na", att, u_)
+        eps = jnp.einsum("nab,nbk->nak", att, vmat)
+        # flatten
+        eps = eps.reshape(eps.shape[0], self.n_latent * k)
 
         n_outs = 1 if self.use_map else 2
         eps_ = MLP(
@@ -183,7 +189,14 @@ class _EncoderUZ2Attention(nn.Module):
             n_hidden=self.n_hidden,
             training=training,
         )(inputs=eps)
-        return eps_
+        inputs = jnp.concatenate([u_, eps_], axis=-1)
+        residual = MLP(
+            n_out=n_outs * self.n_latent,
+            n_hidden=self.n_hidden,
+            n_layers=self.n_layers,
+            training=training,
+        )(inputs=inputs)
+        return residual
 
 
 class _EncoderXU(nn.Module):

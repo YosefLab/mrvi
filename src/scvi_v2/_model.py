@@ -416,7 +416,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         def get_A_s(module, u, sample_covariate):
             sample_covariate = sample_covariate.astype(int).flatten()
             if not module.qz.use_nonlinear:
-                A_s = module.qz.A_s_enc(sample_covariate, training=False)
+                A_s = module.qz.A_s_enc(sample_covariate)
             else:
                 # A_s output by a non-linear function without an explicit intercept
                 sample_one_hot = jax.nn.one_hot(sample_covariate, module.qz.n_sample)

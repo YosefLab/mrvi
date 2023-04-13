@@ -207,7 +207,7 @@ def test_mrvi_nonlinear():
     model = MrVI(
         adata,
         n_latent=n_latent,
-        qz_nn_flavor=True,
+        qz_nn_flavor="mlp",
         qz_kwargs={"use_map": True},
     )
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)
@@ -215,10 +215,29 @@ def test_mrvi_nonlinear():
     model = MrVI(
         adata,
         n_latent=n_latent,
-        qz_nn_flavor=True,
+        qz_nn_flavor="mlp",
         qz_kwargs={"use_map": False},
     )
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)
+
+    model = MrVI(
+        adata,
+        n_latent=n_latent,
+        qz_nn_flavor="attention",
+        qz_kwargs={"use_map": True},
+    )
+    model.train(1, check_val_every_n_epoch=1, train_size=0.5)
+    model.get_local_sample_distances(use_mean=True)
+
+    model = MrVI(
+        adata,
+        n_latent=n_latent,
+        qz_nn_flavor="attention",
+        qz_kwargs={"use_map": False},
+    )
+    model.train(1, check_val_every_n_epoch=1, train_size=0.5)
+    model.get_latent_representation()
+    model.get_local_sample_distances(use_mean=True)
 
 
 def test_de():

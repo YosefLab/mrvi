@@ -27,7 +27,6 @@ _normal_initializer = jax.nn.initializers.normal(stddev=0.1)
 
 
 class _DecoderZX(nn.Module):
-
     n_in: int
     n_out: int
     n_batch: int
@@ -68,7 +67,6 @@ class _DecoderZX(nn.Module):
 
 
 class _EncoderUZ(nn.Module):
-
     n_latent: int
     n_sample: int
     use_nonlinear: bool = False
@@ -147,6 +145,46 @@ class _EncoderUZ2(nn.Module):
         return eps_
 
 
+class _EncoderUZ2Attention(nn.Module):
+    n_latent: int
+    n_sample: int
+    dropout_rate: float = 0.0
+    training: Optional[bool] = None
+    use_map: bool = False
+    n_hidden: int = 32
+    n_layers: int = 1
+    stop_gradients: bool = False
+
+    @nn.compact
+    def __call__(self, u: NdArray, sample_covariate: NdArray, training: Optional[bool] = None):
+        training = nn.merge_param("training", self.training, training)
+        sample_covariate = sample_covariate.astype(int).flatten()
+        u_ = u
+        # u_ = u if not self.stop_gradients else jax.lax.stop_gradient(u)
+        # u_drop = u_
+
+        k = 5
+        sample_embed = nn.Embed(self.n_sample, 5, embedding_init=_normal_initializer)(
+            sample_covariate
+        )  # (batch, n_latent * 5)
+        qmat = nn.Dense(self.n_latent * k, name="qmat", use_bias=False)(sample_embed)
+        kmat = nn.Dense(self.n_latent * k, name="kmat", use_bias=False)(u_)  # (batch, n_latent * 5)
+
+        qmat = qmat.reshape(qmat.shape[0], self.n_latent, k)
+        kmat = kmat.reshape(kmat.shape[0], self.n_latent, k)
+        att = jnp.einsum("nak,nbk->nab", qmat, kmat)
+        att = nn.softmax(att, axis=-1)
+        eps = jnp.einsum("nab,nb->na", att, u_)
+
+        n_outs = 1 if self.use_map else 2
+        eps_ = MLP(
+            n_out=n_outs * self.n_latent,
+            n_hidden=self.n_hidden,
+            training=training,
+        )(inputs=eps)
+        return eps_
+
+
 class _EncoderXU(nn.Module):
     n_latent: int
     n_sample: int
@@ -185,7 +223,7 @@ class MrVAE(JaxBaseModuleClass):
     z_u_prior_scale: float = 1.0
     laplace_scale: float = None
     scale_observations: bool = False
-    qz_nn_flavor: str = False
+    qz_nn_flavor: str = "linear"
     px_kwargs: Optional[dict] = None
     qz_kwargs: Optional[dict] = None
     qu_kwargs: Optional[dict] = None
@@ -211,7 +249,12 @@ class MrVAE(JaxBaseModuleClass):
             **px_kwargs,
         )
 
-        qz_cls = _EncoderUZ2 if self.qz_nn_flavor else _EncoderUZ
+        if self.qz_nn_flavor == "attention":
+            qz_cls = _EncoderUZ2Attention
+        elif self.qz_nn_flavor == "mlp":
+            qz_cls = _EncoderUZ2
+        else:
+            qz_cls = _EncoderUZ
         self.qz = qz_cls(
             self.n_latent,
             self.n_sample,
@@ -247,7 +290,7 @@ class MrVAE(JaxBaseModuleClass):
             u = qu.rsample(u_rng, sample_shape=sample_shape)
 
         sample_index_cf = sample_index if cf_sample is None else cf_sample
-        if self.qz_nn_flavor:
+        if self.qz_nn_flavor != "linear":
             eps = qeps_ = self.qz(u, sample_index_cf, training=self.training)
 
             qeps = None
@@ -299,7 +342,7 @@ class MrVAE(JaxBaseModuleClass):
         """Compute the loss function value."""
         reconstruction_loss = -generative_outputs["px"].log_prob(tensors[REGISTRY_KEYS.X_KEY]).sum(-1)
         kl_u = dist.kl_divergence(inference_outputs["qu"], generative_outputs["pu"]).sum(-1)
-        if self.qz_nn_flavor:
+        if self.qz_nn_flavor != "linear":
             qeps = inference_outputs["qeps"]
             eps = inference_outputs["z"] - inference_outputs["u"]
             peps = dist.Normal(0, self.z_u_prior_scale)

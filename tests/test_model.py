@@ -40,6 +40,26 @@ def test_mrvi():
     model = MrVI(
         adata,
         n_latent=n_latent,
+        scale_observations=True,
+        qz_kwargs={"use_map": False, "stop_gradients": True},
+        qz_nn_flavor="mlp",
+    )
+    model.train(1, check_val_every_n_epoch=1, train_size=0.5)
+    model.get_local_sample_distances(normalize_distances=True)
+
+    model = MrVI(
+        adata,
+        n_latent=n_latent,
+        scale_observations=True,
+        qz_kwargs={"use_map": False,},
+        qz_nn_flavor="attention",
+    )
+    model.train(1, check_val_every_n_epoch=1, train_size=0.5)
+    model.get_local_sample_distances(normalize_distances=True)
+
+    model = MrVI(
+        adata,
+        n_latent=n_latent,
     )
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)
     model.is_trained_ = True
@@ -59,7 +79,7 @@ def test_mrvi():
     model.get_local_sample_distances(use_vmap=False)["cell"]
     model.get_local_sample_distances(use_vmap=False, norm="l1")["cell"]
     model.get_local_sample_distances(use_vmap=False, norm="linf")["cell"]
-    local_dist_map = model.get_local_sample_distances(use_vmap=False, use_gpu_for_distances=True, norm="l2")["cell"]
+    local_dist_map = model.get_local_sample_distances(use_vmap=False, norm="l2")["cell"]
     assert local_map.shape == (adata.shape[0], 15, n_latent)
     assert local_dist_map.shape == (
         adata.shape[0],

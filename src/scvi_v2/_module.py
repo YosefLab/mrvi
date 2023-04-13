@@ -149,43 +149,45 @@ class _EncoderUZ2(nn.Module):
 class _EncoderUZ2Attention(nn.Module):
     n_latent: int
     n_sample: int
+    n_latent_sample: int = 16
+    n_channels: int = 4
+    n_heads: int = 2
     dropout_rate: float = 0.0
     training: Optional[bool] = None
-    use_map: bool = False
+    use_map: bool = True
     n_hidden: int = 32
     n_layers: int = 1
-    stop_gradients: bool = False
 
     @nn.compact
     def __call__(self, u: NdArray, sample_covariate: NdArray, training: Optional[bool] = None):
         training = nn.merge_param("training", self.training, training)
         sample_covariate = sample_covariate.astype(int).flatten()
         u_ = nn.LayerNorm(name="u_ln")(u)
-        # u_ = u if not self.stop_gradients else jax.lax.stop_gradient(u)
-        # u_drop = u_
 
-        k = 5
-        sample_embed = nn.Embed(self.n_sample, 5, embedding_init=_normal_initializer)(
+        sample_embed = nn.Embed(self.n_sample, self.n_latent_sample, embedding_init=_normal_initializer)(
             sample_covariate
-        )  # (batch, n_latent * 5)
+        )  # (batch, n_latent_sample)
         sample_embed = nn.LayerNorm(name="sample_embed_ln")(sample_embed)
-        qmat = nn.Dense(self.n_latent * k, name="qmat", use_bias=False)(u_)
-        kmat = nn.Dense(self.n_latent * k, name="kmat", use_bias=False)(sample_embed)  # (batch, n_latent * 5)
-        vmat = nn.Dense(self.n_latent * k, name="vmat", use_bias=False)(sample_embed)  # (batch, n_latent * 5)
 
-        qmat = qmat.reshape(qmat.shape[0], self.n_latent, k)
-        kmat = kmat.reshape(kmat.shape[0], self.n_latent, k)
-        vmat = vmat.reshape(vmat.shape[0], self.n_latent, k)
-        att = jnp.einsum("nak,nbk->nab", qmat, kmat)
-        att /= jnp.sqrt(kmat.shape[-1])
-        att = nn.softmax(att, axis=-1)
-        eps = jnp.einsum("nab,nbk->nak", att, vmat)
-        # flatten
-        eps = eps.reshape(eps.shape[0], self.n_latent * k)
+        u_for_att = nn.DenseGeneral((self.n_latent_sample, 1), use_bias=False)(u_)
+        sample_for_att = nn.DenseGeneral((self.n_latent_sample, 1), use_bias=False)(sample_embed)
+
+        # (batch, n_latent_sample, n_channels)
+        eps = nn.MultiHeadDotProductAttention(
+            num_heads=self.n_heads,
+            qkv_features=self.n_channels * self.n_heads,
+            out_features=self.n_channels,
+            dropout_rate=self.dropout_rate,
+            use_bias=True,
+        )(inputs_q=u_for_att, inputs_kv=sample_for_att, deterministic=not training)
+
+        # now remove that extra dimension
+        # (batch, n_latent_sample * n_channels)
+        eps = jnp.reshape(eps, (eps.shape[0], eps.shape[1] * eps.shape[2]))
 
         n_outs = 1 if self.use_map else 2
         eps_ = MLP(
-            n_out=n_outs * self.n_latent,
+            n_out=self.n_latent_sample,
             n_hidden=self.n_hidden,
             training=training,
         )(inputs=eps)

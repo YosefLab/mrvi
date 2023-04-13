@@ -266,8 +266,10 @@ class MrVAE(JaxBaseModuleClass):
             qz_cls = _EncoderUZ2Attention
         elif self.qz_nn_flavor == "mlp":
             qz_cls = _EncoderUZ2
-        else:
+        elif self.qz_nn_flavor == "linear":
             qz_cls = _EncoderUZ
+        else:
+            raise ValueError(f"Unknown qz_nn_flavor: {self.qz_nn_flavor}")
         self.qz = qz_cls(
             self.n_latent,
             self.n_sample,

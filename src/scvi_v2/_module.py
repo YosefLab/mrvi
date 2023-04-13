@@ -151,7 +151,7 @@ class _EncoderUZ2Attention(nn.Module):
     n_sample: int
     n_latent_sample: int = 16
     n_channels: int = 4
-    n_heads: int = 1
+    n_heads: int = 2
     dropout_rate: float = 0.0
     training: Optional[bool] = None
     use_map: bool = True
@@ -172,7 +172,7 @@ class _EncoderUZ2Attention(nn.Module):
         u_for_att = nn.DenseGeneral((self.n_latent_sample, 1), use_bias=False)(u_)
         sample_for_att = nn.DenseGeneral((self.n_latent_sample, 1), use_bias=False)(sample_embed)
 
-        # (batch, n_latent_sample, 1)
+        # (batch, n_latent_sample, n_channels)
         eps = nn.MultiHeadDotProductAttention(
             num_heads=self.n_heads,
             qkv_features=self.n_channels * self.n_heads,

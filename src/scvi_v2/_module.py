@@ -142,6 +142,7 @@ class _EncoderUZ2(nn.Module):
             n_hidden=self.n_hidden,
             n_layers=self.n_layers,
             training=training,
+            activation=nn.softplus,
         )(inputs=inputs)
         return eps_
 

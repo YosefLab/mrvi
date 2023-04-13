@@ -582,8 +582,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         """
         input = "mean_distances" if use_mean else "sampled_distances"
         if normalize_distances:
-            if use_mean:
-                raise ValueError("Cannot normalize distances when using mean representation.")
             input = "normalized_distances"
         if groupby and not isinstance(groupby, list):
             groupby = [groupby]

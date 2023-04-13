@@ -213,7 +213,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         indices: Optional[Sequence[int]] = None,
         batch_size: Optional[int] = None,
         use_vmap: bool = True,
-        use_gpu_for_distances: bool = False,
         norm: str = "l2",
     ) -> xr.Dataset:
         """
@@ -338,6 +337,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 mean_dists = self._compute_distances_from_representations(mean_zs_, indices, norm=norm)
 
                 if reqs.needs_normalized_distances:
+                    if norm != "l2":
+                        raise ValueError(f"Norm must be 'l2' when using normalized distances. Got {norm}.")
                     normalization_means, normalization_vars = self._compute_local_baseline_dists(array_dict)
                     normalization_means = normalization_means.reshape(-1, 1, 1)
                     normalization_vars = normalization_vars.reshape(-1, 1, 1)
@@ -465,7 +466,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
                 # figure out how to compute dists here
                 z = outputs["z"]
-                z = z.reshape((cells_per_batch, mc_samples_per_cell, -1))
+                z = z.reshape((outputs.shape[0] // mc_samples_per_cell, mc_samples_per_cell, -1))
                 for cell_z in z:
                     first_half_cell_z, second_half_cell_z = cell_z[:mc_samples], cell_z[mc_samples:]
                     l2_dists_rows.append(
@@ -546,7 +547,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         use_mean: bool = True,
         normalize_distances: bool = False,
         use_vmap: bool = True,
-        use_gpu_for_distances: bool = True,
         groupby: Optional[Union[List[str], str]] = None,
         keep_cell: bool = True,
         norm: str = "l2",
@@ -611,7 +611,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             adata=adata,
             batch_size=batch_size,
             use_vmap=use_vmap,
-            use_gpu_for_distances=use_gpu_for_distances,
             norm=norm,
         )
 

@@ -452,28 +452,17 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             squared_l2_dists = jnp.sum(jnp.einsum("cij, cj -> cij", (normal_samples**2), eigvals), axis=2)
             l2_dists = squared_l2_dists**0.5
         else:
-            jit_inference_fn = self.module.get_jit_inference_fn(inference_kwargs={"use_mean": False})
             mc_samples_per_cell = mc_samples * 2  # need double for pairs of samples to compute distance between
-            batch_size = batch[REGISTRY_KEYS.X_KEY].shape[0]
-            cells_per_batch = max(batch_size // mc_samples_per_cell, 1)
+            jit_inference_fn = self.module.get_jit_inference_fn(
+                inference_kwargs={"use_mean": False, "mc_samples": mc_samples_per_cell}
+            )
 
-            l2_dists_rows = []
-            for i in range(0, batch_size, cells_per_batch):
-                mc_sampling_batch = {}
-                for key in batch:
-                    mc_sampling_batch[key] = batch[key][np.repeat(range(i, i + cells_per_batch), mc_samples_per_cell)]
+            outputs = jit_inference_fn(self.module.rngs, batch)
 
-                outputs = jit_inference_fn(self.module.rngs, mc_sampling_batch)
-
-                # figure out how to compute dists here
-                z = outputs["z"]
-                z = z.reshape((z.shape[0] // mc_samples_per_cell, mc_samples_per_cell, -1))
-                for cell_z in z:
-                    first_half_cell_z, second_half_cell_z = cell_z[:mc_samples], cell_z[mc_samples:]
-                    l2_dists_rows.append(
-                        jnp.sqrt(jnp.sum((first_half_cell_z - second_half_cell_z) ** 2, axis=1)).reshape((1, -1))
-                    )
-            l2_dists = jnp.concatenate(l2_dists_rows, axis=0)
+            # figure out how to compute dists here
+            z = outputs["z"]
+            first_half_z, second_half_z = z[:mc_samples], z[mc_samples:]
+            l2_dists = jnp.sqrt(jnp.sum((first_half_z - second_half_z) ** 2, axis=2)).T
 
         return np.array(jnp.mean(l2_dists, axis=1)), np.array(jnp.var(l2_dists, axis=1))
 

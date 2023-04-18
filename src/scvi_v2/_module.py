@@ -136,12 +136,19 @@ class _EncoderUZ2(nn.Module):
         # u_drop = nn.Dropout(self.dropout_rate)(u_, deterministic=not training)
 
         n_outs = 1 if self.use_map else 2
-        inputs = jnp.concatenate([u_drop, jax.nn.one_hot(sample_covariate, self.n_sample)], axis=-1)
+        sample_oh = jax.nn.one_hot(sample_covariate, self.n_sample)
+        if u_drop.ndim == 3:
+            sample_oh = jnp.tile(sample_oh, (u_drop.shape[0], 1, 1))
+        inputs = jnp.concatenate(
+            [u_drop, sample_oh],
+            axis=-1,
+        )
         eps_ = MLP(
             n_out=n_outs * self.n_latent,
             n_hidden=self.n_hidden,
             n_layers=self.n_layers,
             training=training,
+            activation=nn.softplus,
         )(inputs=inputs)
         return eps_
 
@@ -162,12 +169,15 @@ class _EncoderUZ2Attention(nn.Module):
     def __call__(self, u: NdArray, sample_covariate: NdArray, training: Optional[bool] = None):
         training = nn.merge_param("training", self.training, training)
         sample_covariate = sample_covariate.astype(int).flatten()
+        has_mc_samples = u.ndim == 3
         u_ = nn.LayerNorm(name="u_ln")(u)
 
         sample_embed = nn.Embed(self.n_sample, self.n_latent_sample, embedding_init=_normal_initializer)(
             sample_covariate
         )  # (batch, n_latent_sample)
         sample_embed = nn.LayerNorm(name="sample_embed_ln")(sample_embed)
+        if has_mc_samples:
+            sample_embed = jnp.tile(sample_embed, (u_.shape[0], 1, 1))
 
         u_for_att = nn.DenseGeneral((self.n_latent_sample, 1), use_bias=False)(u_)
         sample_for_att = nn.DenseGeneral((self.n_latent_sample, 1), use_bias=False)(sample_embed)
@@ -183,7 +193,10 @@ class _EncoderUZ2Attention(nn.Module):
 
         # now remove that extra dimension
         # (batch, n_latent_sample * n_channels)
-        eps = jnp.reshape(eps, (eps.shape[0], eps.shape[1] * eps.shape[2]))
+        if not has_mc_samples:
+            eps = jnp.reshape(eps, (eps.shape[0], eps.shape[1] * eps.shape[2]))
+        else:
+            eps = jnp.reshape(eps, (eps.shape[0], eps.shape[1], eps.shape[2] * eps.shape[3]))
 
         n_outs = 1 if self.use_map else 2
         eps_ = MLP(
@@ -269,8 +282,10 @@ class MrVAE(JaxBaseModuleClass):
             qz_cls = _EncoderUZ2Attention
         elif self.qz_nn_flavor == "mlp":
             qz_cls = _EncoderUZ2
-        else:
+        elif self.qz_nn_flavor == "linear":
             qz_cls = _EncoderUZ
+        else:
+            raise ValueError(f"Unknown qz_nn_flavor: {self.qz_nn_flavor}")
         self.qz = qz_cls(
             self.n_latent,
             self.n_sample,

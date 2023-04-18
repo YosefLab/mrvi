@@ -213,7 +213,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         indices: Optional[Sequence[int]] = None,
         batch_size: Optional[int] = None,
         use_vmap: bool = True,
-        use_gpu_for_distances: bool = False,
         norm: str = "l2",
     ) -> xr.Dataset:
         """
@@ -244,6 +243,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         # Hack to ensure new AnnDatas have indices.
         if "_indices" not in adata.obs:
             adata.obs["_indices"] = np.arange(adata.n_obs).astype(int)
+
         adata = self._validate_anndata(adata)
         scdl = self._make_data_loader(adata=adata, indices=indices, batch_size=batch_size, iter_ndarray=True)
         n_sample = self.summary_stats.n_sample
@@ -334,19 +334,21 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                     name="sample_representations",
                 )
 
-            if reqs.needs_mean_distances:
+            if reqs.needs_mean_distances or reqs.needs_normalized_distances:
                 mean_dists = self._compute_distances_from_representations(mean_zs_, indices, norm=norm)
 
-            if reqs.needs_sampled_distances or reqs.needs_normalized_distances:
-                sampled_dists = self._compute_distances_from_representations(sampled_zs_, indices, norm=norm)
-
                 if reqs.needs_normalized_distances:
+                    if norm != "l2":
+                        raise ValueError(f"Norm must be 'l2' when using normalized distances. Got {norm}.")
                     normalization_means, normalization_vars = self._compute_local_baseline_dists(array_dict)
                     normalization_means = normalization_means.reshape(-1, 1, 1)
                     normalization_vars = normalization_vars.reshape(-1, 1, 1)
-                    normalized_dists = np.clip(sampled_dists - normalization_means, a_min=0, a_max=None) / (
+                    normalized_dists = np.clip(mean_dists - normalization_means, a_min=0, a_max=None) / (
                         normalization_vars**0.5
                     )
+
+            if reqs.needs_sampled_distances:
+                sampled_dists = self._compute_distances_from_representations(sampled_zs_, indices, norm=norm)
 
             # Compute each reduction
             for r in reductions:
@@ -396,7 +398,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
         return xr.Dataset(data_vars=final_data_arrs)
 
-    def _compute_local_baseline_dists(self, batch: dict, mc_samples: int = 1000) -> Tuple[np.ndarray, np.ndarray]:
+    def _compute_local_baseline_dists(self, batch: dict, mc_samples: int = 250) -> Tuple[np.ndarray, np.ndarray]:
         """
         Approximate the distributions used as baselines for normalizing the local sample distances.
 
@@ -431,23 +433,37 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             A_s = self.module.apply(vars_in, rngs=rngs, method=get_A_s, u=u, sample_covariate=sample_covariate)
             return A_s
 
-        jit_inference_fn = self.module.get_jit_inference_fn()
-        qu = jit_inference_fn(self.module.rngs, batch)["qu"]
-        qu_vars_diag = jax.vmap(jnp.diag)(qu.variance)
+        if self.can_compute_normalized_dists:
+            jit_inference_fn = self.module.get_jit_inference_fn()
+            qu = jit_inference_fn(self.module.rngs, batch)["qu"]
+            qu_vars_diag = jax.vmap(jnp.diag)(qu.variance)
 
-        sample_index = self.module._get_inference_input(batch)["sample_index"]
-        A_s = apply_get_A_s(qu.mean, sample_index)  # use mean of latent representation to compute the baseline
-        B = jnp.expand_dims(jnp.eye(A_s.shape[1]), 0) + A_s
-        u_diff_sigma = 2 * jnp.einsum(
-            "cij, cjk, clk -> cil", B, qu_vars_diag, B
-        )  # 2 * (I + A_s) @ qu_vars_diag @ (I + A_s).T
-        eigvals = jax.vmap(jnp.linalg.eigh)(u_diff_sigma)[0].astype(float)
-        normal_rng = self.module.rngs["params"]  # Hack to get new rng for normal samples.
-        normal_samples = jax.random.normal(
-            normal_rng, shape=(eigvals.shape[0], mc_samples, eigvals.shape[1])
-        )  # n_cells by mc_samples by n_latent
-        squared_l2_dists = jnp.sum(jnp.einsum("cij, cj -> cij", (normal_samples**2), eigvals), axis=2)
-        l2_dists = squared_l2_dists**0.5
+            sample_index = self.module._get_inference_input(batch)["sample_index"]
+            A_s = apply_get_A_s(qu.mean, sample_index)  # use mean of latent representation to compute the baseline
+            B = jnp.expand_dims(jnp.eye(A_s.shape[1]), 0) + A_s
+            u_diff_sigma = 2 * jnp.einsum(
+                "cij, cjk, clk -> cil", B, qu_vars_diag, B
+            )  # 2 * (I + A_s) @ qu_vars_diag @ (I + A_s).T
+            eigvals = jax.vmap(jnp.linalg.eigh)(u_diff_sigma)[0].astype(float)
+            normal_rng = self.module.rngs["params"]  # Hack to get new rng for normal samples.
+            normal_samples = jax.random.normal(
+                normal_rng, shape=(eigvals.shape[0], mc_samples, eigvals.shape[1])
+            )  # n_cells by mc_samples by n_latent
+            squared_l2_dists = jnp.sum(jnp.einsum("cij, cj -> cij", (normal_samples**2), eigvals), axis=2)
+            l2_dists = squared_l2_dists**0.5
+        else:
+            mc_samples_per_cell = mc_samples * 2  # need double for pairs of samples to compute distance between
+            jit_inference_fn = self.module.get_jit_inference_fn(
+                inference_kwargs={"use_mean": False, "mc_samples": mc_samples_per_cell}
+            )
+
+            outputs = jit_inference_fn(self.module.rngs, batch)
+
+            # figure out how to compute dists here
+            z = outputs["z"]
+            first_half_z, second_half_z = z[:mc_samples], z[mc_samples:]
+            l2_dists = jnp.sqrt(jnp.sum((first_half_z - second_half_z) ** 2, axis=2)).T
+
         return np.array(jnp.mean(l2_dists, axis=1)), np.array(jnp.var(l2_dists, axis=1))
 
     def _compute_distances_from_representations(self, reps, indices, norm="l2"):
@@ -480,6 +496,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
     def get_local_sample_representation(
         self,
         adata: Optional[AnnData] = None,
+        indices: Optional[List[str]] = None,
         batch_size: int = 256,
         use_mean: bool = True,
         use_vmap: bool = True,
@@ -510,7 +527,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             )
         ]
         return self.compute_local_statistics(
-            reductions, adata=adata, batch_size=batch_size, use_vmap=use_vmap
+            reductions, adata=adata, indices=indices, batch_size=batch_size, use_vmap=use_vmap
         ).sample_representations
 
     def get_local_sample_distances(
@@ -520,7 +537,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         use_mean: bool = True,
         normalize_distances: bool = False,
         use_vmap: bool = True,
-        use_gpu_for_distances: bool = True,
         groupby: Optional[Union[List[str], str]] = None,
         keep_cell: bool = True,
         norm: str = "l2",
@@ -556,8 +572,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         """
         input = "mean_distances" if use_mean else "sampled_distances"
         if normalize_distances:
-            if use_mean:
-                raise ValueError("Cannot normalize distances when using mean representation.")
+            if not use_mean:
+                raise ValueError("Normalizing distances requires `use_mean=True`.")
             input = "normalized_distances"
         if groupby and not isinstance(groupby, list):
             groupby = [groupby]
@@ -587,7 +603,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             adata=adata,
             batch_size=batch_size,
             use_vmap=use_vmap,
-            use_gpu_for_distances=use_gpu_for_distances,
             norm=norm,
         )
 

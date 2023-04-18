@@ -119,28 +119,24 @@ class _EncoderUZ(nn.Module):
 class _EncoderUZ2(nn.Module):
     n_latent: int
     n_sample: int
-    dropout_rate: float = 0.0
-    training: Optional[bool] = None
     use_map: bool = False
     n_hidden: int = 32
     n_layers: int = 1
     stop_gradients: bool = False
+    training: Optional[bool] = None
 
     @nn.compact
     def __call__(self, u: NdArray, sample_covariate: NdArray, training: Optional[bool] = None):
         training = nn.merge_param("training", self.training, training)
         sample_covariate = sample_covariate.astype(int).flatten()
-        # u_drop = nn.Dropout(self.dropout_rate)(jax.lax.stop_gradient(u), deterministic=not training)
-        u_ = u if not self.stop_gradients else jax.lax.stop_gradient(u)
-        u_drop = u_
-        # u_drop = nn.Dropout(self.dropout_rate)(u_, deterministic=not training)
+        u_stop = u if not self.stop_gradients else jax.lax.stop_gradient(u)
 
         n_outs = 1 if self.use_map else 2
         sample_oh = jax.nn.one_hot(sample_covariate, self.n_sample)
-        if u_drop.ndim == 3:
-            sample_oh = jnp.tile(sample_oh, (u_drop.shape[0], 1, 1))
+        if u_stop.ndim == 3:
+            sample_oh = jnp.tile(sample_oh, (u_stop.shape[0], 1, 1))
         inputs = jnp.concatenate(
-            [u_drop, sample_oh],
+            [u_stop, sample_oh],
             axis=-1,
         )
         eps_ = MLP(
@@ -160,10 +156,10 @@ class _EncoderUZ2Attention(nn.Module):
     n_channels: int = 4
     n_heads: int = 2
     dropout_rate: float = 0.0
-    training: Optional[bool] = None
     use_map: bool = True
     n_hidden: int = 32
     n_layers: int = 1
+    training: Optional[bool] = None
 
     @nn.compact
     def __call__(self, u: NdArray, sample_covariate: NdArray, training: Optional[bool] = None):

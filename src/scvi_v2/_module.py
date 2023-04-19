@@ -118,6 +118,7 @@ class _EncoderUZ(nn.Module):
 
 class _EncoderUZ2(nn.Module):
     n_latent: int
+    n_latent_u: int
     n_sample: int
     use_map: bool = False
     n_hidden: int = 32
@@ -144,9 +145,14 @@ class _EncoderUZ2(nn.Module):
             n_hidden=self.n_hidden,
             n_layers=self.n_layers,
             training=training,
-            activation=nn.softplus,
+            activation=nn.gelu,
         )(inputs=inputs)
-        return eps_
+        A_z = self.param("A_z", jax.random.normal, (self.n_latent_u, self.n_latent))
+        if u_stop.ndim == 3:
+            z_base = jnp.einsum("ul,bcu->bcl", A_z, u_stop)
+        else:
+            z_base = jnp.einsum("ul,cl->cu", A_z, u_stop)
+        return z_base, eps_
 
 
 class _EncoderUZ2Attention(nn.Module):
@@ -242,6 +248,7 @@ class MrVAE(JaxBaseModuleClass):
     n_batch: int
     n_continuous_cov: int
     n_latent: int = 20
+    n_latent_u: Optional[int] = None
     encoder_n_hidden: int = 128
     encoder_n_layers: int = 2
     z_u_prior: bool = True
@@ -266,6 +273,8 @@ class MrVAE(JaxBaseModuleClass):
         if self.qu_kwargs is not None:
             qu_kwargs.update(self.qu_kwargs)
 
+        n_latent_u = self.n_latent if self.n_latent_u is None else self.n_latent_u
+
         # Generative model
         self.px = _DecoderZX(
             self.n_latent,
@@ -282,15 +291,23 @@ class MrVAE(JaxBaseModuleClass):
             qz_cls = _EncoderUZ
         else:
             raise ValueError(f"Unknown qz_nn_flavor: {self.qz_nn_flavor}")
-        self.qz = qz_cls(
-            self.n_latent,
-            self.n_sample,
-            **qz_kwargs,
-        )
+        if self.qz_nn_flavor == "mlp":
+            self.qz = qz_cls(
+                self.n_latent,
+                n_latent_u,
+                self.n_sample,
+                **qz_kwargs,
+            )
+        else:
+            self.qz = qz_cls(
+                self.n_latent,
+                self.n_sample,
+                **qz_kwargs,
+            )
 
         # Inference model
         self.qu = _EncoderXU(
-            n_latent=self.n_latent,
+            n_latent=n_latent_u,
             n_sample=self.n_sample,
             n_hidden=self.encoder_n_hidden,
             n_layers=self.encoder_n_layers,
@@ -317,7 +334,18 @@ class MrVAE(JaxBaseModuleClass):
             u = qu.rsample(u_rng, sample_shape=sample_shape)
 
         sample_index_cf = sample_index if cf_sample is None else cf_sample
-        if self.qz_nn_flavor != "linear":
+        z_base = None
+        if self.qz_nn_flavor == "mlp":
+            z_base, eps = z_base, qeps_ = self.qz(u, sample_index_cf, training=self.training)
+
+            qeps = None
+            if qeps_.shape[-1] == 2 * self.n_latent:
+                loc_, scale_ = qeps_[..., : self.n_latent], qeps_[..., self.n_latent :]
+                qeps = dist.Normal(loc_, scale_)
+                eps = qeps.mean if use_mean else qeps.rsample(self.make_rng("eps"))
+            As = None
+            z = z_base + eps
+        elif self.qz_nn_flavor != "linear":
             eps = qeps_ = self.qz(u, sample_index_cf, training=self.training)
 
             qeps = None
@@ -338,6 +366,7 @@ class MrVAE(JaxBaseModuleClass):
             "As": As,
             "u": u,
             "z": z,
+            "z_base": z_base,
             "library": library,
         }
 
@@ -369,7 +398,12 @@ class MrVAE(JaxBaseModuleClass):
         """Compute the loss function value."""
         reconstruction_loss = -generative_outputs["px"].log_prob(tensors[REGISTRY_KEYS.X_KEY]).sum(-1)
         kl_u = dist.kl_divergence(inference_outputs["qu"], generative_outputs["pu"]).sum(-1)
-        if self.qz_nn_flavor != "linear":
+        if self.qz_nn_flavor == "mlp":
+            qeps = inference_outputs["qeps"]
+            eps = inference_outputs["z"] - inference_outputs["z_base"]
+            peps = dist.Normal(0, self.z_u_prior_scale)
+            kl_z = dist.kl_divergence(qeps, peps).sum(-1) if qeps is not None else -peps.log_prob(eps).sum(-1)
+        elif self.qz_nn_flavor != "linear":
             qeps = inference_outputs["qeps"]
             eps = inference_outputs["z"] - inference_outputs["u"]
             peps = dist.Normal(0, self.z_u_prior_scale)

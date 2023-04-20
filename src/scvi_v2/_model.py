@@ -89,7 +89,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         self.n_obs_per_sample = jnp.array(adata.obs._scvi_sample.value_counts().sort_index().values)
 
         self.data_splitter = None
-        self.can_compute_normalized_dists = model_kwargs.get("qz_nn_flavor", "linear") == "linear"
         self.module = MrVAE(
             n_input=self.summary_stats.n_vars,
             n_sample=n_sample,
@@ -97,6 +96,10 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             n_continuous_cov=n_continuous_cov,
             n_obs_per_sample=self.n_obs_per_sample,
             **model_kwargs,
+        )
+        self.can_compute_normalized_dists = (model_kwargs.get("qz_nn_flavor", "linear") == "linear") and (
+            (model_kwargs.get("n_latent_u", None) is None)
+            or (model_kwargs.get("n_latent", 10) == model_kwargs.get("n_latent_u", None))
         )
         self.init_params_ = self._get_init_params(locals())
 
@@ -425,7 +428,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 A_s_dec_inputs = jnp.concatenate([u, sample_one_hot], axis=-1)
                 A_s = module.qz.A_s_enc(A_s_dec_inputs, training=False)
             # cells by n_latent by n_latent
-            return A_s.reshape(sample_covariate.shape[0], module.qz.n_latent, module.qz.n_latent)
+            return A_s.reshape(sample_covariate.shape[0], module.qz.n_latent, -1)
 
         def apply_get_A_s(u, sample_covariate):
             vars_in = {"params": self.module.params, **self.module.state}

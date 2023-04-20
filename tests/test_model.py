@@ -51,7 +51,9 @@ def test_mrvi():
         adata,
         n_latent=n_latent,
         scale_observations=True,
-        qz_kwargs={"use_map": False,},
+        qz_kwargs={
+            "use_map": False,
+        },
         qz_nn_flavor="attention",
     )
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)
@@ -115,6 +117,76 @@ def test_mrvi():
 
     # tests __repr__
     print(model)
+
+
+def test_mrvi_shrink_u():
+    adata = synthetic_iid()
+    adata.obs["sample"] = np.random.choice(15, size=adata.shape[0])
+    meta1 = np.random.randint(0, 2, size=15)
+    adata.obs["meta1"] = meta1[adata.obs["sample"].values]
+
+    meta2 = np.random.randn(15)
+    adata.obs["meta2"] = meta2[adata.obs["sample"].values]
+    MrVI.setup_anndata(adata, sample_key="sample", batch_key="batch")
+    adata.obs["cont_cov"] = np.random.normal(0, 1, size=adata.shape[0])
+    MrVI.setup_anndata(adata, sample_key="sample", batch_key="batch", continuous_covariate_keys=["cont_cov"])
+    n_latent_u = 5
+    n_latent = 10
+
+    model = MrVI(
+        adata,
+        n_latent=n_latent,
+        n_latent_u=n_latent_u,
+        laplace_scale=1.0,
+        qz_kwargs={"n_factorized_embed_dims": 3},
+    )
+    model.train(1, check_val_every_n_epoch=1, train_size=0.5)
+    model.get_local_sample_distances(normalize_distances=True)
+
+    model = MrVI(
+        adata,
+        n_latent=n_latent,
+        n_latent_u=n_latent_u,
+        scale_observations=True,
+        qz_kwargs={"n_factorized_embed_dims": 3},
+    )
+    model.train(1, check_val_every_n_epoch=1, train_size=0.5)
+    model.get_local_sample_distances(normalize_distances=True)
+
+    model = MrVI(
+        adata,
+        n_latent=n_latent,
+        n_latent_u=n_latent_u,
+        scale_observations=True,
+        qz_kwargs={"use_map": False, "stop_gradients": True},
+        qz_nn_flavor="mlp",
+    )
+    model.train(1, check_val_every_n_epoch=1, train_size=0.5)
+    model.get_local_sample_distances(normalize_distances=True)
+
+    model = MrVI(
+        adata,
+        n_latent=n_latent,
+        n_latent_u=n_latent_u,
+        scale_observations=True,
+        qz_kwargs={
+            "use_map": False,
+        },
+        qz_nn_flavor="attention",
+    )
+    model.train(1, check_val_every_n_epoch=1, train_size=0.5)
+    model.get_local_sample_distances(normalize_distances=True)
+
+    model = MrVI(
+        adata,
+        n_latent=n_latent,
+        n_latent_u=n_latent_u,
+    )
+    model.train(1, check_val_every_n_epoch=1, train_size=0.5)
+    model.is_trained_ = True
+    model.history
+
+    assert model.get_latent_representation().shape == (adata.shape[0], n_latent_u)
 
 
 def test_mrvi_stratifications():

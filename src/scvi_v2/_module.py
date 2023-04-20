@@ -19,7 +19,7 @@ from ._constants import MRVI_REGISTRY_KEYS
 from ._types import NdArray
 
 DEFAULT_PX_KWARGS = {"n_hidden": 32}
-DEFAULT_PZ_KWARGS = {}
+DEFAULT_QZ_KWARGS = {}
 DEFAULT_QU_KWARGS = {}
 
 # Lower stddev leads to better initial loss values
@@ -27,7 +27,6 @@ _normal_initializer = jax.nn.initializers.normal(stddev=0.1)
 
 
 class _DecoderZX(nn.Module):
-
     n_in: int
     n_out: int
     n_batch: int
@@ -67,8 +66,7 @@ class _DecoderZX(nn.Module):
         )
 
 
-class _DecoderUZ(nn.Module):
-
+class _EncoderUZ(nn.Module):
     n_latent: int
     n_sample: int
     use_nonlinear: bool = False
@@ -115,11 +113,104 @@ class _DecoderUZ(nn.Module):
             h2 = jnp.einsum("cgl,cl->cg", A_s, u_drop)
         h3 = self.h3_embed(sample_covariate)
         delta = h2 + h3
-        return u + delta
+        return u + delta, A_s
+
+
+class _EncoderUZ2(nn.Module):
+    n_latent: int
+    n_sample: int
+    use_map: bool = False
+    n_hidden: int = 32
+    n_layers: int = 1
+    stop_gradients: bool = False
+    training: Optional[bool] = None
+
+    @nn.compact
+    def __call__(self, u: NdArray, sample_covariate: NdArray, training: Optional[bool] = None):
+        training = nn.merge_param("training", self.training, training)
+        sample_covariate = sample_covariate.astype(int).flatten()
+        u_stop = u if not self.stop_gradients else jax.lax.stop_gradient(u)
+
+        n_outs = 1 if self.use_map else 2
+        sample_oh = jax.nn.one_hot(sample_covariate, self.n_sample)
+        if u_stop.ndim == 3:
+            sample_oh = jnp.tile(sample_oh, (u_stop.shape[0], 1, 1))
+        inputs = jnp.concatenate(
+            [u_stop, sample_oh],
+            axis=-1,
+        )
+        eps_ = MLP(
+            n_out=n_outs * self.n_latent,
+            n_hidden=self.n_hidden,
+            n_layers=self.n_layers,
+            training=training,
+            activation=nn.softplus,
+        )(inputs=inputs)
+        return eps_
+
+
+class _EncoderUZ2Attention(nn.Module):
+    n_latent: int
+    n_sample: int
+    n_latent_sample: int = 16
+    n_channels: int = 4
+    n_heads: int = 2
+    dropout_rate: float = 0.0
+    use_map: bool = True
+    n_hidden: int = 32
+    n_layers: int = 1
+    training: Optional[bool] = None
+
+    @nn.compact
+    def __call__(self, u: NdArray, sample_covariate: NdArray, training: Optional[bool] = None):
+        training = nn.merge_param("training", self.training, training)
+        sample_covariate = sample_covariate.astype(int).flatten()
+        has_mc_samples = u.ndim == 3
+        u_ = nn.LayerNorm(name="u_ln")(u)
+
+        sample_embed = nn.Embed(self.n_sample, self.n_latent_sample, embedding_init=_normal_initializer)(
+            sample_covariate
+        )  # (batch, n_latent_sample)
+        sample_embed = nn.LayerNorm(name="sample_embed_ln")(sample_embed)
+        if has_mc_samples:
+            sample_embed = jnp.tile(sample_embed, (u_.shape[0], 1, 1))
+
+        u_for_att = nn.DenseGeneral((self.n_latent_sample, 1), use_bias=False)(u_)
+        sample_for_att = nn.DenseGeneral((self.n_latent_sample, 1), use_bias=False)(sample_embed)
+
+        # (batch, n_latent_sample, n_channels)
+        eps = nn.MultiHeadDotProductAttention(
+            num_heads=self.n_heads,
+            qkv_features=self.n_channels * self.n_heads,
+            out_features=self.n_channels,
+            dropout_rate=self.dropout_rate,
+            use_bias=True,
+        )(inputs_q=u_for_att, inputs_kv=sample_for_att, deterministic=not training)
+
+        # now remove that extra dimension
+        # (batch, n_latent_sample * n_channels)
+        if not has_mc_samples:
+            eps = jnp.reshape(eps, (eps.shape[0], eps.shape[1] * eps.shape[2]))
+        else:
+            eps = jnp.reshape(eps, (eps.shape[0], eps.shape[1], eps.shape[2] * eps.shape[3]))
+
+        n_outs = 1 if self.use_map else 2
+        eps_ = MLP(
+            n_out=self.n_latent_sample,
+            n_hidden=self.n_hidden,
+            training=training,
+        )(inputs=eps)
+        inputs = jnp.concatenate([u_, eps_], axis=-1)
+        residual = MLP(
+            n_out=n_outs * self.n_latent,
+            n_hidden=self.n_hidden,
+            n_layers=self.n_layers,
+            training=training,
+        )(inputs=inputs)
+        return residual
 
 
 class _EncoderXU(nn.Module):
-
     n_latent: int
     n_sample: int
     n_hidden: int
@@ -155,18 +246,22 @@ class MrVAE(JaxBaseModuleClass):
     encoder_n_layers: int = 2
     z_u_prior: bool = True
     z_u_prior_scale: float = 1.0
+    laplace_scale: float = None
+    scale_observations: bool = False
+    qz_nn_flavor: str = "linear"
     px_kwargs: Optional[dict] = None
-    pz_kwargs: Optional[dict] = None
+    qz_kwargs: Optional[dict] = None
     qu_kwargs: Optional[dict] = None
     training: bool = True
+    n_obs_per_sample: Optional[jnp.ndarray] = None
 
     def setup(self):  # noqa: D102
         px_kwargs = DEFAULT_PX_KWARGS.copy()
         if self.px_kwargs is not None:
             px_kwargs.update(self.px_kwargs)
-        pz_kwargs = DEFAULT_PZ_KWARGS.copy()
-        if self.pz_kwargs is not None:
-            pz_kwargs.update(self.pz_kwargs)
+        qz_kwargs = DEFAULT_QZ_KWARGS.copy()
+        if self.qz_kwargs is not None:
+            qz_kwargs.update(self.qz_kwargs)
         qu_kwargs = DEFAULT_QU_KWARGS.copy()
         if self.qu_kwargs is not None:
             qu_kwargs.update(self.qu_kwargs)
@@ -178,10 +273,19 @@ class MrVAE(JaxBaseModuleClass):
             self.n_batch,
             **px_kwargs,
         )
-        self.pz = _DecoderUZ(
+
+        if self.qz_nn_flavor == "attention":
+            qz_cls = _EncoderUZ2Attention
+        elif self.qz_nn_flavor == "mlp":
+            qz_cls = _EncoderUZ2
+        elif self.qz_nn_flavor == "linear":
+            qz_cls = _EncoderUZ
+        else:
+            raise ValueError(f"Unknown qz_nn_flavor: {self.qz_nn_flavor}")
+        self.qz = qz_cls(
             self.n_latent,
             self.n_sample,
-            **pz_kwargs,
+            **qz_kwargs,
         )
 
         # Inference model
@@ -195,7 +299,7 @@ class MrVAE(JaxBaseModuleClass):
 
     @property
     def required_rngs(self):  # noqa: D102
-        return ("params", "u", "dropout")
+        return ("params", "u", "dropout", "eps")
 
     def _get_inference_input(self, tensors: Dict[str, NdArray]) -> Dict[str, Any]:
         x = tensors[REGISTRY_KEYS.X_KEY]
@@ -213,11 +317,25 @@ class MrVAE(JaxBaseModuleClass):
             u = qu.rsample(u_rng, sample_shape=sample_shape)
 
         sample_index_cf = sample_index if cf_sample is None else cf_sample
-        z = self.pz(u, sample_index_cf, training=self.training)
+        if self.qz_nn_flavor != "linear":
+            eps = qeps_ = self.qz(u, sample_index_cf, training=self.training)
+
+            qeps = None
+            if qeps_.shape[-1] == 2 * self.n_latent:
+                loc_, scale_ = qeps_[..., : self.n_latent], qeps_[..., self.n_latent :]
+                qeps = dist.Normal(loc_, scale_)
+                eps = qeps.mean if use_mean else qeps.rsample(self.make_rng("eps"))
+            As = None
+            z = u + eps
+        else:
+            z, As = self.qz(u, sample_index_cf, training=self.training)
+            qeps = None
         library = jnp.log(x.sum(1, keepdims=True))
 
         return {
             "qu": qu,
+            "qeps": qeps,
+            "As": As,
             "u": u,
             "z": z,
             "library": library,
@@ -251,12 +369,38 @@ class MrVAE(JaxBaseModuleClass):
         """Compute the loss function value."""
         reconstruction_loss = -generative_outputs["px"].log_prob(tensors[REGISTRY_KEYS.X_KEY]).sum(-1)
         kl_u = dist.kl_divergence(inference_outputs["qu"], generative_outputs["pu"]).sum(-1)
-        if self.z_u_prior:
-            kl_z = -dist.Normal(inference_outputs["u"], self.z_u_prior_scale).log_prob(inference_outputs["z"]).sum(-1)
+        if self.qz_nn_flavor != "linear":
+            qeps = inference_outputs["qeps"]
+            eps = inference_outputs["z"] - inference_outputs["u"]
+            peps = dist.Normal(0, self.z_u_prior_scale)
+            kl_z = dist.kl_divergence(qeps, peps).sum(-1) if qeps is not None else -peps.log_prob(eps).sum(-1)
         else:
-            kl_z = 0
+            kl_z = (
+                -dist.Normal(inference_outputs["u"], self.z_u_prior_scale).log_prob(inference_outputs["z"]).sum(-1)
+                if self.z_u_prior_scale is not None
+                else 0
+            )
+
         weighted_kl_local = kl_weight * (kl_u + kl_z)
-        loss = jnp.mean(reconstruction_loss + weighted_kl_local)
+        loss = reconstruction_loss + weighted_kl_local
+
+        if self.laplace_scale is not None:
+            As = inference_outputs["As"]
+            n_obs = As.shape[0]
+            As = As.reshape((n_obs, -1))
+            p_As = dist.Laplace(0, self.laplace_scale).log_prob(As).sum(-1)
+
+            n_obs_total = self.n_obs_per_sample.sum()
+            As_pen = -p_As / n_obs_total
+            As_pen = As_pen.sum()
+            loss = loss + (kl_weight * As_pen)
+
+        if self.scale_observations:
+            sample_index = tensors[MRVI_REGISTRY_KEYS.SAMPLE_KEY].flatten().astype(int)
+            prefactors = self.n_obs_per_sample[sample_index]
+            loss = loss / prefactors
+
+        loss = jnp.mean(loss)
 
         return LossOutput(
             loss=loss,

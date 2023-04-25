@@ -124,7 +124,7 @@ class _EncoderUZ2(nn.Module):
     n_layers: int = 1
     stop_gradients: bool = False
     training: Optional[bool] = None
-    activation: Callable = nn.gelu
+    activation: Callable = nn.softplus
 
     @nn.compact
     def __call__(self, u: NdArray, sample_covariate: NdArray, training: Optional[bool] = None):

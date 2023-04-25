@@ -327,7 +327,7 @@ class MrVAE(JaxBaseModuleClass):
             qeps = None
             if qeps_.shape[-1] == 2 * self.n_latent:
                 loc_, scale_ = qeps_[..., : self.n_latent], qeps_[..., self.n_latent :]
-                qeps = dist.Normal(loc_, nn.softplus(scale_))
+                qeps = dist.Normal(loc_, 1e-6 + nn.softplus(scale_))
                 eps = qeps.mean if use_mean else qeps.rsample(self.make_rng("eps"))
             As = None
             z = u + eps

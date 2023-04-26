@@ -139,6 +139,7 @@ class _EncoderUZ2(nn.Module):
     n_layers: int = 1
     stop_gradients: bool = False
     training: Optional[bool] = None
+    activation: Callable = nn.softplus
 
     @nn.compact
     def __call__(self, u: NdArray, sample_covariate: NdArray, training: Optional[bool] = None):
@@ -160,7 +161,7 @@ class _EncoderUZ2(nn.Module):
             n_hidden=self.n_hidden,
             n_layers=self.n_layers,
             training=training,
-            activation=nn.gelu,
+            activation=self.activation,
         )(inputs=inputs)
         A_z = None
         if self.n_latent_u is not None:
@@ -187,6 +188,7 @@ class _EncoderUZ2Attention(nn.Module):
     n_hidden: int = 32
     n_layers: int = 1
     training: Optional[bool] = None
+    activation: Callable = nn.gelu
 
     @nn.compact
     def __call__(self, u: NdArray, sample_covariate: NdArray, training: Optional[bool] = None):
@@ -227,6 +229,7 @@ class _EncoderUZ2Attention(nn.Module):
             n_out=self.n_latent_sample,
             n_hidden=self.n_hidden,
             training=training,
+            activation=self.activation,
         )(inputs=eps)
         inputs = jnp.concatenate([u_, eps_], axis=-1)
         residual = MLP(
@@ -234,6 +237,7 @@ class _EncoderUZ2Attention(nn.Module):
             n_hidden=self.n_hidden,
             n_layers=self.n_layers,
             training=training,
+            activation=self.activation,
         )(inputs=inputs)
 
         u_stop = u if not self.stop_gradients else jax.lax.stop_gradient(u)

@@ -152,6 +152,7 @@ class AttentionBlock(nn.Module):
 
     @nn.compact
     def __call__(self, query_embed: NdArray, kv_embed: NdArray, training: Optional[bool] = None):
+        training = nn.merge_param("training", self.training, training)
         has_mc_samples = query_embed.ndim == 3
 
         query_for_att = nn.DenseGeneral((self.outerprod_dim, 1), use_bias=False)(query_embed)

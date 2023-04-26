@@ -2,6 +2,7 @@ import jax
 import jax.numpy as jnp
 
 from scvi_v2._components import (
+    AttentionBlock,
     ConditionalNormalization,
     Dense,
     NormalDistOutputNN,
@@ -41,3 +42,16 @@ def test_conditionalbatchnorm1d():
     conditionalbatchnorm1d = ConditionalNormalization(10, 3, normalization_type="batch", training=True)
     params = conditionalbatchnorm1d.init(key, x, y)
     conditionalbatchnorm1d.apply(params, x, y, mutable=["batch_stats"])
+
+
+def test_attention():
+    key = jax.random.PRNGKey(0)
+    q_vals = jnp.ones((30, 10))
+    kv_vals = jnp.ones((30, 10))
+    mod = AttentionBlock(query_dim=20, out_dim=40, training=True)
+    params = mod.init(key, q_vals, kv_vals)
+    mod.apply(params, q_vals, kv_vals, mutable=["batch_stats"])
+    q_vals_3d = jnp.ones((3, 30, 10))
+    kv_vals_3d = jnp.ones((3, 30, 10))
+    r = mod.apply(params, q_vals_3d, kv_vals_3d, mutable=["batch_stats"])
+    assert r.shape == (3, 30, 40)

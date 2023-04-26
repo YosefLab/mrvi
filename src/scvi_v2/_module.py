@@ -67,7 +67,62 @@ class _DecoderZX(nn.Module):
         )
 
 
-# class _decoderZXAttention(nn.Module):
+class _DecoderZXAttention(nn.Module):
+    n_in: int
+    n_out: int
+    n_batch: int
+    n_latent_sample: int = 16
+    h_activation: Callable = nn.softmax
+    n_channels: int = 4
+    n_heads: int = 2
+    dropout_rate: float = 0.1
+    stop_gradients: bool = False
+    training: Optional[bool] = None
+    n_hidden: int = 32
+    n_layers: int = 1
+    training: Optional[bool] = None
+    activation: Callable = nn.gelu
+
+    @nn.compact
+    def __call__(
+        self,
+        z: NdArray,
+        batch_covariate: NdArray,
+        size_factor: NdArray,
+        continuous_covariates: Optional[NdArray],
+        training: Optional[bool] = None,
+    ) -> NegativeBinomial:
+
+        has_mc_samples = z.ndim == 3
+        z_stop = z if not self.stop_gradients else jax.lax.stop_gradient(z)
+        z_ = nn.LayerNorm(name="u_ln")(z_stop)
+
+        batch_covariate = batch_covariate.astype(int).flatten()
+        batch_embed = nn.Embed(self.n_in, self.n_latent_sample, embedding_init=_normal_initializer)(
+            batch_covariate
+        )  # (batch, n_latent_sample)
+        batch_embed = nn.LayerNorm(name="batch_embed_ln")(batch_embed)
+        if has_mc_samples:
+            batch_embed = jnp.tile(batch_embed, (z_.shape[0], 1, 1))
+
+        residual = AttentionBlock(
+            query_dim=self.n_in,
+            out_dim=self.n_out,
+            outerprod_dim=self.n_latent_sample,
+            n_channels=self.n_channels,
+            n_heads=self.n_heads,
+            dropout_rate=self.dropout_rate,
+            n_hidden_mlp=self.n_hidden,
+            n_layers_mlp=self.n_layers,
+            training=training,
+            activation=self.activation,
+        )(query_embed=z_, kv_embed=batch_embed)
+
+        mu = nn.Dense(self.n_out)(z) + residual
+        mu = self.h_activation(mu)
+        return NegativeBinomial(
+            mean=mu * size_factor, inverse_dispersion=jnp.exp(self.param("px_r", jax.random.normal, (self.n_out,)))
+        )
 
 
 class _EncoderUZ(nn.Module):
@@ -222,7 +277,7 @@ class _EncoderUZ2Attention(nn.Module):
             n_layers_mlp=self.n_layers,
             training=training,
             activation=self.activation,
-        )(query_embed=u_, kv_embed=sample_embed, training=training)
+        )(query_embed=u_, kv_embed=sample_embed)
 
         A_z = None
         if self.n_latent_u is not None:
@@ -275,6 +330,7 @@ class MrVAE(JaxBaseModuleClass):
     z_u_prior_scale: float = 1.0
     laplace_scale: float = None
     scale_observations: bool = False
+    px_nn_flavor: str = "linear"
     qz_nn_flavor: str = "linear"
     px_kwargs: Optional[dict] = None
     qz_kwargs: Optional[dict] = None
@@ -297,7 +353,11 @@ class MrVAE(JaxBaseModuleClass):
         n_latent_u = None if is_isomorphic_uz else self.n_latent_u
 
         # Generative model
-        self.px = _DecoderZX(
+        if self.px_nn_flavor == "linear":
+            px_cls = _DecoderZX
+        else:
+            px_cls = _DecoderZXAttention
+        self.px = px_cls(
             self.n_latent,
             self.n_input,
             self.n_batch,

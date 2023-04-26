@@ -98,6 +98,10 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             n_obs_per_sample=self.n_obs_per_sample,
             **model_kwargs,
         )
+        self.can_compute_normalized_dists = (model_kwargs.get("qz_nn_flavor", "linear") == "linear") and (
+            (model_kwargs.get("n_latent_u", None) is None)
+            or (model_kwargs.get("n_latent", 10) == model_kwargs.get("n_latent_u", None))
+        )
         self.init_params_ = self._get_init_params(locals())
 
     def to_device(self, device):  # noqa: #D102
@@ -425,7 +429,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 A_s_dec_inputs = jnp.concatenate([u, sample_one_hot], axis=-1)
                 A_s = module.qz.A_s_enc(A_s_dec_inputs, training=False)
             # cells by n_latent by n_latent
-            return A_s.reshape(sample_covariate.shape[0], module.qz.n_latent, module.qz.n_latent)
+            return A_s.reshape(sample_covariate.shape[0], module.qz.n_latent, -1)
 
         def apply_get_A_s(u, sample_covariate):
             vars_in = {"params": self.module.params, **self.module.state}

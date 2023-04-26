@@ -124,6 +124,7 @@ class _EncoderUZ2(nn.Module):
     n_layers: int = 1
     stop_gradients: bool = False
     training: Optional[bool] = None
+    activation: Callable = nn.softplus
 
     @nn.compact
     def __call__(self, u: NdArray, sample_covariate: NdArray, training: Optional[bool] = None):
@@ -144,7 +145,7 @@ class _EncoderUZ2(nn.Module):
             n_hidden=self.n_hidden,
             n_layers=self.n_layers,
             training=training,
-            activation=nn.softplus,
+            activation=self.activation,
         )(inputs=inputs)
         return eps_
 
@@ -160,6 +161,7 @@ class _EncoderUZ2Attention(nn.Module):
     n_hidden: int = 32
     n_layers: int = 1
     training: Optional[bool] = None
+    activation: Callable = nn.gelu
 
     @nn.compact
     def __call__(self, u: NdArray, sample_covariate: NdArray, training: Optional[bool] = None):
@@ -199,6 +201,7 @@ class _EncoderUZ2Attention(nn.Module):
             n_out=self.n_latent_sample,
             n_hidden=self.n_hidden,
             training=training,
+            activation=self.activation,
         )(inputs=eps)
         inputs = jnp.concatenate([u_, eps_], axis=-1)
         residual = MLP(
@@ -206,6 +209,7 @@ class _EncoderUZ2Attention(nn.Module):
             n_hidden=self.n_hidden,
             n_layers=self.n_layers,
             training=training,
+            activation=self.activation,
         )(inputs=inputs)
         return residual
 
@@ -323,7 +327,7 @@ class MrVAE(JaxBaseModuleClass):
             qeps = None
             if qeps_.shape[-1] == 2 * self.n_latent:
                 loc_, scale_ = qeps_[..., : self.n_latent], qeps_[..., self.n_latent :]
-                qeps = dist.Normal(loc_, scale_)
+                qeps = dist.Normal(loc_, 1e-6 + nn.softplus(scale_))
                 eps = qeps.mean if use_mean else qeps.rsample(self.make_rng("eps"))
             As = None
             z = u + eps

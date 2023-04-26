@@ -10,6 +10,7 @@ from scvi.module.base import JaxBaseModuleClass, LossOutput, flax_configure
 
 from ._components import (
     MLP,
+    AttentionBlock,
     ConditionalNormalization,
     Dense,
     FactorizedEmbedding,
@@ -64,6 +65,9 @@ class _DecoderZX(nn.Module):
         return NegativeBinomial(
             mean=mu * size_factor, inverse_dispersion=jnp.exp(self.param("px_r", jax.random.normal, (self.n_out,)))
         )
+
+
+# class _decoderZXAttention(nn.Module):
 
 
 class _EncoderUZ(nn.Module):
@@ -139,7 +143,7 @@ class _EncoderUZ2(nn.Module):
     n_layers: int = 1
     stop_gradients: bool = False
     training: Optional[bool] = None
-    activation: Callable = nn.softplus
+    activation: Callable = nn.gelu
 
     @nn.compact
     def __call__(self, u: NdArray, sample_covariate: NdArray, training: Optional[bool] = None):
@@ -196,7 +200,8 @@ class _EncoderUZ2Attention(nn.Module):
         sample_covariate = sample_covariate.astype(int).flatten()
         n_latent_u = self.n_latent_u if self.n_latent_u is not None else self.n_latent
         has_mc_samples = u.ndim == 3
-        u_ = nn.LayerNorm(name="u_ln")(u)
+        u_stop = u if not self.stop_gradients else jax.lax.stop_gradient(u)
+        u_ = nn.LayerNorm(name="u_ln")(u_stop)
 
         sample_embed = nn.Embed(self.n_sample, self.n_latent_sample, embedding_init=_normal_initializer)(
             sample_covariate
@@ -205,42 +210,20 @@ class _EncoderUZ2Attention(nn.Module):
         if has_mc_samples:
             sample_embed = jnp.tile(sample_embed, (u_.shape[0], 1, 1))
 
-        u_for_att = nn.DenseGeneral((self.n_latent_sample, 1), use_bias=False)(u_)
-        sample_for_att = nn.DenseGeneral((self.n_latent_sample, 1), use_bias=False)(sample_embed)
-
-        # (batch, n_latent_sample, n_channels)
-        eps = nn.MultiHeadDotProductAttention(
-            num_heads=self.n_heads,
-            qkv_features=self.n_channels * self.n_heads,
-            out_features=self.n_channels,
-            dropout_rate=self.dropout_rate,
-            use_bias=True,
-        )(inputs_q=u_for_att, inputs_kv=sample_for_att, deterministic=not training)
-
-        # now remove that extra dimension
-        # (batch, n_latent_sample * n_channels)
-        if not has_mc_samples:
-            eps = jnp.reshape(eps, (eps.shape[0], eps.shape[1] * eps.shape[2]))
-        else:
-            eps = jnp.reshape(eps, (eps.shape[0], eps.shape[1], eps.shape[2] * eps.shape[3]))
-
         n_outs = 1 if self.use_map else 2
-        eps_ = MLP(
-            n_out=self.n_latent_sample,
-            n_hidden=self.n_hidden,
+        residual = AttentionBlock(
+            query_dim=self.n_latent,
+            out_dim=n_outs * self.n_latent,
+            outerprod_dim=self.n_latent_sample,
+            n_channels=self.n_channels,
+            n_heads=self.n_heads,
+            dropout_rate=self.dropout_rate,
+            n_hidden_mlp=self.n_hidden,
+            n_layers_mlp=self.n_layers,
             training=training,
             activation=self.activation,
-        )(inputs=eps)
-        inputs = jnp.concatenate([u_, eps_], axis=-1)
-        residual = MLP(
-            n_out=n_outs * self.n_latent,
-            n_hidden=self.n_hidden,
-            n_layers=self.n_layers,
-            training=training,
-            activation=self.activation,
-        )(inputs=inputs)
+        )(query_embed=u_, kv_embed=sample_embed, training=training)
 
-        u_stop = u if not self.stop_gradients else jax.lax.stop_gradient(u)
         A_z = None
         if self.n_latent_u is not None:
             A_z = self.param("A_z", jax.random.normal, (self.n_latent, n_latent_u))
@@ -258,7 +241,7 @@ class _EncoderXU(nn.Module):
     n_sample: int
     n_hidden: int
     n_layers: int = 1
-    activation: Callable = nn.relu
+    activation: Callable = nn.gelu
     training: Optional[bool] = None
 
     @nn.compact

@@ -32,7 +32,7 @@ class _DecoderZX(nn.Module):
     n_out: int
     n_batch: int
     n_hidden: int = 128
-    activation: Callable = nn.softplus
+    activation: Callable = nn.softmax
     dropout_rate: float = 0.1
     training: Optional[bool] = None
 

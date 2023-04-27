@@ -138,6 +138,7 @@ class _EncoderUZ(nn.Module):
     n_factorized_embed_dims: Optional[int] = None
     dropout_rate: float = 0.0
     training: Optional[bool] = None
+    activation: Callable = nn.gelu
 
     def setup(self):
         self.dropout = nn.Dropout(self.dropout_rate)
@@ -160,7 +161,7 @@ class _EncoderUZ(nn.Module):
                     name="A_s_enc",
                 )
         else:
-            self.A_s_enc = MLP(self.n_latent * n_latent_u, name="A_s_enc", activation=nn.gelu)
+            self.A_s_enc = MLP(self.n_latent * n_latent_u, name="A_s_enc", activation=self.activation)
         self.h3_embed = nn.Embed(self.n_sample, self.n_latent, embedding_init=_normal_initializer)
 
     def __call__(self, u: NdArray, sample_covariate: NdArray, training: Optional[bool] = None) -> jnp.ndarray:

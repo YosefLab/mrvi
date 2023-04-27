@@ -54,4 +54,4 @@ def test_attention():
     q_vals_3d = jnp.ones((3, 30, 10))
     kv_vals_3d = jnp.ones((3, 30, 10))
     r = mod.apply(params, q_vals_3d, kv_vals_3d, mutable=["batch_stats"])
-    assert r.shape == (3, 30, 40)
+    assert r[0].shape == (3, 30, 40)

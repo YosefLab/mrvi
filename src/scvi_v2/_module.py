@@ -81,6 +81,7 @@ class _DecoderZXAttention(nn.Module):
     n_hidden: int = 32
     n_layers: int = 1
     training: Optional[bool] = None
+    low_dim_batch: bool = False
     activation: Callable = nn.gelu
 
     @nn.compact
@@ -98,16 +99,17 @@ class _DecoderZXAttention(nn.Module):
         z_ = nn.LayerNorm(name="u_ln")(z_stop)
 
         batch_covariate = batch_covariate.astype(int).flatten()
-        batch_embed = nn.Embed(self.n_in, self.n_latent_sample, embedding_init=_normal_initializer)(
+        batch_embed = nn.Embed(self.n_batch, self.n_latent_sample, embedding_init=_normal_initializer)(
             batch_covariate
         )  # (batch, n_latent_sample)
         batch_embed = nn.LayerNorm(name="batch_embed_ln")(batch_embed)
         if has_mc_samples:
             batch_embed = jnp.tile(batch_embed, (z_.shape[0], 1, 1))
 
+        res_dim = self.n_in if self.low_dim_batch else self.n_out
         residual = AttentionBlock(
             query_dim=self.n_in,
-            out_dim=self.n_out,
+            out_dim=res_dim,
             outerprod_dim=self.n_latent_sample,
             n_channels=self.n_channels,
             n_heads=self.n_heads,
@@ -118,7 +120,10 @@ class _DecoderZXAttention(nn.Module):
             activation=self.activation,
         )(query_embed=z_, kv_embed=batch_embed)
 
-        mu = nn.Dense(self.n_out)(z) + residual
+        if self.low_dim_batch:
+            mu = nn.Dense(self.n_out)(z + residual)
+        else:
+            mu = nn.Dense(self.n_out)(z) + residual
         mu = self.h_activation(mu)
         return NegativeBinomial(
             mean=mu * size_factor, inverse_dispersion=jnp.exp(self.param("px_r", jax.random.normal, (self.n_out,)))

@@ -143,9 +143,9 @@ class _EncoderUZ(nn.Module):
         self.dropout = nn.Dropout(self.dropout_rate)
         n_latent_u = self.n_latent_u if self.n_latent_u is not None else self.n_latent
         if self.n_latent_u is not None:
-            self.A_z = self.param("A_z", jax.random.normal, (self.n_latent, n_latent_u))
+            self.z_embed = nn.Dense(self.n_latent)
         else:
-            self.A_z = None
+            self.z_embed = None
         if not self.use_nonlinear:
             if self.n_factorized_embed_dims is None:
                 self.A_s_enc = nn.Embed(
@@ -185,10 +185,7 @@ class _EncoderUZ(nn.Module):
         h3 = self.h3_embed(sample_covariate)
         delta = h2 + h3
         if self.n_latent_u is not None:
-            if u_drop.ndim == 3:
-                z_base = jnp.einsum("lu,bcu->bcl", self.A_z, u_drop)
-            else:
-                z_base = jnp.einsum("lu,cu->cl", self.A_z, u_drop)
+            z_base = self.z_embed(u_drop)
             return z_base, delta, A_s
         else:
             return u, delta, A_s
@@ -209,7 +206,7 @@ class _EncoderUZ2(nn.Module):
     def __call__(self, u: NdArray, sample_covariate: NdArray, training: Optional[bool] = None):
         training = nn.merge_param("training", self.training, training)
         sample_covariate = sample_covariate.astype(int).flatten()
-        n_latent_u = self.n_latent_u if self.n_latent_u is not None else self.n_latent
+        self.n_latent_u if self.n_latent_u is not None else self.n_latent
         u_stop = u if not self.stop_gradients else jax.lax.stop_gradient(u)
 
         n_outs = 1 if self.use_map else 2
@@ -227,13 +224,8 @@ class _EncoderUZ2(nn.Module):
             training=training,
             activation=self.activation,
         )(inputs=inputs)
-        A_z = None
         if self.n_latent_u is not None:
-            A_z = self.param("A_z", jax.random.normal, (self.n_latent, n_latent_u))
-            if u_stop.ndim == 3:
-                z_base = jnp.einsum("lu,bcu->bcl", A_z, u_stop)
-            else:
-                z_base = jnp.einsum("lu,cu->cl", A_z, u_stop)
+            z_base = nn.Dense(self.n_latent)(u_stop)
             return z_base, eps_
         else:
             return u, eps_
@@ -258,7 +250,7 @@ class _EncoderUZ2Attention(nn.Module):
     def __call__(self, u: NdArray, sample_covariate: NdArray, training: Optional[bool] = None):
         training = nn.merge_param("training", self.training, training)
         sample_covariate = sample_covariate.astype(int).flatten()
-        n_latent_u = self.n_latent_u if self.n_latent_u is not None else self.n_latent
+        self.n_latent_u if self.n_latent_u is not None else self.n_latent
         has_mc_samples = u.ndim == 3
         u_stop = u if not self.stop_gradients else jax.lax.stop_gradient(u)
         u_ = nn.LayerNorm(name="u_ln")(u_stop)
@@ -284,13 +276,8 @@ class _EncoderUZ2Attention(nn.Module):
             activation=self.activation,
         )(query_embed=u_, kv_embed=sample_embed)
 
-        A_z = None
         if self.n_latent_u is not None:
-            A_z = self.param("A_z", jax.random.normal, (self.n_latent, n_latent_u))
-            if u.ndim == 3:
-                z_base = jnp.einsum("lu,bcu->bcl", A_z, u_stop)
-            else:
-                z_base = jnp.einsum("lu,cu->cl", A_z, u_stop)
+            z_base = nn.Dense(self.n_latent)(u_stop)
             return z_base, residual
         else:
             return u, residual

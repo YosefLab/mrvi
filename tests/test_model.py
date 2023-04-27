@@ -84,6 +84,7 @@ def test_mrvi():
         px_kwargs={"low_dim_batch": True},
         px_nn_flavor="attention",
         qz_nn_flavor="attention",
+        learn_z_u_prior_scale=True,
     )
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)
     model.get_local_sample_distances(normalize_distances=True)

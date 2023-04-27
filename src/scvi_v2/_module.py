@@ -319,7 +319,8 @@ class MrVAE(JaxBaseModuleClass):
     encoder_n_hidden: int = 128
     encoder_n_layers: int = 2
     z_u_prior: bool = True
-    z_u_prior_scale: float = 1.0
+    z_u_prior_scale: float = 0.0
+    learn_z_u_prior_scale: bool = False
     laplace_scale: float = None
     scale_observations: bool = False
     px_nn_flavor: str = "linear"
@@ -379,6 +380,11 @@ class MrVAE(JaxBaseModuleClass):
             n_layers=self.encoder_n_layers,
             **qu_kwargs,
         )
+
+        if self.learn_z_u_prior_scale:
+            self.pz_scale = self.param("pz_scale", nn.initializers.zeros, (self.n_latent,))
+        else:
+            self.pz_scale = self.z_u_prior_scale
 
     @property
     def required_rngs(self):  # noqa: D102
@@ -458,7 +464,7 @@ class MrVAE(JaxBaseModuleClass):
         if self.qz_nn_flavor != "linear":
             qeps = inference_outputs["qeps"]
             eps = inference_outputs["z"] - inference_outputs["z_base"]
-            peps = dist.Normal(0, self.z_u_prior_scale)
+            peps = dist.Normal(0, jnp.exp(self.pz_scale))
             kl_z = dist.kl_divergence(qeps, peps).sum(-1) if qeps is not None else -peps.log_prob(eps).sum(-1)
         else:
             kl_z = (

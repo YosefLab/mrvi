@@ -469,7 +469,7 @@ class MrVAE(JaxBaseModuleClass):
             kl_z = dist.kl_divergence(qeps, peps).sum(-1) if qeps is not None else -peps.log_prob(eps).sum(-1)
         else:
             kl_z = (
-                -dist.Normal(inference_outputs["z_base"], self.z_u_prior_scale).log_prob(inference_outputs["z"]).sum(-1)
+                -dist.Normal(inference_outputs["z_base"], jnp.exp(self.z_u_prior_scale)).log_prob(inference_outputs["z"]).sum(-1)
                 if self.z_u_prior_scale is not None
                 else 0
             )

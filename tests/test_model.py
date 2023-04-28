@@ -21,6 +21,12 @@ def test_mrvi():
 
     model = MrVI(
         adata,
+    )
+    model.train(2, check_val_every_n_epoch=1, train_size=0.5)
+    model.get_local_sample_distances(normalize_distances=True)
+
+    model = MrVI(
+        adata,
         n_latent=n_latent,
         laplace_scale=1.0,
         qz_kwargs={"n_factorized_embed_dims": 3},

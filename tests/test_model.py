@@ -85,6 +85,23 @@ def test_mrvi():
         n_latent=n_latent,
         scale_observations=True,
         qz_kwargs={
+            "use_map": False, "stop_gradients": False, "stop_gradients_mlp": True
+        },
+        px_kwargs={"low_dim_batch": False, "stop_gradients": False, "stop_gradients_mlp": True},
+        px_nn_flavor="attention",
+        qz_nn_flavor="attention",
+        z_u_prior=False,
+    )
+    model.train(1, check_val_every_n_epoch=1, train_size=0.5)
+    model.get_local_sample_distances(normalize_distances=True)
+    model.get_local_sample_distances(normalize_distances=False)
+
+
+    model = MrVI(
+        adata,
+        n_latent=n_latent,
+        scale_observations=True,
+        qz_kwargs={
             "use_map": False,
         },
         px_kwargs={"low_dim_batch": True},

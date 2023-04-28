@@ -77,6 +77,7 @@ class _DecoderZXAttention(nn.Module):
     n_heads: int = 2
     dropout_rate: float = 0.1
     stop_gradients: bool = False
+    stop_gradients_mlp: bool = False
     training: Optional[bool] = None
     n_hidden: int = 32
     n_layers: int = 1
@@ -116,6 +117,7 @@ class _DecoderZXAttention(nn.Module):
             dropout_rate=self.dropout_rate,
             n_hidden_mlp=self.n_hidden,
             n_layers_mlp=self.n_layers,
+            stop_gradients_mlp=self.stop_gradients_mlp,
             training=training,
             activation=self.activation,
         )(query_embed=z_, kv_embed=batch_embed)
@@ -241,6 +243,7 @@ class _EncoderUZ2Attention(nn.Module):
     n_heads: int = 2
     dropout_rate: float = 0.0
     stop_gradients: bool = False
+    stop_gradients_mlp: bool = False
     use_map: bool = True
     n_hidden: int = 32
     n_layers: int = 1
@@ -271,6 +274,7 @@ class _EncoderUZ2Attention(nn.Module):
             n_channels=self.n_channels,
             n_heads=self.n_heads,
             dropout_rate=self.dropout_rate,
+            stop_gradients_mlp=self.stop_gradients_mlp,
             n_hidden_mlp=self.n_hidden,
             n_layers_mlp=self.n_layers,
             training=training,
@@ -465,8 +469,11 @@ class MrVAE(JaxBaseModuleClass):
         if self.qz_nn_flavor != "linear":
             qeps = inference_outputs["qeps"]
             eps = inference_outputs["z"] - inference_outputs["z_base"]
-            peps = dist.Normal(0, jnp.exp(self.pz_scale))
-            kl_z = dist.kl_divergence(qeps, peps).sum(-1) if qeps is not None else -peps.log_prob(eps).sum(-1)
+            if self.z_u_prior:
+                peps = dist.Normal(0, jnp.exp(self.pz_scale))
+                kl_z = dist.kl_divergence(qeps, peps).sum(-1) if qeps is not None else -peps.log_prob(eps).sum(-1)
+            else:
+                kl_z = 0
         else:
             kl_z = (
                 -dist.Normal(inference_outputs["z_base"], jnp.exp(self.z_u_prior_scale)).log_prob(inference_outputs["z"]).sum(-1)

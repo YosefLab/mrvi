@@ -148,6 +148,7 @@ class AttentionBlock(nn.Module):
     n_hidden_mlp: int = 32
     n_layers_mlp: int = 1
     training: Optional[bool] = None
+    stop_gradients_mlp: bool = False
     activation: Callable = nn.gelu
 
     @nn.compact
@@ -178,7 +179,8 @@ class AttentionBlock(nn.Module):
             training=training,
             activation=self.activation,
         )(inputs=eps)
-        inputs = jnp.concatenate([query_embed, eps_], axis=-1)
+        query_embed_stop = query_embed if not self.stop_gradients_mlp else jax.lax.stop_gradient(query_embed)
+        inputs = jnp.concatenate([query_embed_stop, eps_], axis=-1)
         residual = MLP(
             n_out=self.out_dim,
             n_hidden=self.n_hidden_mlp,

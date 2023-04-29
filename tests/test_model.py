@@ -73,6 +73,7 @@ def test_mrvi():
             "use_map": False,
         },
         px_kwargs={"low_dim_batch": False},
+        u_prior_mixture=True,
         px_nn_flavor="attention",
         qz_nn_flavor="attention",
     )

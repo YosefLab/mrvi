@@ -156,7 +156,8 @@ class AttentionBlock(nn.Module):
         training = nn.merge_param("training", self.training, training)
         has_mc_samples = query_embed.ndim == 3
 
-        query_for_att = nn.DenseGeneral((self.outerprod_dim, 1), use_bias=False)(query_embed)
+        query_embed_stop = query_embed if not self.stop_gradients_mlp else jax.lax.stop_gradient(query_embed)
+        query_for_att = nn.DenseGeneral((self.outerprod_dim, 1), use_bias=False)(query_embed_stop)
         kv_for_att = nn.DenseGeneral((self.outerprod_dim, 1), use_bias=False)(kv_embed)
         eps = nn.MultiHeadDotProductAttention(
             num_heads=self.n_heads,
@@ -179,8 +180,7 @@ class AttentionBlock(nn.Module):
             training=training,
             activation=self.activation,
         )(inputs=eps)
-        query_embed_stop = query_embed if not self.stop_gradients_mlp else jax.lax.stop_gradient(query_embed)
-        inputs = jnp.concatenate([query_embed_stop, eps_], axis=-1)
+        inputs = jnp.concatenate([query_embed, eps_], axis=-1)
         residual = MLP(
             n_out=self.out_dim,
             n_hidden=self.n_hidden_mlp,

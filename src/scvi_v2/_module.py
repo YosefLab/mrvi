@@ -325,6 +325,9 @@ class MrVAE(JaxBaseModuleClass):
     encoder_n_layers: int = 2
     z_u_prior: bool = True
     z_u_prior_scale: float = 0.0
+    u_prior_scale: float = 0.0
+    u_prior_mixture: bool = False
+    u_prior_mixture_k: int = 10
     learn_z_u_prior_scale: bool = False
     laplace_scale: float = None
     scale_observations: bool = False
@@ -391,6 +394,12 @@ class MrVAE(JaxBaseModuleClass):
         else:
             self.pz_scale = self.z_u_prior_scale
 
+        if self.u_prior_mixture:
+            u_dim = self.n_latent_u if self.n_latent_u is not None else self.n_latent
+            self.u_prior_logits = self.param("u_prior_logits", nn.initializers.zeros, (self.u_prior_mixture_k,))
+            self.u_prior_means = self.param("u_prior_means", jax.random.normal, (u_dim, self.u_prior_mixture_k))
+            self.u_prior_scales = self.param("u_prior_scales", nn.initializers.zeros, (u_dim, self.u_prior_mixture_k))
+
     @property
     def required_rngs(self):  # noqa: D102
         return ("params", "u", "dropout", "eps")
@@ -453,7 +462,12 @@ class MrVAE(JaxBaseModuleClass):
         )
         h = px.mean / library_exp
 
-        pu = dist.Normal(0, 1)
+        if self.u_prior_mixture:
+            cats = dist.Categorical(logits=self.u_prior_logits)
+            normal_dists = dist.Normal(self.u_prior_means, jnp.exp(self.u_prior_scales))
+            pu = dist.MixtureSameFamily(cats, normal_dists)
+        else:
+            pu = dist.Normal(0, jnp.exp(self.u_prior_scale))
         return {"px": px, "pu": pu, "h": h}
 
     def loss(
@@ -465,7 +479,14 @@ class MrVAE(JaxBaseModuleClass):
     ) -> jnp.ndarray:
         """Compute the loss function value."""
         reconstruction_loss = -generative_outputs["px"].log_prob(tensors[REGISTRY_KEYS.X_KEY]).sum(-1)
-        kl_u = dist.kl_divergence(inference_outputs["qu"], generative_outputs["pu"]).sum(-1)
+
+        if self.u_prior_mixture:
+            kl_u = inference_outputs["qu"].log_prob(inference_outputs["u"]) - generative_outputs["pu"].log_prob(
+                inference_outputs["u"]
+            )
+            kl_u = kl_u.sum(-1)
+        else:
+            kl_u = dist.kl_divergence(inference_outputs["qu"], generative_outputs["pu"]).sum(-1)
         if self.qz_nn_flavor != "linear":
             qeps = inference_outputs["qeps"]
             eps = inference_outputs["z"] - inference_outputs["z_base"]

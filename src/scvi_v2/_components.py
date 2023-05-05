@@ -136,6 +136,61 @@ class ConditionalNormalization(nn.Module):
         return out
 
 
+class AttentionBlock(nn.Module):
+    """Attention block consisting of multi-head self-attention and MLP."""
+
+    query_dim: int
+    out_dim: int
+    outerprod_dim: int = 16
+    n_channels: int = 4
+    n_heads: int = 2
+    dropout_rate: float = 0.0
+    n_hidden_mlp: int = 32
+    n_layers_mlp: int = 1
+    training: Optional[bool] = None
+    stop_gradients_mlp: bool = False
+    activation: Callable = nn.gelu
+
+    @nn.compact
+    def __call__(self, query_embed: NdArray, kv_embed: NdArray, training: Optional[bool] = None):
+        training = nn.merge_param("training", self.training, training)
+        has_mc_samples = query_embed.ndim == 3
+
+        query_embed_stop = query_embed if not self.stop_gradients_mlp else jax.lax.stop_gradient(query_embed)
+        query_for_att = nn.DenseGeneral((self.outerprod_dim, 1), use_bias=False)(query_embed_stop)
+        kv_for_att = nn.DenseGeneral((self.outerprod_dim, 1), use_bias=False)(kv_embed)
+        eps = nn.MultiHeadDotProductAttention(
+            num_heads=self.n_heads,
+            qkv_features=self.n_channels * self.n_heads,
+            out_features=self.n_channels,
+            dropout_rate=self.dropout_rate,
+            use_bias=True,
+        )(inputs_q=query_for_att, inputs_kv=kv_for_att, deterministic=not training)
+
+        # now remove that extra dimension
+        # (batch, n_latent_sample * n_channels)
+        if not has_mc_samples:
+            eps = jnp.reshape(eps, (eps.shape[0], eps.shape[1] * eps.shape[2]))
+        else:
+            eps = jnp.reshape(eps, (eps.shape[0], eps.shape[1], eps.shape[2] * eps.shape[3]))
+
+        eps_ = MLP(
+            n_out=self.outerprod_dim,
+            n_hidden=self.n_hidden_mlp,
+            training=training,
+            activation=self.activation,
+        )(inputs=eps)
+        inputs = jnp.concatenate([query_embed, eps_], axis=-1)
+        residual = MLP(
+            n_out=self.out_dim,
+            n_hidden=self.n_hidden_mlp,
+            n_layers=self.n_layers_mlp,
+            training=training,
+            activation=self.activation,
+        )(inputs=inputs)
+        return residual
+
+
 class FactorizedEmbedding(nn.Module):
     """
     Factorized Embedding Module.

@@ -10,6 +10,7 @@ from scvi.module.base import JaxBaseModuleClass, LossOutput, flax_configure
 
 from ._components import (
     MLP,
+    AttentionBlock,
     ConditionalNormalization,
     Dense,
     FactorizedEmbedding,
@@ -66,6 +67,71 @@ class _DecoderZX(nn.Module):
         )
 
 
+class _DecoderZXAttention(nn.Module):
+    n_in: int
+    n_out: int
+    n_batch: int
+    n_latent_sample: int = 16
+    h_activation: Callable = nn.softplus
+    n_channels: int = 4
+    n_heads: int = 2
+    dropout_rate: float = 0.1
+    stop_gradients: bool = False
+    stop_gradients_mlp: bool = False
+    training: Optional[bool] = None
+    n_hidden: int = 32
+    n_layers: int = 1
+    training: Optional[bool] = None
+    low_dim_batch: bool = False
+    activation: Callable = nn.gelu
+
+    @nn.compact
+    def __call__(
+        self,
+        z: NdArray,
+        batch_covariate: NdArray,
+        size_factor: NdArray,
+        continuous_covariates: Optional[NdArray],
+        training: Optional[bool] = None,
+    ) -> NegativeBinomial:
+
+        has_mc_samples = z.ndim == 3
+        z_stop = z if not self.stop_gradients else jax.lax.stop_gradient(z)
+        z_ = nn.LayerNorm(name="u_ln")(z_stop)
+
+        batch_covariate = batch_covariate.astype(int).flatten()
+        batch_embed = nn.Embed(self.n_batch, self.n_latent_sample, embedding_init=_normal_initializer)(
+            batch_covariate
+        )  # (batch, n_latent_sample)
+        batch_embed = nn.LayerNorm(name="batch_embed_ln")(batch_embed)
+        if has_mc_samples:
+            batch_embed = jnp.tile(batch_embed, (z_.shape[0], 1, 1))
+
+        res_dim = self.n_in if self.low_dim_batch else self.n_out
+        residual = AttentionBlock(
+            query_dim=self.n_in,
+            out_dim=res_dim,
+            outerprod_dim=self.n_latent_sample,
+            n_channels=self.n_channels,
+            n_heads=self.n_heads,
+            dropout_rate=self.dropout_rate,
+            n_hidden_mlp=self.n_hidden,
+            n_layers_mlp=self.n_layers,
+            stop_gradients_mlp=self.stop_gradients_mlp,
+            training=training,
+            activation=self.activation,
+        )(query_embed=z_, kv_embed=batch_embed)
+
+        if self.low_dim_batch:
+            mu = nn.Dense(self.n_out)(z + residual)
+        else:
+            mu = nn.Dense(self.n_out)(z) + residual
+        mu = self.h_activation(mu)
+        return NegativeBinomial(
+            mean=mu * size_factor, inverse_dispersion=jnp.exp(self.param("px_r", jax.random.normal, (self.n_out,)))
+        )
+
+
 class _EncoderUZ(nn.Module):
     n_latent: int
     n_sample: int
@@ -74,14 +140,15 @@ class _EncoderUZ(nn.Module):
     n_factorized_embed_dims: Optional[int] = None
     dropout_rate: float = 0.0
     training: Optional[bool] = None
+    activation: Callable = nn.gelu
 
     def setup(self):
         self.dropout = nn.Dropout(self.dropout_rate)
         n_latent_u = self.n_latent_u if self.n_latent_u is not None else self.n_latent
         if self.n_latent_u is not None:
-            self.A_z = self.param("A_z", jax.random.normal, (self.n_latent, n_latent_u))
+            self.z_embed = nn.Dense(self.n_latent)
         else:
-            self.A_z = None
+            self.z_embed = None
         if not self.use_nonlinear:
             if self.n_factorized_embed_dims is None:
                 self.A_s_enc = nn.Embed(
@@ -96,7 +163,7 @@ class _EncoderUZ(nn.Module):
                     name="A_s_enc",
                 )
         else:
-            self.A_s_enc = MLP(self.n_latent * n_latent_u, name="A_s_enc", activation=nn.gelu)
+            self.A_s_enc = MLP(self.n_latent * n_latent_u, name="A_s_enc", activation=self.activation)
         self.h3_embed = nn.Embed(self.n_sample, self.n_latent, embedding_init=_normal_initializer)
 
     def __call__(self, u: NdArray, sample_covariate: NdArray, training: Optional[bool] = None) -> jnp.ndarray:
@@ -121,10 +188,7 @@ class _EncoderUZ(nn.Module):
         h3 = self.h3_embed(sample_covariate)
         delta = h2 + h3
         if self.n_latent_u is not None:
-            if u_drop.ndim == 3:
-                z_base = jnp.einsum("lu,bcu->bcl", self.A_z, u_drop)
-            else:
-                z_base = jnp.einsum("lu,cu->cl", self.A_z, u_drop)
+            z_base = self.z_embed(u_drop)
             return z_base, delta, A_s
         else:
             return u, delta, A_s
@@ -139,13 +203,13 @@ class _EncoderUZ2(nn.Module):
     n_layers: int = 1
     stop_gradients: bool = False
     training: Optional[bool] = None
-    activation: Callable = nn.softplus
+    activation: Callable = nn.gelu
 
     @nn.compact
     def __call__(self, u: NdArray, sample_covariate: NdArray, training: Optional[bool] = None):
         training = nn.merge_param("training", self.training, training)
         sample_covariate = sample_covariate.astype(int).flatten()
-        n_latent_u = self.n_latent_u if self.n_latent_u is not None else self.n_latent
+        self.n_latent_u if self.n_latent_u is not None else self.n_latent
         u_stop = u if not self.stop_gradients else jax.lax.stop_gradient(u)
 
         n_outs = 1 if self.use_map else 2
@@ -163,13 +227,8 @@ class _EncoderUZ2(nn.Module):
             training=training,
             activation=self.activation,
         )(inputs=inputs)
-        A_z = None
         if self.n_latent_u is not None:
-            A_z = self.param("A_z", jax.random.normal, (self.n_latent, n_latent_u))
-            if u_stop.ndim == 3:
-                z_base = jnp.einsum("lu,bcu->bcl", A_z, u_stop)
-            else:
-                z_base = jnp.einsum("lu,cu->cl", A_z, u_stop)
+            z_base = nn.Dense(self.n_latent)(u_stop)
             return z_base, eps_
         else:
             return u, eps_
@@ -184,6 +243,7 @@ class _EncoderUZ2Attention(nn.Module):
     n_heads: int = 2
     dropout_rate: float = 0.0
     stop_gradients: bool = False
+    stop_gradients_mlp: bool = False
     use_map: bool = True
     n_hidden: int = 32
     n_layers: int = 1
@@ -194,9 +254,10 @@ class _EncoderUZ2Attention(nn.Module):
     def __call__(self, u: NdArray, sample_covariate: NdArray, training: Optional[bool] = None):
         training = nn.merge_param("training", self.training, training)
         sample_covariate = sample_covariate.astype(int).flatten()
-        n_latent_u = self.n_latent_u if self.n_latent_u is not None else self.n_latent
+        self.n_latent_u if self.n_latent_u is not None else self.n_latent
         has_mc_samples = u.ndim == 3
-        u_ = nn.LayerNorm(name="u_ln")(u)
+        u_stop = u if not self.stop_gradients else jax.lax.stop_gradient(u)
+        u_ = nn.LayerNorm(name="u_ln")(u_stop)
 
         sample_embed = nn.Embed(self.n_sample, self.n_latent_sample, embedding_init=_normal_initializer)(
             sample_covariate
@@ -205,49 +266,23 @@ class _EncoderUZ2Attention(nn.Module):
         if has_mc_samples:
             sample_embed = jnp.tile(sample_embed, (u_.shape[0], 1, 1))
 
-        u_for_att = nn.DenseGeneral((self.n_latent_sample, 1), use_bias=False)(u_)
-        sample_for_att = nn.DenseGeneral((self.n_latent_sample, 1), use_bias=False)(sample_embed)
-
-        # (batch, n_latent_sample, n_channels)
-        eps = nn.MultiHeadDotProductAttention(
-            num_heads=self.n_heads,
-            qkv_features=self.n_channels * self.n_heads,
-            out_features=self.n_channels,
-            dropout_rate=self.dropout_rate,
-            use_bias=True,
-        )(inputs_q=u_for_att, inputs_kv=sample_for_att, deterministic=not training)
-
-        # now remove that extra dimension
-        # (batch, n_latent_sample * n_channels)
-        if not has_mc_samples:
-            eps = jnp.reshape(eps, (eps.shape[0], eps.shape[1] * eps.shape[2]))
-        else:
-            eps = jnp.reshape(eps, (eps.shape[0], eps.shape[1], eps.shape[2] * eps.shape[3]))
-
         n_outs = 1 if self.use_map else 2
-        eps_ = MLP(
-            n_out=self.n_latent_sample,
-            n_hidden=self.n_hidden,
+        residual = AttentionBlock(
+            query_dim=self.n_latent,
+            out_dim=n_outs * self.n_latent,
+            outerprod_dim=self.n_latent_sample,
+            n_channels=self.n_channels,
+            n_heads=self.n_heads,
+            dropout_rate=self.dropout_rate,
+            stop_gradients_mlp=self.stop_gradients_mlp,
+            n_hidden_mlp=self.n_hidden,
+            n_layers_mlp=self.n_layers,
             training=training,
             activation=self.activation,
-        )(inputs=eps)
-        inputs = jnp.concatenate([u_, eps_], axis=-1)
-        residual = MLP(
-            n_out=n_outs * self.n_latent,
-            n_hidden=self.n_hidden,
-            n_layers=self.n_layers,
-            training=training,
-            activation=self.activation,
-        )(inputs=inputs)
+        )(query_embed=u_, kv_embed=sample_embed)
 
-        u_stop = u if not self.stop_gradients else jax.lax.stop_gradient(u)
-        A_z = None
         if self.n_latent_u is not None:
-            A_z = self.param("A_z", jax.random.normal, (self.n_latent, n_latent_u))
-            if u.ndim == 3:
-                z_base = jnp.einsum("lu,bcu->bcl", A_z, u_stop)
-            else:
-                z_base = jnp.einsum("lu,cu->cl", A_z, u_stop)
+            z_base = nn.Dense(self.n_latent)(u_stop)
             return z_base, residual
         else:
             return u, residual
@@ -258,7 +293,7 @@ class _EncoderXU(nn.Module):
     n_sample: int
     n_hidden: int
     n_layers: int = 1
-    activation: Callable = nn.relu
+    activation: Callable = nn.gelu
     training: Optional[bool] = None
 
     @nn.compact
@@ -289,9 +324,14 @@ class MrVAE(JaxBaseModuleClass):
     encoder_n_hidden: int = 128
     encoder_n_layers: int = 2
     z_u_prior: bool = True
-    z_u_prior_scale: float = 1.0
+    z_u_prior_scale: float = 0.0
+    u_prior_scale: float = 0.0
+    u_prior_mixture: bool = False
+    u_prior_mixture_k: int = 10
+    learn_z_u_prior_scale: bool = False
     laplace_scale: float = None
     scale_observations: bool = False
+    px_nn_flavor: str = "linear"
     qz_nn_flavor: str = "linear"
     px_kwargs: Optional[dict] = None
     qz_kwargs: Optional[dict] = None
@@ -314,7 +354,11 @@ class MrVAE(JaxBaseModuleClass):
         n_latent_u = None if is_isomorphic_uz else self.n_latent_u
 
         # Generative model
-        self.px = _DecoderZX(
+        if self.px_nn_flavor == "linear":
+            px_cls = _DecoderZX
+        else:
+            px_cls = _DecoderZXAttention
+        self.px = px_cls(
             self.n_latent,
             self.n_input,
             self.n_batch,
@@ -345,6 +389,17 @@ class MrVAE(JaxBaseModuleClass):
             **qu_kwargs,
         )
 
+        if self.learn_z_u_prior_scale:
+            self.pz_scale = self.param("pz_scale", nn.initializers.zeros, (self.n_latent,))
+        else:
+            self.pz_scale = self.z_u_prior_scale
+
+        if self.u_prior_mixture:
+            u_dim = self.n_latent_u if self.n_latent_u is not None else self.n_latent
+            self.u_prior_logits = self.param("u_prior_logits", nn.initializers.zeros, (self.u_prior_mixture_k,))
+            self.u_prior_means = self.param("u_prior_means", jax.random.normal, (u_dim, self.u_prior_mixture_k))
+            self.u_prior_scales = self.param("u_prior_scales", nn.initializers.zeros, (u_dim, self.u_prior_mixture_k))
+
     @property
     def required_rngs(self):  # noqa: D102
         return ("params", "u", "dropout", "eps")
@@ -372,7 +427,7 @@ class MrVAE(JaxBaseModuleClass):
             qeps = None
             if qeps_.shape[-1] == 2 * self.n_latent:
                 loc_, scale_ = qeps_[..., : self.n_latent], qeps_[..., self.n_latent :]
-                qeps = dist.Normal(loc_, scale_)
+                qeps = dist.Normal(loc_, nn.softplus(scale_) + 1e-3)
                 eps = qeps.mean if use_mean else qeps.rsample(self.make_rng("eps"))
             As = None
             z = z_base + eps
@@ -407,7 +462,12 @@ class MrVAE(JaxBaseModuleClass):
         )
         h = px.mean / library_exp
 
-        pu = dist.Normal(0, 1)
+        if self.u_prior_mixture:
+            cats = dist.Categorical(logits=self.u_prior_logits)
+            normal_dists = dist.Normal(self.u_prior_means, jnp.exp(self.u_prior_scales))
+            pu = dist.MixtureSameFamily(cats, normal_dists)
+        else:
+            pu = dist.Normal(0, jnp.exp(self.u_prior_scale))
         return {"px": px, "pu": pu, "h": h}
 
     def loss(
@@ -419,15 +479,31 @@ class MrVAE(JaxBaseModuleClass):
     ) -> jnp.ndarray:
         """Compute the loss function value."""
         reconstruction_loss = -generative_outputs["px"].log_prob(tensors[REGISTRY_KEYS.X_KEY]).sum(-1)
-        kl_u = dist.kl_divergence(inference_outputs["qu"], generative_outputs["pu"]).sum(-1)
+
+        if self.u_prior_mixture:
+            kl_u = inference_outputs["qu"].log_prob(inference_outputs["u"]) - generative_outputs["pu"].log_prob(
+                inference_outputs["u"]
+            )
+            kl_u = kl_u.sum(-1)
+        else:
+            kl_u = dist.kl_divergence(inference_outputs["qu"], generative_outputs["pu"]).sum(-1)
         if self.qz_nn_flavor != "linear":
             qeps = inference_outputs["qeps"]
             eps = inference_outputs["z"] - inference_outputs["z_base"]
-            peps = dist.Normal(0, self.z_u_prior_scale)
-            kl_z = dist.kl_divergence(qeps, peps).sum(-1) if qeps is not None else -peps.log_prob(eps).sum(-1)
+            if self.z_u_prior:
+                peps = dist.Normal(0, jnp.exp(self.pz_scale))
+                kl_z = -peps.log_prob(eps).sum(-1)
+            else:
+                kl_z = 0
+            
+            kl_z += (
+                -dist.Normal(inference_outputs["z_base"], jnp.exp(self.z_u_prior_scale)).log_prob(inference_outputs["z"]).sum(-1)
+                if self.z_u_prior_scale is not None
+                else 0
+            )
         else:
             kl_z = (
-                -dist.Normal(inference_outputs["z_base"], self.z_u_prior_scale).log_prob(inference_outputs["z"]).sum(-1)
+                -dist.Normal(inference_outputs["z_base"], jnp.exp(self.z_u_prior_scale)).log_prob(inference_outputs["z"]).sum(-1)
                 if self.z_u_prior_scale is not None
                 else 0
             )

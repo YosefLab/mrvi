@@ -21,6 +21,12 @@ def test_mrvi():
 
     model = MrVI(
         adata,
+    )
+    model.train(2, check_val_every_n_epoch=1, train_size=0.5)
+    model.get_local_sample_distances(normalize_distances=True)
+
+    model = MrVI(
+        adata,
         n_latent=n_latent,
         laplace_scale=1.0,
         qz_kwargs={"n_factorized_embed_dims": 3},
@@ -55,6 +61,54 @@ def test_mrvi():
             "use_map": False,
         },
         qz_nn_flavor="attention",
+    )
+    model.train(1, check_val_every_n_epoch=1, train_size=0.5)
+    model.get_local_sample_distances(normalize_distances=True)
+
+    model = MrVI(
+        adata,
+        n_latent=n_latent,
+        scale_observations=True,
+        qz_kwargs={
+            "use_map": False,
+        },
+        px_kwargs={"low_dim_batch": False},
+        u_prior_mixture=True,
+        px_nn_flavor="attention",
+        qz_nn_flavor="attention",
+    )
+    model.train(1, check_val_every_n_epoch=1, train_size=0.5)
+    model.get_local_sample_distances(normalize_distances=True)
+    model.get_local_sample_distances(normalize_distances=False)
+
+    model = MrVI(
+        adata,
+        n_latent=n_latent,
+        scale_observations=True,
+        qz_kwargs={
+            "use_map": False, "stop_gradients": False, "stop_gradients_mlp": True
+        },
+        px_kwargs={"low_dim_batch": False, "stop_gradients": False, "stop_gradients_mlp": True},
+        px_nn_flavor="attention",
+        qz_nn_flavor="attention",
+        z_u_prior=False,
+    )
+    model.train(1, check_val_every_n_epoch=1, train_size=0.5)
+    model.get_local_sample_distances(normalize_distances=True)
+    model.get_local_sample_distances(normalize_distances=False)
+
+
+    model = MrVI(
+        adata,
+        n_latent=n_latent,
+        scale_observations=True,
+        qz_kwargs={
+            "use_map": False,
+        },
+        px_kwargs={"low_dim_batch": True},
+        px_nn_flavor="attention",
+        qz_nn_flavor="attention",
+        learn_z_u_prior_scale=True,
     )
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)
     model.get_local_sample_distances(normalize_distances=True)

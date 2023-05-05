@@ -27,6 +27,12 @@ DEFAULT_QU_KWARGS = {}
 _normal_initializer = jax.nn.initializers.normal(stddev=0.1)
 
 
+@jax.jit
+def exp(x: NdArray) -> NdArray:
+    """Exponential function."""
+    return jnp.exp(x)
+
+
 class _DecoderZX(nn.Module):
     n_in: int
     n_out: int
@@ -501,13 +507,17 @@ class MrVAE(JaxBaseModuleClass):
             else:
                 kl_z = 0
             kl_z += (
-                -dist.Normal(inference_outputs["z_base"], jnp.exp(self.z_u_prior_scale)).log_prob(inference_outputs["z"]).sum(-1)
+                -dist.Normal(inference_outputs["z_base"], jnp.exp(self.z_u_prior_scale))
+                .log_prob(inference_outputs["z"])
+                .sum(-1)
                 if self.z_u_prior_scale is not None
                 else 0
             )
         else:
             kl_z = (
-                -dist.Normal(inference_outputs["z_base"], jnp.exp(self.z_u_prior_scale)).log_prob(inference_outputs["z"]).sum(-1)
+                -dist.Normal(inference_outputs["z_base"], jnp.exp(self.z_u_prior_scale))
+                .log_prob(inference_outputs["z"])
+                .sum(-1)
                 if self.z_u_prior_scale is not None
                 else 0
             )

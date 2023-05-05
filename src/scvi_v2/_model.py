@@ -1,9 +1,11 @@
 import logging
 import os
 from copy import deepcopy
+from scipy.linalg import sqrtm
 from functools import partial
 from typing import Dict, List, Optional, Sequence, Tuple, Union
 
+from statsmodels.stats.multitest import multipletests
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
@@ -609,6 +611,218 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             use_vmap=use_vmap,
             norm=norm,
         )
+
+
+    def perform_multivariate_analysis(
+        self,
+        donor_keys: List[Tuple] = None,
+        adata=None,
+        batch_size=256,
+        use_vmap: bool = True,
+        normalize_design_matrix: bool = True,
+        offset_design_matrix: bool = True,
+        store_lfc: bool = False,
+    ):
+        adata = self.adata if adata is None else adata
+        self._check_if_trained(warn=False)
+        # Hack to ensure new AnnDatas have indices.
+        if "_indices" not in adata.obs:
+            adata.obs["_indices"] = np.arange(adata.n_obs).astype(int)
+
+        adata = self._validate_anndata(adata)
+        scdl = self._make_data_loader(adata=adata, indices=None, batch_size=batch_size, iter_ndarray=True)
+        n_sample = self.summary_stats.n_sample
+        vars_in = {"params": self.module.params, **self.module.state}
+
+        @partial(jax.jit, static_argnames=["use_mean"])
+        def mapped_inference_fn(
+            stacked_rngs,
+            x,
+            sample_index,
+            cf_sample,
+            use_mean,
+        ):
+            def inference_fn(
+                rngs,
+                cf_sample,
+            ):
+                return self.module.apply(
+                    vars_in,
+                    rngs=rngs,
+                    method=self.module.inference,
+                    x=x,
+                    sample_index=sample_index,
+                    cf_sample=cf_sample,
+                    use_mean=use_mean,
+                )["eps"]
+
+            if use_vmap:
+                eps_ = jax.vmap(inference_fn, in_axes=(0, 0), out_axes=-2)(
+                    stacked_rngs,
+                    cf_sample,
+                )
+            else:
+                def per_sample_inference_fn(pair):
+                    rngs, cf_sample = pair
+                    return inference_fn(rngs, cf_sample)
+
+                eps_ = jax.lax.transpose(jax.lax.map(per_sample_inference_fn, (stacked_rngs, cf_sample)), (1, 0, 2))
+            eps = (eps_ - eps_.mean(axis=1, keepdims=True)) / (1e-6 + eps_.std(axis=1, keepdims=True))  # over samples
+
+            betas = jnp.einsum("ks,nsd->nkd", Amat, eps)
+            # Statistical test
+            betas_norm = jnp.einsum("nkd,kl->nld", betas, prefactor)
+            df = betas_norm.shape[-1]
+            ts = (betas_norm ** 2).sum(axis=-1)
+            pvals = 1 - jax.scipy.stats.chi2.cdf(ts, df=df)
+
+            # Decoding
+            betas_ = betas.transpose((1, 0, 2))  # (n_metadata, n_cells, n_latent)
+            # outs =  self.module.apply(
+            #     vars_in,
+            #     method=self.module.inference,
+            #     x=x,
+            #     sample_index=sample_index,
+            #     use_mean=use_mean,
+            # )
+            # betas_ = jnp.concatenate(
+            #     [
+            #         jnp.zeros((1, betas_.shape[1], betas_.shape[2])),
+            #         betas_,
+            #     ],
+            #     axis=0,
+            # )
+            # ztilde = outs["z_base"] + eps_.mean(axis=1) + (betas_ * eps_.std(axis=1))
+            # outs["z"] = ztilde
+
+            # generative_inputs = {
+            #     "z": betas_,
+            #     "library": outs["library"],
+            #     "batch_index": jnp.zeros_like(outs["library"]),
+            #     "continuous_covs": None,
+            # }
+            # generative_outs = self.module.apply(
+            #     vars_in,
+            #     method=self.module.generative,
+            #     **generative_inputs,
+            # )
+            # lfcs = jnp.log2(1e-6 + generative_outs["h"][1:]) - jnp.log2(1e-6 + generative_outs["h"][0])
+            # lfcs = jnp.log2(generative_outs["h"][1:]) - jnp.log2(generative_outs["h"][0])
+            # lfcs = jnp.log2(generative_outs["h"][1:]) - jnp.log2(generative_outs["h"][0])
+            # lfcs = jnp.log2(generative_outs["h"])
+
+            betas_ = betas_ * eps_.std(axis=1)
+            lfcs = jnp.einsum("lg,knl->kng", self.module.params["px"]["Dense_0"]["kernel"], betas_)
+            return dict(
+                beta=betas,
+                effect_size=ts,
+                pvalue=pvals,
+                lfc=lfcs,
+            )
+
+        Xmat = []
+        Xmat_names = []
+        for donor_key in tqdm(donor_keys):
+            cov = self.donor_info[donor_key]
+            if (cov.dtype == str) or (cov.dtype == "category"):
+                cov = pd.get_dummies(cov, drop_first=True)
+                cov_names = donor_key + np.array(cov.columns)
+                cov = cov.values
+            else:
+                cov_names = np.array([donor_key])
+                cov = cov.values[:, None]
+            Xmat.append(cov)
+            Xmat_names.append(cov_names)
+        Xmat_names = np.concatenate(Xmat_names)
+        Xmat = np.concatenate(Xmat, axis=1).astype(np.float32)
+        if normalize_design_matrix:
+            Xmat = (Xmat - Xmat.mean(axis=0)) / (1e-6 + Xmat.std(axis=0))
+        if offset_design_matrix:
+            Xmat = np.concatenate([np.ones((Xmat.shape[0], 1)), Xmat], axis=1)
+            Xmat_names = np.concatenate([np.array(["offset"]), Xmat_names])
+        prefactor = sqrtm(Xmat.T @ Xmat)
+        Amat = np.linalg.pinv(Xmat.T @ Xmat) @ Xmat.T
+
+        Xmat = jnp.array(Xmat)
+        prefactor = jnp.array(prefactor)
+        Amat = jnp.array(Amat)
+
+        beta = []
+        effect_size = []
+        pvalue = []
+        lfc = []
+        for array_dict in tqdm(scdl):
+            n_cells = array_dict[REGISTRY_KEYS.X_KEY].shape[0]
+            cf_sample = np.broadcast_to(np.arange(n_sample)[:, None, None], (n_sample, n_cells, 1))
+            inf_inputs = self.module._get_inference_input(
+                array_dict,
+            )
+            stacked_rngs = self._generate_stacked_rngs(cf_sample.shape[0])
+            res = mapped_inference_fn(
+                stacked_rngs=stacked_rngs,
+                x=jnp.array(inf_inputs["x"]),
+                sample_index=jnp.array(inf_inputs["sample_index"]),
+                cf_sample=jnp.array(cf_sample),
+                use_mean=True,
+            )  # (n_cells, n_donors, n_latent)
+            beta.append(np.array(res["beta"]))
+            effect_size.append(np.array(res["effect_size"]))
+            pvalue.append(np.array(res["pvalue"]))
+            if store_lfc:
+                lfc.append(np.array(res["lfc"]))
+        beta = np.concatenate(beta, axis=0)
+        effect_size = np.concatenate(effect_size, axis=0)
+        pvalue = np.concatenate(pvalue, axis=0)
+        pvalue_shape = pvalue.shape
+        padj = multipletests(pvalue.flatten(), method="fdr_bh")[1].reshape(pvalue_shape)
+
+        n_latent = beta.shape[2]
+        beta = xr.DataArray(
+            beta,
+            dims=["cell_name", "covariate", "latent_dim"],
+            coords={"cell_name": adata.obs_names, "covariate": Xmat_names, "latent_dim": np.arange(n_latent)},
+            name="beta",
+        )
+        effect_size = xr.DataArray(
+            effect_size,
+            dims=["cell_name", "covariate"],
+            coords={"cell_name": adata.obs_names, "covariate": Xmat_names},
+            name="effect_size",
+        )
+        pvalue = xr.DataArray(
+            pvalue,
+            dims=["cell_name", "covariate"],
+            coords={"cell_name": adata.obs_names, "covariate": Xmat_names},
+            name="pvalue",
+        )
+        padj = xr.DataArray(
+            padj,
+            dims=["cell_name", "covariate"],
+            coords={"cell_name": adata.obs_names, "covariate": Xmat_names},
+            name="padj",
+        )
+        res =  {
+            "beta": beta,
+            "effect_size": effect_size,
+            "pvalue": pvalue,
+            "padj": padj,
+        }
+        if store_lfc:
+            lfc = np.concatenate(lfc, axis=1)
+            lfc = xr.DataArray(
+                lfc,
+                dims=["covariate", "cell_name", "gene"],
+                coords={
+                    "covariate": Xmat_names,
+                    "cell_name": adata.obs_names,
+                    "gene": adata.var_names,
+                },
+                name="lfc",
+            )
+            res["lfc"] = lfc
+        data = xr.Dataset(res)
+        return data
+
 
     def compute_cell_scores(
         self,

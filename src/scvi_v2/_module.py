@@ -27,12 +27,6 @@ DEFAULT_QU_KWARGS = {}
 _normal_initializer = jax.nn.initializers.normal(stddev=0.1)
 
 
-@jax.jit
-def exp(x: NdArray) -> NdArray:
-    """Exponential function."""
-    return jnp.exp(x)
-
-
 class _DecoderZX(nn.Module):
     n_in: int
     n_out: int
@@ -78,7 +72,7 @@ class _DecoderZXAttention(nn.Module):
     n_out: int
     n_batch: int
     n_latent_sample: int = 16
-    h_activation: Callable = nn.softplus
+    h_activation: Callable = jnp.exp
     n_channels: int = 4
     n_heads: int = 2
     dropout_rate: float = 0.1

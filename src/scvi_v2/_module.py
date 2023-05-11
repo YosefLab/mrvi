@@ -72,7 +72,7 @@ class _DecoderZXAttention(nn.Module):
     n_out: int
     n_batch: int
     n_latent_sample: int = 16
-    h_activation: Callable = jnp.exp
+    h_activation: Callable = nn.softmax
     n_channels: int = 4
     n_heads: int = 2
     dropout_rate: float = 0.1
@@ -82,7 +82,7 @@ class _DecoderZXAttention(nn.Module):
     n_hidden: int = 32
     n_layers: int = 1
     training: Optional[bool] = None
-    low_dim_batch: bool = False
+    low_dim_batch: bool = True
     activation: Callable = nn.gelu
 
     @nn.compact

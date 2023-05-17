@@ -92,12 +92,14 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
         self.data_splitter = None
         self.can_compute_normalized_dists = model_kwargs.get("qz_nn_flavor", "linear") == "linear"
+        sample_to_batch = jnp.array(self.donor_info["_scvi_batch"].values)[..., None]
         self.module = MrVAE(
             n_input=self.summary_stats.n_vars,
             n_sample=n_sample,
             n_batch=n_batch,
             n_continuous_cov=n_continuous_cov,
             n_obs_per_sample=self.n_obs_per_sample,
+            sample_to_batch=sample_to_batch,
             **model_kwargs,
         )
         self.can_compute_normalized_dists = (model_kwargs.get("qz_nn_flavor", "linear") == "linear") and (
@@ -678,39 +680,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
             # Decoding
             betas_ = betas.transpose((1, 0, 2))  # (n_metadata, n_cells, n_latent)
-            # outs =  self.module.apply(
-            #     vars_in,
-            #     method=self.module.inference,
-            #     x=x,
-            #     sample_index=sample_index,
-            #     use_mean=use_mean,
-            # )
-            # betas_ = jnp.concatenate(
-            #     [
-            #         jnp.zeros((1, betas_.shape[1], betas_.shape[2])),
-            #         betas_,
-            #     ],
-            #     axis=0,
-            # )
-            # ztilde = outs["z_base"] + eps_.mean(axis=1) + (betas_ * eps_.std(axis=1))
-            # outs["z"] = ztilde
-
-            # generative_inputs = {
-            #     "z": betas_,
-            #     "library": outs["library"],
-            #     "batch_index": jnp.zeros_like(outs["library"]),
-            #     "continuous_covs": None,
-            # }
-            # generative_outs = self.module.apply(
-            #     vars_in,
-            #     method=self.module.generative,
-            #     **generative_inputs,
-            # )
-            # lfcs = jnp.log2(1e-6 + generative_outs["h"][1:]) - jnp.log2(1e-6 + generative_outs["h"][0])
-            # lfcs = jnp.log2(generative_outs["h"][1:]) - jnp.log2(generative_outs["h"][0])
-            # lfcs = jnp.log2(generative_outs["h"][1:]) - jnp.log2(generative_outs["h"][0])
-            # lfcs = jnp.log2(generative_outs["h"])
-
             betas_ = betas_ * eps_.std(axis=1)
             lfcs = jnp.einsum("lg,knl->kng", self.module.params["px"]["Dense_0"]["kernel"], betas_)
             return dict(

@@ -84,6 +84,7 @@ class _DecoderZXAttention(nn.Module):
     training: Optional[bool] = None
     low_dim_batch: bool = True
     activation: Callable = nn.gelu
+    batch_values: bool = True
 
     @nn.compact
     def __call__(
@@ -110,6 +111,13 @@ class _DecoderZXAttention(nn.Module):
                 batch_embed = jnp.tile(batch_embed, (z_.shape[0], 1, 1))
 
             res_dim = self.n_in if self.low_dim_batch else self.n_out
+
+            if self.batch_values:
+                query_embed=z_
+                kv_embed=batch_embed
+            else:
+                query_embed = batch_embed
+                kv_embed = z_
             residual = AttentionBlock(
                 query_dim=self.n_in,
                 out_dim=res_dim,
@@ -122,7 +130,7 @@ class _DecoderZXAttention(nn.Module):
                 stop_gradients_mlp=self.stop_gradients_mlp,
                 training=training,
                 activation=self.activation,
-            )(query_embed=z_, kv_embed=batch_embed)
+            )(query_embed=query_embed, kv_embed=kv_embed)
 
             if self.low_dim_batch:
                 mu = nn.Dense(self.n_out)(z + residual)
@@ -139,6 +147,7 @@ class _DecoderZXAttention(nn.Module):
 class _EncoderUZ(nn.Module):
     n_latent: int
     n_sample: int
+    n_batch: int
     n_latent_u: Optional[int] = None
     use_nonlinear: bool = False
     n_factorized_embed_dims: Optional[int] = None
@@ -201,6 +210,7 @@ class _EncoderUZ(nn.Module):
 class _EncoderUZ2(nn.Module):
     n_latent: int
     n_sample: int
+    n_batch: int
     n_latent_u: Optional[int] = None
     use_map: bool = False
     n_hidden: int = 32
@@ -210,7 +220,7 @@ class _EncoderUZ2(nn.Module):
     activation: Callable = nn.gelu
 
     @nn.compact
-    def __call__(self, u: NdArray, sample_covariate: NdArray, training: Optional[bool] = None):
+    def __call__(self, u: NdArray, sample_covariate: NdArray, batch_covariate: NdArray, training: Optional[bool] = None):
         training = nn.merge_param("training", self.training, training)
         sample_covariate = sample_covariate.astype(int).flatten()
         self.n_latent_u if self.n_latent_u is not None else self.n_latent
@@ -241,6 +251,7 @@ class _EncoderUZ2(nn.Module):
 class _EncoderUZ2Attention(nn.Module):
     n_latent: int
     n_sample: int
+    n_batch: int = None
     n_latent_u: Optional[int] = None
     n_latent_sample: int = 16
     n_channels: int = 4
@@ -253,9 +264,10 @@ class _EncoderUZ2Attention(nn.Module):
     n_layers: int = 1
     training: Optional[bool] = None
     activation: Callable = nn.gelu
+    use_conditional_norm: bool = False
 
     @nn.compact
-    def __call__(self, u: NdArray, sample_covariate: NdArray, training: Optional[bool] = None):
+    def __call__(self, u: NdArray, sample_covariate: NdArray, batch_covariate: NdArray, training: Optional[bool] = None):
         training = nn.merge_param("training", self.training, training)
         sample_covariate = sample_covariate.astype(int).flatten()
         self.n_latent_u if self.n_latent_u is not None else self.n_latent
@@ -266,7 +278,9 @@ class _EncoderUZ2Attention(nn.Module):
         sample_embed = nn.Embed(self.n_sample, self.n_latent_sample, embedding_init=_normal_initializer)(
             sample_covariate
         )  # (batch, n_latent_sample)
-        sample_embed = nn.LayerNorm(name="sample_embed_ln")(sample_embed)
+        if self.use_conditional_norm:
+            sample_embed = ConditionalNormalization(self.n_latent_sample, self.n_batch)(sample_embed, batch_covariate, training=training)
+        # sample_embed = nn.LayerNorm(name="sample_embed_ln")(sample_embed)
         if has_mc_samples:
             sample_embed = jnp.tile(sample_embed, (u_.shape[0], 1, 1))
 
@@ -342,6 +356,7 @@ class MrVAE(JaxBaseModuleClass):
     qu_kwargs: Optional[dict] = None
     training: bool = True
     n_obs_per_sample: Optional[jnp.ndarray] = None
+    sample_to_batch: NdArray = None
 
     def setup(self):  # noqa: D102
         px_kwargs = DEFAULT_PX_KWARGS.copy()
@@ -380,6 +395,7 @@ class MrVAE(JaxBaseModuleClass):
         self.qz = qz_cls(
             self.n_latent,
             self.n_sample,
+            self.n_batch,
             n_latent_u=n_latent_u,
             **qz_kwargs,
         )
@@ -425,7 +441,8 @@ class MrVAE(JaxBaseModuleClass):
 
         sample_index_cf = sample_index if cf_sample is None else cf_sample
         if self.qz_nn_flavor != "linear":
-            z_base, eps = self.qz(u, sample_index_cf, training=self.training)
+            batch_indices = self.sample_to_batch[sample_index_cf.flatten().astype(int)]
+            z_base, eps = self.qz(u, sample_index_cf, batch_indices, training=self.training)
             qeps_ = eps
 
             qeps = None

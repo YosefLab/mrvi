@@ -23,6 +23,8 @@ def test_mrvi():
     adata.obs["meta1_cat"] = adata.obs["meta1_cat"].astype("category")
     model = MrVI(
         adata,
+        px_nn_flavor="attention",
+        qz_nn_flavor="attention",
     )
     model.train(2, check_val_every_n_epoch=1, train_size=0.5)
     model.get_local_sample_distances(normalize_distances=True)
@@ -192,6 +194,16 @@ def test_mrvi_shrink_u():
     MrVI.setup_anndata(adata, sample_key="sample", batch_key="batch", continuous_covariate_keys=["cont_cov"])
     n_latent_u = 5
     n_latent = 10
+
+    model = MrVI(
+        adata,
+        n_latent=n_latent,
+        n_latent_u=n_latent_u,
+        laplace_scale=1.0,
+        qz_kwargs={"n_factorized_embed_dims": 3},
+    )
+    model.train(1, check_val_every_n_epoch=1, train_size=0.5)
+    model.get_local_sample_distances(normalize_distances=True)
 
     model = MrVI(
         adata,

@@ -1,11 +1,9 @@
 import logging
 import os
 from copy import deepcopy
-from scipy.linalg import sqrtm
 from functools import partial
 from typing import Dict, List, Optional, Sequence, Tuple, Union
 
-from statsmodels.stats.multitest import multipletests
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
@@ -14,6 +12,7 @@ import pandas as pd
 import seaborn as sns
 import xarray as xr
 from anndata import AnnData
+from scipy.linalg import sqrtm
 from scvi import REGISTRY_KEYS
 from scvi.data import AnnDataManager
 from scvi.data.fields import (
@@ -23,6 +22,7 @@ from scvi.data.fields import (
     NumericalObsField,
 )
 from scvi.model.base import BaseModelClass, JaxTrainingMixin
+from statsmodels.stats.multitest import multipletests
 from tqdm import tqdm
 
 from ._constants import MRVI_REGISTRY_KEYS
@@ -614,17 +614,43 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             norm=norm,
         )
 
-
     def perform_multivariate_analysis(
         self,
-        donor_keys: List[Tuple] = None,
         adata=None,
+        donor_keys: List[Tuple] = None,
+        donor_subset: Optional[List[str]] = None,
         batch_size=256,
         use_vmap: bool = True,
         normalize_design_matrix: bool = True,
         offset_design_matrix: bool = True,
         store_lfc: bool = False,
-    ):
+    ) -> xr.Dataset:
+        """Utility function to perform cell-specific multivariate analysis.
+
+        Parameters
+        ----------
+        adata
+            AnnData object to use for computing the local sample representation.
+            If None, the analysis is performed on all cells in the dataset.
+        donor_keys
+            List of donor metadata to consider for the multivariate analysis.
+            These keys should be present in `adata.obs`.
+        donor_subset
+            Optional list of donors to consider for the multivariate analysis.
+            If None, all donors are considered.
+        batch_size
+            Batch size to use for computing the local sample representation.
+        use_vmap
+            Whether to use vmap for computing the local sample representation.
+        normalize_design_matrix
+            Whether to normalize the design matrix.
+        offset_design_matrix
+            Whether to offset the design matrix.
+        store_lfc
+            Whether to store the log-fold changes in the module.
+            Storing log-fold changes is memory-intensive and may require to specify
+            a smaller set of cells to analyze, e.g., by specifying `adata`.
+        """
         adata = self.adata if adata is None else adata
         self._check_if_trained(warn=False)
         # Hack to ensure new AnnDatas have indices.
@@ -635,6 +661,11 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         scdl = self._make_data_loader(adata=adata, indices=None, batch_size=batch_size, iter_ndarray=True)
         n_sample = self.summary_stats.n_sample
         vars_in = {"params": self.module.params, **self.module.state}
+
+        donor_mask = (
+            np.isin(self.sample_order, donor_subset) if donor_subset is not None else np.ones(n_sample, dtype=bool)
+        )
+        donor_mask = jnp.array(donor_mask)
 
         @partial(jax.jit, static_argnames=["use_mean"])
         def mapped_inference_fn(
@@ -664,30 +695,32 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                     cf_sample,
                 )
             else:
+
                 def per_sample_inference_fn(pair):
                     rngs, cf_sample = pair
                     return inference_fn(rngs, cf_sample)
 
                 eps_ = jax.lax.transpose(jax.lax.map(per_sample_inference_fn, (stacked_rngs, cf_sample)), (1, 0, 2))
+            eps_ = eps_[:, donor_mask]
             eps = (eps_ - eps_.mean(axis=1, keepdims=True)) / (1e-6 + eps_.std(axis=1, keepdims=True))  # over samples
 
             betas = jnp.einsum("ks,nsd->nkd", Amat, eps)
             # Statistical test
             betas_norm = jnp.einsum("nkd,kl->nld", betas, prefactor)
             df = betas_norm.shape[-1]
-            ts = (betas_norm ** 2).sum(axis=-1)
+            ts = (betas_norm**2).sum(axis=-1)
             pvals = 1 - jax.scipy.stats.chi2.cdf(ts, df=df)
 
             # Decoding
             betas_ = betas.transpose((1, 0, 2))  # (n_metadata, n_cells, n_latent)
             betas_ = betas_ * eps_.std(axis=1)
             lfcs = jnp.einsum("lg,knl->kng", self.module.params["px"]["Dense_0"]["kernel"], betas_)
-            return dict(
-                beta=betas,
-                effect_size=ts,
-                pvalue=pvals,
-                lfc=lfcs,
-            )
+            return {
+                "beta": betas,
+                "effect_size": ts,
+                "pvalue": pvals,
+                "lfc": lfcs,
+            }
 
         Xmat = []
         Xmat_names = []
@@ -704,6 +737,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             Xmat_names.append(cov_names)
         Xmat_names = np.concatenate(Xmat_names)
         Xmat = np.concatenate(Xmat, axis=1).astype(np.float32)
+        Xmat = Xmat[donor_mask]
+
         if normalize_design_matrix:
             Xmat = (Xmat - Xmat.mean(axis=0)) / (1e-6 + Xmat.std(axis=0))
         if offset_design_matrix:
@@ -770,7 +805,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             coords={"cell_name": adata.obs_names, "covariate": Xmat_names},
             name="padj",
         )
-        res =  {
+        res = {
             "beta": beta,
             "effect_size": effect_size,
             "pvalue": pvalue,
@@ -791,7 +826,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             res["lfc"] = lfc
         data = xr.Dataset(res)
         return data
-
 
     def compute_cell_scores(
         self,

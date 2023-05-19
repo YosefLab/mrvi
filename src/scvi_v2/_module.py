@@ -85,6 +85,7 @@ class _DecoderZXAttention(nn.Module):
     low_dim_batch: bool = True
     activation: Callable = nn.gelu
     batch_values: bool = True
+    use_conditional_norm: bool = False
 
     @nn.compact
     def __call__(
@@ -98,7 +99,12 @@ class _DecoderZXAttention(nn.Module):
 
         has_mc_samples = z.ndim == 3
         z_stop = z if not self.stop_gradients else jax.lax.stop_gradient(z)
-        z_ = nn.LayerNorm(name="u_ln")(z_stop)
+
+        if self.use_conditional_norm:
+            z_dim = z.shape[-1]
+            z_ = ConditionalNormalization(z_dim, self.n_batch)(z_stop, batch_covariate, training=training)
+        else:
+            z_ = nn.LayerNorm(name="u_ln")(z_stop)
 
         batch_covariate = batch_covariate.astype(int).flatten()
 
@@ -113,8 +119,8 @@ class _DecoderZXAttention(nn.Module):
             res_dim = self.n_in if self.low_dim_batch else self.n_out
 
             if self.batch_values:
-                query_embed=z_
-                kv_embed=batch_embed
+                query_embed = z_
+                kv_embed = batch_embed
             else:
                 query_embed = batch_embed
                 kv_embed = z_
@@ -220,7 +226,9 @@ class _EncoderUZ2(nn.Module):
     activation: Callable = nn.gelu
 
     @nn.compact
-    def __call__(self, u: NdArray, sample_covariate: NdArray, batch_covariate: NdArray, training: Optional[bool] = None):
+    def __call__(
+        self, u: NdArray, sample_covariate: NdArray, batch_covariate: NdArray, training: Optional[bool] = None
+    ):
         training = nn.merge_param("training", self.training, training)
         sample_covariate = sample_covariate.astype(int).flatten()
         self.n_latent_u if self.n_latent_u is not None else self.n_latent
@@ -267,7 +275,9 @@ class _EncoderUZ2Attention(nn.Module):
     use_conditional_norm: bool = False
 
     @nn.compact
-    def __call__(self, u: NdArray, sample_covariate: NdArray, batch_covariate: NdArray, training: Optional[bool] = None):
+    def __call__(
+        self, u: NdArray, sample_covariate: NdArray, batch_covariate: NdArray, training: Optional[bool] = None
+    ):
         training = nn.merge_param("training", self.training, training)
         sample_covariate = sample_covariate.astype(int).flatten()
         self.n_latent_u if self.n_latent_u is not None else self.n_latent
@@ -279,7 +289,9 @@ class _EncoderUZ2Attention(nn.Module):
             sample_covariate
         )  # (batch, n_latent_sample)
         if self.use_conditional_norm:
-            sample_embed = ConditionalNormalization(self.n_latent_sample, self.n_batch)(sample_embed, batch_covariate, training=training)
+            sample_embed = ConditionalNormalization(self.n_latent_sample, self.n_batch)(
+                sample_embed, batch_covariate, training=training
+            )
         # sample_embed = nn.LayerNorm(name="sample_embed_ln")(sample_embed)
         if has_mc_samples:
             sample_embed = jnp.tile(sample_embed, (u_.shape[0], 1, 1))

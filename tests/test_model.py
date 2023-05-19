@@ -9,6 +9,7 @@ from scvi_v2 import MrVI, MrVIReduction
 def test_mrvi():
     adata = synthetic_iid()
     adata.obs["sample"] = np.random.choice(15, size=adata.shape[0])
+    adata.obs["sample_str"] = "sample_" + adata.obs["sample"].astype(str)
     meta1 = np.random.randint(0, 2, size=15)
     adata.obs["meta1"] = meta1[adata.obs["sample"].values]
 
@@ -29,10 +30,21 @@ def test_mrvi():
     model.train(2, check_val_every_n_epoch=1, train_size=0.5)
     model.get_local_sample_distances(normalize_distances=True)
     donor_keys = ["meta1_cat", "meta2", "cont_cov"]
-    model.perform_multivariate_analysis(
-        donor_keys=donor_keys,
-    )
+    model.perform_multivariate_analysis(donor_keys=donor_keys)
 
+    MrVI.setup_anndata(adata, sample_key="sample_str", batch_key="batch", continuous_covariate_keys=["cont_cov"])
+    model = MrVI(
+        adata,
+        px_nn_flavor="attention",
+        qz_nn_flavor="attention",
+    )
+    model.train(2, check_val_every_n_epoch=1, train_size=0.5)
+    model.get_local_sample_distances(normalize_distances=True)
+    donor_keys = ["meta1_cat", "meta2", "cont_cov"]
+    donor_subset = [f"sample_{i}" for i in range(8)]
+    model.perform_multivariate_analysis(donor_keys=donor_keys, donor_subset=donor_subset)
+
+    MrVI.setup_anndata(adata, sample_key="sample", batch_key="batch", continuous_covariate_keys=["cont_cov"])
     model = MrVI(
         adata,
         n_latent=n_latent,
@@ -93,9 +105,7 @@ def test_mrvi():
         adata,
         n_latent=n_latent,
         scale_observations=True,
-        qz_kwargs={
-            "use_map": False, "stop_gradients": False, "stop_gradients_mlp": True
-        },
+        qz_kwargs={"use_map": False, "stop_gradients": False, "stop_gradients_mlp": True},
         px_kwargs={"low_dim_batch": False, "stop_gradients": False, "stop_gradients_mlp": True},
         px_nn_flavor="attention",
         qz_nn_flavor="attention",
@@ -104,7 +114,6 @@ def test_mrvi():
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)
     model.get_local_sample_distances(normalize_distances=True)
     model.get_local_sample_distances(normalize_distances=False)
-
 
     model = MrVI(
         adata,

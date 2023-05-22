@@ -222,6 +222,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         batch_size: Optional[int] = None,
         use_vmap: bool = True,
         norm: str = "l2",
+        mc_samples: int = 10,
     ) -> xr.Dataset:
         """
         Compute local statistics from counterfactual sample representations.
@@ -281,6 +282,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                     sample_index=sample_index,
                     cf_sample=cf_sample,
                     use_mean=use_mean,
+                    mc_samples=mc_samples
                 )["z"]
 
             if use_vmap:
@@ -313,12 +315,14 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             stacked_rngs = self._generate_stacked_rngs(cf_sample.shape[0])
 
             # Compute necessary inputs.
+            print(reqs)
             if reqs.needs_mean_representations:
                 mean_zs_ = mapped_inference_fn(
                     stacked_rngs=stacked_rngs,
                     x=jnp.array(inf_inputs["x"]),
                     sample_index=jnp.array(inf_inputs["sample_index"]),
                     cf_sample=jnp.array(cf_sample),
+                    mc_samples=1,
                     use_mean=True,
                 )
                 mean_zs = xr.DataArray(
@@ -334,29 +338,35 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                     sample_index=jnp.array(inf_inputs["sample_index"]),
                     cf_sample=jnp.array(cf_sample),
                     use_mean=False,
+                    mc_samples=mc_samples,
                 )
+                print('sampled_zs_', sampled_zs_.shape)
+                
                 sampled_zs = xr.DataArray(
                     sampled_zs_,
-                    dims=["cell_name", "sample", "latent_dim"],
+                    dims=["cell_name", "mc_samples", "sample", "latent_dim"],
                     coords={"cell_name": self.adata.obs_names[indices], "sample": self.sample_order},
                     name="sample_representations",
                 )
 
-            if reqs.needs_mean_distances or reqs.needs_normalized_distances:
-                mean_dists = self._compute_distances_from_representations(mean_zs_, indices, norm=norm)
-
-                if reqs.needs_normalized_distances:
-                    if norm != "l2":
-                        raise ValueError(f"Norm must be 'l2' when using normalized distances. Got {norm}.")
-                    normalization_means, normalization_vars = self._compute_local_baseline_dists(array_dict)
-                    normalization_means = normalization_means.reshape(-1, 1, 1)
-                    normalization_vars = normalization_vars.reshape(-1, 1, 1)
-                    normalized_dists = np.clip(mean_dists - normalization_means, a_min=0, a_max=None) / (
-                        normalization_vars**0.5
-                    )
-
             if reqs.needs_sampled_distances:
                 sampled_dists = self._compute_distances_from_representations(sampled_zs_, indices, norm=norm)
+                print('sampled_dists', sampled_dists)
+                
+            if reqs.needs_normalized_distances:
+                if norm != "l2":
+                    raise ValueError(f"Norm must be 'l2' when using normalized distances. Got {norm}.")
+                normalization_means, normalization_vars = self._compute_local_baseline_dists(array_dict)
+                print('normalization_means', normalization_means.shape)
+                normalization_means = normalization_means.reshape(-1, 1, 1)
+                normalization_vars = normalization_vars.reshape(-1, 1, 1)
+                normalized_dists = np.clip(sampled_dists - normalization_means, a_min=0, a_max=None).mean(1) / (
+                    normalization_vars**0.5 + normalization_vars**0.5
+                )
+                print('normalized_dists', normalized_dists.shape)
+                
+            if reqs.needs_mean_distances:
+                mean_dists = self._compute_distances_from_representations(mean_zs_, indices, norm=norm)
 
             # Compute each reduction
             for r in reductions:
@@ -665,15 +675,19 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         donor_mask = (
             np.isin(self.sample_order, donor_subset) if donor_subset is not None else np.ones(n_sample, dtype=bool)
         )
-        donor_mask = jnp.array(donor_mask)
+        donor_mask = np.array(donor_mask)
 
         @partial(jax.jit, static_argnames=["use_mean"])
         def mapped_inference_fn(
             stacked_rngs,
             x,
             sample_index,
+            batch_index,
+            continuous_covs,
             cf_sample,
             use_mean,
+            eps_lfc=1e-3,
+            stacked_rngs_de=None
         ):
             def inference_fn(
                 rngs,
@@ -714,14 +728,48 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             # Decoding
             betas_ = betas.transpose((1, 0, 2))  # (n_metadata, n_cells, n_latent)
             betas_ = betas_ * eps_.std(axis=1)
-            lfcs = jnp.einsum("lg,knl->kng", self.module.params["px"]["Dense_0"]["kernel"], betas_)
-            return {
-                "beta": betas,
-                "effect_size": ts,
-                "pvalue": pvals,
-                "lfc": lfcs,
-            }
+            if store_lfc:
+                # Xmat_hard = jnp.ceil(Xmat).T
+                # positive_category = jnp.einsum("ks,nsd->knd", Xmat_hard, betas_)
+                # negative_category = jnp.einsum("ks,nsd->knd", jnp.ones_like(Xmat_hard) - Xmat_hard, betas_)
+                
+                def h_inference_fn(rngs, extra_eps):
+                    return self.module.apply(
+                        vars_in,
+                        rngs=rngs,
+                        method=self.module.compute_h_from_x_eps,
+                        x=x,
+                        extra_eps=extra_eps,
+                        sample_index=sample_index,
+                        batch_index=batch_index,
+                        cf_sample=None,
+                        continuous_covs=continuous_covs,
+                        mc_samples=50,
+                    )
+                
+                x_1 = jax.vmap(h_inference_fn, in_axes=(0), out_axes=0)(
+                    rngs=stacked_rngs_de,
+                    extra_eps=betas_,
+                )
+                
+                x_2 = jax.vmap(h_inference_fn, in_axes=(0), out_axes=0)(
+                    rngs=stacked_rngs_de,
+                    extra_eps=-betas_,
+                )
 
+                lfcs = jnp.log(x_1 + eps_lfc) - jnp.log(x_2 + eps_lfc)
+                baseline_expression = x_1
+               
+            else:
+                lfcs = None
+                baseline_expression = None
+            return dict(
+                beta=betas,
+                effect_size=ts,
+                pvalue=pvals,
+                lfc=lfcs.mean(1),
+                baseline_expression=baseline_expression.mean(1),
+            )
         Xmat = []
         Xmat_names = []
         for donor_key in tqdm(donor_keys):
@@ -755,25 +803,35 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         effect_size = []
         pvalue = []
         lfc = []
+        baseline_expression = []
         for array_dict in tqdm(scdl):
             n_cells = array_dict[REGISTRY_KEYS.X_KEY].shape[0]
             cf_sample = np.broadcast_to(np.arange(n_sample)[:, None, None], (n_sample, n_cells, 1))
             inf_inputs = self.module._get_inference_input(
                 array_dict,
             )
+            continuous_covs = inf_inputs.get(REGISTRY_KEYS.CONT_COVS_KEY, None)
+            if continuous_covs is not None:
+                continuous_covs = jnp.array(continuous_covs)
             stacked_rngs = self._generate_stacked_rngs(cf_sample.shape[0])
+            if store_lfc:
+                stacked_rngs_de = self._generate_stacked_rngs(Xmat.shape[1])
             res = mapped_inference_fn(
                 stacked_rngs=stacked_rngs,
                 x=jnp.array(inf_inputs["x"]),
                 sample_index=jnp.array(inf_inputs["sample_index"]),
+                batch_index=jnp.array(array_dict[REGISTRY_KEYS.BATCH_KEY]),
+                continuous_covs=continuous_covs,
                 cf_sample=jnp.array(cf_sample),
-                use_mean=True,
+                use_mean=False,
+                stacked_rngs_de=stacked_rngs_de,
             )  # (n_cells, n_donors, n_latent)
             beta.append(np.array(res["beta"]))
             effect_size.append(np.array(res["effect_size"]))
             pvalue.append(np.array(res["pvalue"]))
             if store_lfc:
                 lfc.append(np.array(res["lfc"]))
+                baseline_expression.append(np.array(res["baseline_expression"]))
         beta = np.concatenate(beta, axis=0)
         effect_size = np.concatenate(effect_size, axis=0)
         pvalue = np.concatenate(pvalue, axis=0)
@@ -824,6 +882,19 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 name="lfc",
             )
             res["lfc"] = lfc
+            
+            baseline_expression = np.concatenate(baseline_expression, axis=1)
+            baseline_expression = xr.DataArray(
+                baseline_expression,
+                dims=["covariate", "cell_name", "gene"],
+                coords={
+                    "covariate": Xmat_names,
+                    "cell_name": adata.obs_names,
+                    "gene": adata.var_names,
+                },
+                name="baseline_expression",
+            )
+            res["baseline_expression"] = baseline_expression
         data = xr.Dataset(res)
         return data
 

@@ -72,7 +72,7 @@ class _DecoderZXAttention(nn.Module):
     n_out: int
     n_batch: int
     n_latent_sample: int = 16
-    h_activation: Callable = nn.softmax
+    h_activation: Callable = nn.softplus
     n_channels: int = 4
     n_heads: int = 2
     dropout_rate: float = 0.1
@@ -526,16 +526,15 @@ class MrVAE(JaxBaseModuleClass):
             eps = inference_outputs["z"] - inference_outputs["z_base"]
             if self.z_u_prior:
                 peps = dist.Normal(0, jnp.exp(self.pz_scale))
-                kl_z = dist.kl_divergence(qeps, peps).sum(-1) if qeps is not None else -peps.log_prob(eps).sum(-1)
+                kl_z = -peps.log_prob(eps).sum(-1)
             else:
-                kl_z = 0
-            kl_z += (
-                -dist.Normal(inference_outputs["z_base"], jnp.exp(self.z_u_prior_scale))
-                .log_prob(inference_outputs["z"])
-                .sum(-1)
-                if self.z_u_prior_scale is not None
-                else 0
-            )
+                kl_z = (
+                    -dist.Normal(inference_outputs["z_base"], jnp.exp(self.z_u_prior_scale))
+                    .log_prob(inference_outputs["z"])
+                    .sum(-1)
+                    if self.z_u_prior_scale is not None
+                    else 0
+                )
         else:
             kl_z = (
                 -dist.Normal(inference_outputs["z_base"], jnp.exp(self.z_u_prior_scale))
@@ -584,3 +583,17 @@ class MrVAE(JaxBaseModuleClass):
         }
         generative_outputs = self.generative(**generative_inputs)
         return generative_outputs["h"]
+
+    def compute_h_from_x_eps(self, x, sample_index, batch_index, extra_eps, cf_sample=None, continuous_covs=None, mc_samples=10):
+        """Compute normalized gene expression from observations using predefined eps"""
+        library = 7.0 * jnp.ones_like(sample_index)  # placeholder, has no effect on the value of h.
+        inference_outputs = self.inference(x, sample_index, mc_samples=mc_samples, cf_sample=cf_sample, use_mean=False)
+        print(inference_outputs["z"], extra_eps)
+        generative_inputs = {
+            "z": inference_outputs["u"] + extra_eps,
+            "library": library,
+            "batch_index": batch_index,
+            "continuous_covs": continuous_covs,
+        }
+        generative_outputs = self.generative(**generative_inputs)
+        return generative_outputs["px"].mean

@@ -338,8 +338,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                     use_mean=False,
                 )
                 sampled_zs_ = sampled_zs_.transpose((1, 0, 2, 3))
-                print('sampled_zs_', sampled_zs_[0, :, 0, 0])
-                
                 sampled_zs = xr.DataArray(
                     sampled_zs_,
                     dims=["cell_name", "mc_sample", "sample", "latent_dim"],
@@ -355,12 +353,13 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                     inference_kwargs={"use_mean": False, "mc_samples": mc_samples}
                 )
                 outputs = jit_inference_fn(self.module.rngs, array_dict)
-                sampled_zs_null = outputs["z"].transpose((1, 0, 2, 3))
+                sampled_zs_null = outputs["z"].transpose((1, 0, 2))
                 
-                sampled_zs_normal = (sampled_zs_ - sampled_zs_null.reshape(-1, mc_samples, 1, self.module.n_latent)) / (
-                    sampled_zs_null.var(0).reshape(-1, 1, self.module.n_latent)**0.5
-                )
-                normalized_dists = self._compute_distances_from_representations(sampled_zs_normal, indices, norm=norm).mean(1)
+                dists_null = self._compute_distances_from_representations(
+                    sampled_zs_null, indices, norm=norm, return_xarray=False).reshape(len(indices), -1)
+                
+                normalized_dists = ((sampled_dists - dists_null.mean(-1).reshape(-1, 1, 1, 1))/(
+                    jnp.sqrt(dists_null.var(-1).reshape(-1, 1, 1, 1)))).mean('mc_sample')
                 
             if reqs.needs_mean_distances:
                 mean_dists = self._compute_distances_from_representations(mean_zs_, indices, norm=norm)
@@ -413,75 +412,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
         return xr.Dataset(data_vars=final_data_arrs)
 
-    def _compute_local_baseline_dists(self, batch: dict, mc_samples: int = 250) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Approximate the distributions used as baselines for normalizing the local sample distances.
-
-        Approximates the means and variances of the Euclidean distance between two samples of
-        the z latent representation for the original sample for each cell in ``adata``.
-
-        Reference: https://www.overleaf.com/read/mhdxcrknzxpm.
-
-        Parameters
-        ----------
-        batch
-            Batch of data to compute the local sample representation for.
-        mc_samples
-            Number of Monte Carlo samples to use for computing the local baseline distributions.
-        """
-
-        def get_A_s(module, u, sample_covariate):
-            sample_covariate = sample_covariate.astype(int).flatten()
-            if not module.qz.use_nonlinear:
-                A_s = module.qz.A_s_enc(sample_covariate)
-            else:
-                # A_s output by a non-linear function without an explicit intercept
-                sample_one_hot = jax.nn.one_hot(sample_covariate, module.qz.n_sample)
-                A_s_dec_inputs = jnp.concatenate([u, sample_one_hot], axis=-1)
-                A_s = module.qz.A_s_enc(A_s_dec_inputs, training=False)
-            # cells by n_latent by n_latent
-            return A_s.reshape(sample_covariate.shape[0], module.qz.n_latent, -1)
-
-        def apply_get_A_s(u, sample_covariate):
-            vars_in = {"params": self.module.params, **self.module.state}
-            rngs = self.module.rngs
-            A_s = self.module.apply(vars_in, rngs=rngs, method=get_A_s, u=u, sample_covariate=sample_covariate)
-            return A_s
-
-        if self.can_compute_normalized_dists:
-            jit_inference_fn = self.module.get_jit_inference_fn()
-            qu = jit_inference_fn(self.module.rngs, batch)["qu"]
-            qu_vars_diag = jax.vmap(jnp.diag)(qu.variance)
-
-            sample_index = self.module._get_inference_input(batch)["sample_index"]
-            A_s = apply_get_A_s(qu.mean, sample_index)  # use mean of latent representation to compute the baseline
-            B = jnp.expand_dims(jnp.eye(A_s.shape[1]), 0) + A_s
-            u_diff_sigma = 2 * jnp.einsum(
-                "cij, cjk, clk -> cil", B, qu_vars_diag, B
-            )  # 2 * (I + A_s) @ qu_vars_diag @ (I + A_s).T
-            eigvals = jax.vmap(jnp.linalg.eigh)(u_diff_sigma)[0].astype(float)
-            normal_rng = self.module.rngs["params"]  # Hack to get new rng for normal samples.
-            normal_samples = jax.random.normal(
-                normal_rng, shape=(eigvals.shape[0], mc_samples, eigvals.shape[1])
-            )  # n_cells by mc_samples by n_latent
-            squared_l2_dists = jnp.sum(jnp.einsum("cij, cj -> cij", (normal_samples**2), eigvals), axis=2)
-            l2_dists = squared_l2_dists**0.5
-        else:
-            mc_samples_per_cell = mc_samples * 2  # need double for pairs of samples to compute distance between
-            jit_inference_fn = self.module.get_jit_inference_fn(
-                inference_kwargs={"use_mean": False, "mc_samples": mc_samples_per_cell}
-            )
-
-            outputs = jit_inference_fn(self.module.rngs, batch)
-
-            # figure out how to compute dists here
-            z = outputs["z"]
-            first_half_z, second_half_z = z[:mc_samples], z[mc_samples:]
-            l2_dists = jnp.sqrt(jnp.sum((first_half_z - second_half_z) ** 2, axis=2)).T
-
-        return np.array(jnp.mean(l2_dists, axis=1)), np.array(jnp.var(l2_dists, axis=1))
-
-    def _compute_distances_from_representations(self, reps, indices, norm="l2"):
+    def _compute_distances_from_representations(self, reps, indices, return_xarray=True, norm="l2"):
         @jax.jit
         def _compute_distance(rep):
             delta_mat = jnp.expand_dims(rep, 0) - jnp.expand_dims(rep, 1)
@@ -496,29 +427,32 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             return res
         if len(reps.shape) == 3:
             dists = jax.vmap(_compute_distance)(reps)
-            return xr.DataArray(
-                dists,
-                dims=["cell_name", "sample_x", "sample_y"],
-                coords={
-                    "cell_name": self.adata.obs_names[indices],
-                    "sample_x": self.sample_order,
-                    "sample_y": self.sample_order,
-                },
-                name="mean_distances",
-            )
+            if return_xarray:
+                dists = xr.DataArray(
+                    dists,
+                    dims=["cell_name", "sample_x", "sample_y"],
+                    coords={
+                        "cell_name": self.adata.obs_names[indices],
+                        "sample_x": self.sample_order,
+                        "sample_y": self.sample_order,
+                    },
+                    name="mean_distances",
+                )
         else:
             dists = jax.vmap(jax.vmap(_compute_distance))(reps)
-            return xr.DataArray(
-                dists,
-                dims=["cell_name","mc_sample", "sample_x", "sample_y"],
-                coords={
-                    "cell_name": self.adata.obs_names[indices],
-                    "mc_sample": np.arange(reps.shape[1]),
-                    "sample_x": self.sample_order,
-                    "sample_y": self.sample_order,
-                },
-                name="sample_distances",
-            )
+            if return_xarray:
+                dists =  xr.DataArray(
+                    dists,
+                    dims=["cell_name","mc_sample", "sample_x", "sample_y"],
+                    coords={
+                        "cell_name": self.adata.obs_names[indices],
+                        "mc_sample": np.arange(reps.shape[1]),
+                        "sample_x": self.sample_order,
+                        "sample_y": self.sample_order,
+                    },
+                    name="sample_distances",
+                )
+        return dists
 
     def get_local_sample_representation(
         self,
@@ -637,285 +571,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             mc_samples=mc_samples
         )
         
-    def perform_multivariate_analysis_grouped(
-        self,
-        adata=None,
-        donor_keys: List[Tuple] = None,
-        donor_subset: Optional[List[str]] = None,
-        groupby: Optional[List[str]] = None,
-        batch_size=256,
-        use_vmap: bool = True,
-        normalize_design_matrix: bool = True,
-        offset_design_matrix: bool = True,
-        store_lfc: bool = False,
-    ) -> xr.Dataset:
-        """Utility function to perform celltype-specific multivariate analysis.
-
-        Parameters
-        ----------
-        adata
-            AnnData object to use for computing the local sample representation.
-            If None, the analysis is performed on all cells in the dataset.
-        donor_keys
-            List of donor metadata to consider for the multivariate analysis.
-            These keys should be present in `adata.obs`.
-        donor_subset
-            Optional list of donors to consider for the multivariate analysis.
-            If None, all donors are considered.
-        groupby
-            Metadata to group the cells.
-        batch_size
-            Batch size to use for computing the local sample representation.
-        use_vmap
-            Whether to use vmap for computing the local sample representation.
-        normalize_design_matrix
-            Whether to normalize the design matrix.
-        offset_design_matrix
-            Whether to offset the design matrix.
-        store_lfc
-            Whether to store the log-fold changes in the module.
-            Storing log-fold changes is memory-intensive and may require to specify
-            a smaller set of cells to analyze, e.g., by specifying `adata`.
-        """
-        adata = self.adata if adata is None else adata
-        self._check_if_trained(warn=False)
-        # Hack to ensure new AnnDatas have indices.
-        if "_indices" not in adata.obs:
-            adata.obs["_indices"] = np.arange(adata.n_obs).astype(int)
-
-        adata = self._validate_anndata(adata)
-        scdl = self._make_data_loader(adata=adata, indices=None, batch_size=batch_size, iter_ndarray=True)
-        n_sample = self.summary_stats.n_sample
-        vars_in = {"params": self.module.params, **self.module.state}
-
-        donor_mask = (
-            np.isin(self.sample_order, donor_subset) if donor_subset is not None else np.ones(n_sample, dtype=bool)
-        )
-        donor_mask = np.array(donor_mask)
-
-        @partial(jax.jit, static_argnames=["use_mean"])
-        def mapped_inference_fn(
-            stacked_rngs,
-            x,
-            sample_index,
-            batch_index,
-            continuous_covs,
-            cf_sample,
-            use_mean,
-            eps_lfc=1e-3,
-            stacked_rngs_de=None
-        ):
-            def inference_fn(
-                rngs,
-                cf_sample,
-            ):
-                return self.module.apply(
-                    vars_in,
-                    rngs=rngs,
-                    method=self.module.inference,
-                    x=x,
-                    sample_index=sample_index,
-                    cf_sample=cf_sample,
-                    use_mean=use_mean,
-                )["eps"]
-
-            if use_vmap:
-                eps_ = jax.vmap(inference_fn, in_axes=(0, 0), out_axes=-2)(
-                    stacked_rngs,
-                    cf_sample,
-                )
-            else:
-
-                def per_sample_inference_fn(pair):
-                    rngs, cf_sample = pair
-                    return inference_fn(rngs, cf_sample)
-
-                eps_ = jax.lax.transpose(jax.lax.map(per_sample_inference_fn, (stacked_rngs, cf_sample)), (1, 0, 2))
-            eps_ = eps_[:, donor_mask]
-            eps = (eps_ - eps_.mean(axis=1, keepdims=True)) / (1e-6 + eps_.std(axis=1, keepdims=True))  # over samples
-
-            betas = jnp.einsum("ks,nsd->nkd", Amat, eps)
-            # Statistical test
-            betas_norm = jnp.einsum("nkd,kl->nld", betas, prefactor)
-            df = betas_norm.shape[-1]
-            ts = (betas_norm**2).sum(axis=-1)
-            pvals = 1 - jax.scipy.stats.chi2.cdf(ts, df=df)
-
-            # Decoding
-            betas_ = betas.transpose((1, 0, 2))  # (n_metadata, n_cells, n_latent)
-            betas_ = betas_ * eps_.std(axis=1)
-            print(eps_.std(axis=1).shape, eps_.mean(axis=1).shape)
-            if store_lfc:
-                # Xmat_hard = jnp.ceil(Xmat).T
-                # positive_category = jnp.einsum("ks,nsd->knd", Xmat_hard, betas_)
-                # negative_category = jnp.einsum("ks,nsd->knd", jnp.ones_like(Xmat_hard) - Xmat_hard, betas_)
-                
-                def h_inference_fn(rngs, extra_eps):
-                    return self.module.apply(
-                        vars_in,
-                        rngs=rngs,
-                        method=self.module.compute_h_from_x_eps,
-                        x=x,
-                        extra_eps=extra_eps,
-                        sample_index=sample_index,
-                        batch_index=batch_index,
-                        cf_sample=None,
-                        continuous_covs=continuous_covs,
-                        mc_samples=10,
-                    )
-                
-                x_1 = jax.vmap(h_inference_fn, in_axes=(0), out_axes=0)(
-                    rngs=stacked_rngs_de,
-                    extra_eps=betas_,
-                )
-                
-                x_2 = jax.vmap(h_inference_fn, in_axes=(0), out_axes=0)(
-                    rngs=stacked_rngs_de,
-                    extra_eps=-betas_,
-                )
-
-                lfcs = jnp.log(x_1 + eps_lfc) - jnp.log(x_2 + eps_lfc)
-                baseline_expression = x_1
-               
-            else:
-                lfcs = None
-                baseline_expression = None
-            return dict(
-                beta=betas,
-                effect_size=ts,
-                pvalue=pvals,
-                lfc=lfcs.mean(1),
-                baseline_expression=baseline_expression.mean(1),
-            )
-        Xmat = []
-        Xmat_names = []
-        for donor_key in tqdm(donor_keys):
-            cov = self.donor_info[donor_key]
-            if (cov.dtype == str) or (cov.dtype == "category"):
-                cov = pd.get_dummies(cov, drop_first=True)
-                cov_names = donor_key + np.array(cov.columns)
-                cov = cov.values
-            else:
-                cov_names = np.array([donor_key])
-                cov = cov.values[:, None]
-            Xmat.append(cov)
-            Xmat_names.append(cov_names)
-        Xmat_names = np.concatenate(Xmat_names)
-        Xmat = np.concatenate(Xmat, axis=1).astype(np.float32)
-        Xmat = Xmat[donor_mask]
-
-        if normalize_design_matrix:
-            Xmat = (Xmat - Xmat.mean(axis=0)) / (1e-6 + Xmat.std(axis=0))
-        if offset_design_matrix:
-            Xmat = np.concatenate([np.ones((Xmat.shape[0], 1)), Xmat], axis=1)
-            Xmat_names = np.concatenate([np.array(["offset"]), Xmat_names])
-        prefactor = sqrtm(Xmat.T @ Xmat)
-        Amat = np.linalg.pinv(Xmat.T @ Xmat) @ Xmat.T
-
-        Xmat = jnp.array(Xmat)
-        prefactor = jnp.array(prefactor)
-        Amat = jnp.array(Amat)
-
-        beta = []
-        effect_size = []
-        pvalue = []
-        lfc = []
-        baseline_expression = []
-        for array_dict in tqdm(scdl):
-            n_cells = array_dict[REGISTRY_KEYS.X_KEY].shape[0]
-            cf_sample = np.broadcast_to(np.arange(n_sample)[:, None, None], (n_sample, n_cells, 1))
-            inf_inputs = self.module._get_inference_input(
-                array_dict,
-            )
-            continuous_covs = inf_inputs.get(REGISTRY_KEYS.CONT_COVS_KEY, None)
-            if continuous_covs is not None:
-                continuous_covs = jnp.array(continuous_covs)
-            stacked_rngs = self._generate_stacked_rngs(cf_sample.shape[0])
-            if store_lfc:
-                stacked_rngs_de = self._generate_stacked_rngs(Xmat.shape[1])
-            res = mapped_inference_fn(
-                stacked_rngs=stacked_rngs,
-                x=jnp.array(inf_inputs["x"]),
-                sample_index=jnp.array(inf_inputs["sample_index"]),
-                batch_index=jnp.array(array_dict[REGISTRY_KEYS.BATCH_KEY]),
-                continuous_covs=continuous_covs,
-                cf_sample=jnp.array(cf_sample),
-                use_mean=False,
-                stacked_rngs_de=stacked_rngs_de,
-            )  # (n_cells, n_donors, n_latent)
-            beta.append(np.array(res["beta"]))
-            effect_size.append(np.array(res["effect_size"]))
-            pvalue.append(np.array(res["pvalue"]))
-            if store_lfc:
-                lfc.append(np.array(res["lfc"]))
-                baseline_expression.append(np.array(res["baseline_expression"]))
-        beta = np.concatenate(beta, axis=0)
-        effect_size = np.concatenate(effect_size, axis=0)
-        pvalue = np.concatenate(pvalue, axis=0)
-        pvalue_shape = pvalue.shape
-        padj = multipletests(pvalue.flatten(), method="fdr_bh")[1].reshape(pvalue_shape)
-
-        n_latent = beta.shape[2]
-        beta = xr.DataArray(
-            beta,
-            dims=["cell_name", "covariate", "latent_dim"],
-            coords={"cell_name": adata.obs_names, "covariate": Xmat_names, "latent_dim": np.arange(n_latent)},
-            name="beta",
-        )
-        effect_size = xr.DataArray(
-            effect_size,
-            dims=["cell_name", "covariate"],
-            coords={"cell_name": adata.obs_names, "covariate": Xmat_names},
-            name="effect_size",
-        )
-        pvalue = xr.DataArray(
-            pvalue,
-            dims=["cell_name", "covariate"],
-            coords={"cell_name": adata.obs_names, "covariate": Xmat_names},
-            name="pvalue",
-        )
-        padj = xr.DataArray(
-            padj,
-            dims=["cell_name", "covariate"],
-            coords={"cell_name": adata.obs_names, "covariate": Xmat_names},
-            name="padj",
-        )
-        res = {
-            "beta": beta,
-            "effect_size": effect_size,
-            "pvalue": pvalue,
-            "padj": padj,
-        }
-        if store_lfc:
-            lfc = np.concatenate(lfc, axis=1)
-            lfc = xr.DataArray(
-                lfc,
-                dims=["covariate", "cell_name", "gene"],
-                coords={
-                    "covariate": Xmat_names,
-                    "cell_name": adata.obs_names,
-                    "gene": adata.var_names,
-                },
-                name="lfc",
-            )
-            res["lfc"] = lfc
-            
-            baseline_expression = np.concatenate(baseline_expression, axis=1)
-            baseline_expression = xr.DataArray(
-                baseline_expression,
-                dims=["covariate", "cell_name", "gene"],
-                coords={
-                    "covariate": Xmat_names,
-                    "cell_name": adata.obs_names,
-                    "gene": adata.var_names,
-                },
-                name="baseline_expression",
-            )
-            res["baseline_expression"] = baseline_expression
-        data = xr.Dataset(res)
-        return data
-
-    def perform_multivariate_analysis(
+def perform_multivariate_analysis(
         self,
         adata=None,
         donor_keys: List[Tuple] = None,
@@ -1018,7 +674,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
             # Decoding
             betas_ = betas.transpose((1, 0, 2))  # (n_metadata, n_cells, n_latent)
-            print(betas_.shape, eps_.shape, eps_.std(axis=1).shape, eps_.mean(axis=1, keepdims=True).shape)
             betas_ = betas_ * eps_.std(axis=1) + eps_.mean(axis=1)
             if store_lfc:
                 # Xmat_hard = jnp.ceil(Xmat).T

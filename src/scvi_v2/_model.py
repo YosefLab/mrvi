@@ -22,6 +22,7 @@ from scvi.data.fields import (
     NumericalObsField,
 )
 from scvi.model.base import BaseModelClass, JaxTrainingMixin
+from sklearn.mixture import GaussianMixture
 from statsmodels.stats.multitest import multipletests
 from tqdm import tqdm
 
@@ -86,6 +87,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         obs_df = adata.obs.copy()
         obs_df = obs_df.loc[~obs_df._scvi_sample.duplicated("first")]
         self.donor_info = obs_df.set_index("_scvi_sample").sort_index()
+        self.sample_key = self.adata_manager.get_state_registry("sample").original_key
         self.sample_order = self.adata_manager.get_state_registry(MRVI_REGISTRY_KEYS.SAMPLE_KEY).categorical_mapping
 
         self.n_obs_per_sample = jnp.array(adata.obs._scvi_sample.value_counts().sort_index().values)
@@ -614,6 +616,67 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             norm=norm,
         )
 
+    def get_outlier_cell_sample_pairs(
+        self,
+        adata=None,
+        admissibility_threshold: int = 0.0,
+    ):
+        """Utils function to get outlier cell-sample pairs.
+
+        This function fits a GMM for each sample based on the latent representation of the cells in the sample. Then, for every cell, it computes the log-probability of the cell under the GMM of each sample as a measure of admissibility.
+
+        Parameters
+        ----------
+        adata
+            AnnData object containing the cells for which to compute the outlier cell-sample pairs.
+        admissibility_threshold
+            Threshold for admissibility. Cell-sample pairs with admissibility below this threshold are considered outliers.
+        """
+        adata = self.adata if adata is None else adata
+        adata = self._validate_anndata(adata)
+
+        # Compute u reps
+        us = self.get_latent_representation(adata, use_mean=True, give_z=False)
+        adata.obsm["U"] = us
+
+        log_probs = []
+        threshs = []
+        unique_samples = adata.obs[self.sample_key].unique()
+        for donor_name in tqdm(unique_samples):
+            adata_s = adata[adata.obs[self.sample_key] == donor_name].copy()
+            n_components = min(adata_s.n_obs // 4, 20)
+            gmm_ = GaussianMixture(n_components=n_components).fit(adata_s.obsm["U"])
+            log_probs_s = gmm_.score_samples(adata_s.obsm["U"]).min()
+            log_probs_ = gmm_.score_samples(adata.obsm["U"])[:, None]
+
+            threshs.append(log_probs_s)
+            log_probs.append(log_probs_)
+        log_probs = np.concatenate(log_probs, 1)
+        threshs = np.array(threshs)
+        log_ratios = log_probs - threshs
+
+        coord_info = {
+            "coords": [adata.obs_names, unique_samples],
+            "dims": ["cell", "sample"],
+        }
+        log_probs = xr.DataArray(
+            log_probs,
+            **coord_info,
+        )
+        log_ratios = xr.DataArray(
+            log_ratios,
+            **coord_info,
+        )
+        cell_sample_admissible = log_ratios > admissibility_threshold
+        results = xr.Dataset(
+            {
+                "log_probs": log_probs,
+                "log_ratios": log_ratios,
+                "is_admissible": cell_sample_admissible,
+            }
+        )
+        return results
+
     def perform_multivariate_analysis(
         self,
         adata=None,
@@ -667,7 +730,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         )
         donor_mask = jnp.array(donor_mask)
 
-        @partial(jax.jit, static_argnames=["use_mean"])
+        @partial(jax.jit, static_argnames=["use_mean", "Amat", "prefactor"])
         def mapped_inference_fn(
             stacked_rngs,
             x,

@@ -358,8 +358,11 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 dists_null = self._compute_distances_from_representations(
                     sampled_zs_null, indices, norm=norm, return_xarray=False).reshape(len(indices), -1)
                 
+                # Please do experiment and check division by variance, not sure about its effect.
                 normalized_dists = ((sampled_dists - dists_null.mean(-1).reshape(-1, 1, 1, 1))/(
                     jnp.sqrt(dists_null.var(-1).reshape(-1, 1, 1, 1)))).mean('mc_sample')
+                
+                normalized_dists = normalized_dists.clip(min=0, max=None)
                 
             if reqs.needs_mean_distances:
                 mean_dists = self._compute_distances_from_representations(mean_zs_, indices, norm=norm)
@@ -571,7 +574,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             mc_samples=mc_samples
         )
         
-def perform_multivariate_analysis(
+    def perform_multivariate_analysis(
         self,
         adata=None,
         donor_keys: List[Tuple] = None,

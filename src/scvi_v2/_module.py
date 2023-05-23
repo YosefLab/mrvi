@@ -588,9 +588,8 @@ class MrVAE(JaxBaseModuleClass):
         """Compute normalized gene expression from observations using predefined eps"""
         library = 7.0 * jnp.ones_like(sample_index)  # placeholder, has no effect on the value of h.
         inference_outputs = self.inference(x, sample_index, mc_samples=mc_samples, cf_sample=cf_sample, use_mean=False)
-        print(inference_outputs["z"], extra_eps)
         generative_inputs = {
-            "z": inference_outputs["u"] + extra_eps,
+            "z": inference_outputs["z_base"] + extra_eps,
             "library": library,
             "batch_index": batch_index,
             "continuous_covs": continuous_covs,

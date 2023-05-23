@@ -33,6 +33,7 @@ def _parse_local_statistics_requirements(
             needs_sampled_dists = True
         elif r.input == "normalized_distances":
             needs_sampled_rep = True
+            needs_sampled_dists = True
             needs_normalized_dists = True
         else:
             raise ValueError(f"Unknown reduction input: {r.input}")

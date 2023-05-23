@@ -360,7 +360,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 
                 # Please do experiment and check division by variance, not sure about its effect.
                 normalized_dists = ((sampled_dists - dists_null.mean(-1).reshape(-1, 1, 1, 1))/(
-                    jnp.sqrt(dists_null.var(-1).reshape(-1, 1, 1, 1)))).mean('mc_sample')
+                    dists_null.mean(-1).reshape(-1, 1, 1, 1))).mean('mc_sample')
                 
                 normalized_dists = normalized_dists.clip(min=0, max=None)
                 

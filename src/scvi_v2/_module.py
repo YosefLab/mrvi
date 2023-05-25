@@ -72,7 +72,7 @@ class _DecoderZXAttention(nn.Module):
     n_out: int
     n_batch: int
     n_latent_sample: int = 16
-    h_activation: Callable = nn.softplus
+    h_activation: Callable = nn.softmax
     n_channels: int = 4
     n_heads: int = 2
     dropout_rate: float = 0.1

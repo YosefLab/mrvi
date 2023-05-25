@@ -349,18 +349,12 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 sampled_dists = self._compute_distances_from_representations(sampled_zs_, indices, norm=norm)
                 
             if reqs.needs_normalized_distances:
-                jit_inference_fn = self.module.get_jit_inference_fn(
-                    inference_kwargs={"use_mean": False, "mc_samples": mc_samples}
-                )
-                outputs = jit_inference_fn(self.module.rngs, array_dict)
-                sampled_zs_null = outputs["z"].transpose((1, 0, 2))
-                
-                dists_null = self._compute_distances_from_representations(
-                    sampled_zs_null, indices, norm=norm, return_xarray=False).reshape(len(indices), -1)
+                dists_null, dists_mc_error = self._compute_local_baseline_dists(
+                    array_dict, mc_samples, norm=norm, indices=indices)
                 
                 # Please do experiment and check division by variance, not sure about its effect.
-                normalized_dists = ((sampled_dists - dists_null.mean(-1).reshape(-1, 1, 1, 1))/(
-                    dists_null.mean(-1).reshape(-1, 1, 1, 1))).mean('mc_sample')
+                normalized_dists = ((
+                    sampled_dists - dists_null - dists_mc_error)/dists_null).mean('mc_sample')
                 
                 normalized_dists = normalized_dists.clip(min=0, max=None)
                 
@@ -415,12 +409,90 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
         return xr.Dataset(data_vars=final_data_arrs)
 
+    def _compute_local_baseline_dists(
+        self,
+        batch: dict,
+        mc_samples: int,
+        norm: str,
+        indices: list) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Approximate the distributions used as baselines for normalizing the local sample distances.
+
+        Approximates the means and variances of the Euclidean distance between two samples of
+        the z latent representation for the original sample for each cell in ``adata``.
+
+        Reference: https://www.overleaf.com/read/mhdxcrknzxpm.
+
+        Parameters
+        ----------
+        batch
+            Batch of data to compute the local sample representation for.
+        mc_samples
+            Number of Monte Carlo samples to use for computing the local baseline distributions.
+        """
+
+        def get_A_s(module, u, sample_covariate):
+            sample_covariate = sample_covariate.astype(int).flatten()
+            if not module.qz.use_nonlinear:
+                A_s = module.qz.A_s_enc(sample_covariate)
+            else:
+                # A_s output by a non-linear function without an explicit intercept
+                sample_one_hot = jax.nn.one_hot(sample_covariate, module.qz.n_sample)
+                A_s_dec_inputs = jnp.concatenate([u, sample_one_hot], axis=-1)
+                A_s = module.qz.A_s_enc(A_s_dec_inputs, training=False)
+            # cells by n_latent by n_latent
+            return A_s.reshape(sample_covariate.shape[0], module.qz.n_latent, -1)
+
+        def apply_get_A_s(u, sample_covariate):
+            vars_in = {"params": self.module.params, **self.module.state}
+            rngs = self.module.rngs
+            A_s = self.module.apply(vars_in, rngs=rngs, method=get_A_s, u=u, sample_covariate=sample_covariate)
+            return A_s
+
+        if self.can_compute_normalized_dists and norm=='l2':
+            jit_inference_fn = self.module.get_jit_inference_fn()
+            qu = jit_inference_fn(self.module.rngs, batch)["qu"]
+            qu_vars_diag = jax.vmap(jnp.diag)(qu.variance)
+
+            sample_index = self.module._get_inference_input(batch)["sample_index"]
+            A_s = apply_get_A_s(qu.mean, sample_index)  # use mean of latent representation to compute the baseline
+            B = jnp.expand_dims(jnp.eye(A_s.shape[1]), 0) + A_s
+            u_diff_sigma = 2 * jnp.einsum(
+                "cij, cjk, clk -> cil", B, qu_vars_diag, B
+            )  # 2 * (I + A_s) @ qu_vars_diag @ (I + A_s).T
+            eigvals = jax.vmap(jnp.linalg.eigh)(u_diff_sigma)[0].astype(float)
+            normal_rng = self.module.rngs["params"]  # Hack to get new rng for normal samples.
+            normal_samples = jax.random.normal(
+                normal_rng, shape=(eigvals.shape[0], mc_samples, eigvals.shape[1])
+            )  # n_cells by mc_samples by n_latent
+            squared_l2_dists = jnp.sum(jnp.einsum("cij, cj -> cij", (normal_samples**2), eigvals), axis=2)
+            l2_dists = squared_l2_dists**0.5
+            
+            return l2_dists, 0.
+        else:
+            mc_samples_per_cell = mc_samples * 2  # need double for pairs of samples to compute distance between
+            jit_inference_fn = self.module.get_jit_inference_fn(
+                inference_kwargs={"use_mean": False, "mc_samples": mc_samples_per_cell}
+            )
+            outputs = jit_inference_fn(self.module.rngs, batch)
+            sampled_zs_null = outputs["z"].transpose((1, 0, 2))
+            
+            dists_null = self._compute_distances_from_representations(
+                sampled_zs_null[:, :mc_samples, :], indices, norm=norm, return_xarray=False).reshape(
+                    len(indices), -1)/(mc_samples**2 - mc_samples)
+                
+            dists_mc_error = self._compute_distances_from_representations(
+                sampled_zs_null[:, mc_samples:, :], indices, norm=norm, return_xarray=False).reshape(
+                    len(indices), -1)/(mc_samples**2 - mc_samples) - dists_null
+            
+            return dists_null.sum(-1).reshape(-1, 1, 1, 1), np.percentile(np.abs(dists_mc_error.sum(-1)), 90)
+
     def _compute_distances_from_representations(self, reps, indices, return_xarray=True, norm="l2"):
         @jax.jit
         def _compute_distance(rep):
             delta_mat = jnp.expand_dims(rep, 0) - jnp.expand_dims(rep, 1)
             if norm == "l2":
-                res = (delta_mat**2).sum(-1)
+                res = jnp.sqrt((delta_mat**2).sum(-1))
             elif norm == "l1":
                 res = jnp.abs(delta_mat).sum(-1)
             elif norm == "linf":

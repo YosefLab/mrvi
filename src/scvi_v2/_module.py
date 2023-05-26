@@ -504,6 +504,7 @@ class MrVAE(JaxBaseModuleClass):
 
         if self.u_prior_mixture:
             one_hot_labels = jax.nn.one_hot(label_index, self.n_labels)
+            # kind of arbitrary factor, I found it well balanced but might require adjustment.
             cats = dist.Categorical(logits=10*one_hot_labels+self.u_prior_logits)
             normal_dists = dist.Normal(self.u_prior_means, jnp.exp(self.u_prior_scales))
             pu = dist.MixtureSameFamily(cats, normal_dists)

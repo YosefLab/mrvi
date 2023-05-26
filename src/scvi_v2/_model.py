@@ -81,6 +81,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
         n_sample = self.summary_stats.n_sample
         n_batch = self.summary_stats.n_batch
+        n_labels = self.summary_stats.n_labels
         n_continuous_cov = self.summary_stats.get("n_extra_continuous_covs", 0)
 
         obs_df = adata.obs.copy()
@@ -97,6 +98,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             n_input=self.summary_stats.n_vars,
             n_sample=n_sample,
             n_batch=n_batch,
+            n_labels=n_labels,
             n_continuous_cov=n_continuous_cov,
             n_obs_per_sample=self.n_obs_per_sample,
             sample_to_batch=sample_to_batch,
@@ -127,6 +129,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         layer: Optional[str] = None,
         sample_key: Optional[str] = None,
         batch_key: Optional[str] = None,
+        labels_key: Optional[str] = None,
         continuous_covariate_keys: Optional[List[str]] = None,
         **kwargs,
     ):
@@ -137,6 +140,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             LayerField(REGISTRY_KEYS.X_KEY, layer, is_count_data=True),
             CategoricalObsField(MRVI_REGISTRY_KEYS.SAMPLE_KEY, sample_key),
             CategoricalObsField(REGISTRY_KEYS.BATCH_KEY, batch_key),
+            CategoricalObsField(REGISTRY_KEYS.LABELS_KEY, labels_key),
             NumericalJointObsField(REGISTRY_KEYS.CONT_COVS_KEY, continuous_covariate_keys),
             NumericalObsField(REGISTRY_KEYS.INDICES_KEY, "_indices"),
         ]

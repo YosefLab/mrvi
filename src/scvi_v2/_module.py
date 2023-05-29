@@ -588,6 +588,7 @@ class MrVAE(JaxBaseModuleClass):
             "library": library,
             "batch_index": batch_index,
             "continuous_covs": continuous_covs,
+            "label_index": jnp.zeros(x.shape[0]),
         }
         generative_outputs = self.generative(**generative_inputs)
         return generative_outputs["h"]
@@ -601,6 +602,7 @@ class MrVAE(JaxBaseModuleClass):
             "library": library,
             "batch_index": batch_index,
             "continuous_covs": continuous_covs,
+            "label_index": jnp.zeros([x.shape[0], 1]),
         }
         generative_outputs = self.generative(**generative_inputs)
         return generative_outputs["px"].mean

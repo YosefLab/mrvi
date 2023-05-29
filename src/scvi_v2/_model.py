@@ -660,6 +660,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         normalize_design_matrix: bool = True,
         offset_design_matrix: bool = True,
         store_lfc: bool = False,
+        store_baseline: bool = False
     ) -> xr.Dataset:
         """Utility function to perform cell-specific multivariate analysis.
 
@@ -686,6 +687,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             Whether to store the log-fold changes in the module.
             Storing log-fold changes is memory-intensive and may require to specify
             a smaller set of cells to analyze, e.g., by specifying `adata`.
+        store_baseline
+            Whether to store the expression in the module if logfoldchanges are computed.
         """
         adata = self.adata if adata is None else adata
         self._check_if_trained(warn=False)
@@ -783,18 +786,20 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                     extra_eps=-betas_,
                 )
 
-                lfcs = jnp.log(x_1 + eps_lfc) - jnp.log(x_2 + eps_lfc)
-                baseline_expression = x_1
+                lfcs = (jnp.log(x_1 + eps_lfc) - jnp.log(x_2 + eps_lfc)).mean(1)
                
             else:
                 lfcs = None
+            if store_baseline:
+                baseline_expression = x_1.mean(1)
+            else:
                 baseline_expression = None
             return dict(
                 beta=betas,
                 effect_size=ts,
                 pvalue=pvals,
-                lfc=lfcs.mean(1),
-                baseline_expression=baseline_expression.mean(1),
+                lfc=lfcs,
+                baseline_expression=baseline_expression,
             )
         Xmat = []
         Xmat_names = []
@@ -840,8 +845,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             if continuous_covs is not None:
                 continuous_covs = jnp.array(continuous_covs)
             stacked_rngs = self._generate_stacked_rngs(cf_sample.shape[0])
-            if store_lfc:
-                stacked_rngs_de = self._generate_stacked_rngs(Xmat.shape[1])
+            stacked_rngs_de = self._generate_stacked_rngs(Xmat.shape[1])
             res = mapped_inference_fn(
                 stacked_rngs=stacked_rngs,
                 x=jnp.array(inf_inputs["x"]),
@@ -908,7 +912,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 name="lfc",
             )
             res["lfc"] = lfc
-            
+        if store_baseline:
             baseline_expression = np.concatenate(baseline_expression, axis=1)
             baseline_expression = xr.DataArray(
                 baseline_expression,

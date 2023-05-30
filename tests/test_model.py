@@ -28,9 +28,10 @@ def test_mrvi():
         qz_nn_flavor="attention",
     )
     model.train(2, check_val_every_n_epoch=1, train_size=0.5)
-    model.get_local_sample_distances(normalize_distances=True)
+
     donor_keys = ["meta1_cat", "meta2", "cont_cov"]
-    model.perform_multivariate_analysis(donor_keys=donor_keys)
+    model.perform_multivariate_analysis(donor_keys=donor_keys, store_lfc=True)
+    model.get_local_sample_distances(normalize_distances=True)
 
     MrVI.setup_anndata(adata, sample_key="sample_str", batch_key="batch", continuous_covariate_keys=["cont_cov"])
     model = MrVI(

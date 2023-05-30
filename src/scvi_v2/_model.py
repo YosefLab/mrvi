@@ -81,7 +81,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
         n_sample = self.summary_stats.n_sample
         n_batch = self.summary_stats.n_batch
-        n_labels = self.summary_stats.n_labels
         n_continuous_cov = self.summary_stats.get("n_extra_continuous_covs", 0)
 
         obs_df = adata.obs.copy()
@@ -98,7 +97,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             n_input=self.summary_stats.n_vars,
             n_sample=n_sample,
             n_batch=n_batch,
-            n_labels=n_labels,
             n_continuous_cov=n_continuous_cov,
             n_obs_per_sample=self.n_obs_per_sample,
             sample_to_batch=sample_to_batch,
@@ -129,7 +127,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         layer: Optional[str] = None,
         sample_key: Optional[str] = None,
         batch_key: Optional[str] = None,
-        labels_key: Optional[str] = None,
         continuous_covariate_keys: Optional[List[str]] = None,
         **kwargs,
     ):
@@ -140,7 +137,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             LayerField(REGISTRY_KEYS.X_KEY, layer, is_count_data=True),
             CategoricalObsField(MRVI_REGISTRY_KEYS.SAMPLE_KEY, sample_key),
             CategoricalObsField(REGISTRY_KEYS.BATCH_KEY, batch_key),
-            CategoricalObsField(REGISTRY_KEYS.LABELS_KEY, labels_key),
             NumericalJointObsField(REGISTRY_KEYS.CONT_COVS_KEY, continuous_covariate_keys),
             NumericalObsField(REGISTRY_KEYS.INDICES_KEY, "_indices"),
         ]
@@ -286,7 +282,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                     sample_index=sample_index,
                     cf_sample=cf_sample,
                     use_mean=use_mean,
-                    mc_samples=mc_samples
+                    mc_samples=mc_samples,
                 )["z"]
 
             if use_vmap:
@@ -351,17 +347,17 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
             if reqs.needs_sampled_distances:
                 sampled_dists = self._compute_distances_from_representations(sampled_zs_, indices, norm=norm)
-                
+
             if reqs.needs_normalized_distances:
                 dists_null, dists_mc_error = self._compute_local_baseline_dists(
-                    array_dict, mc_samples, norm=norm, indices=indices)
-                
+                    array_dict, mc_samples, norm=norm, indices=indices
+                )
+
                 # Please do experiment and check division by variance, not sure about its effect.
-                normalized_dists = ((
-                    sampled_dists - dists_null - dists_mc_error)/dists_null).mean('mc_sample')
-                
+                normalized_dists = ((sampled_dists - dists_null - dists_mc_error) / dists_null).mean("mc_sample")
+
                 normalized_dists = normalized_dists.clip(min=0, max=None)
-                
+
             if reqs.needs_mean_distances:
                 mean_dists = self._compute_distances_from_representations(mean_zs_, indices, norm=norm)
 
@@ -414,11 +410,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         return xr.Dataset(data_vars=final_data_arrs)
 
     def _compute_local_baseline_dists(
-        self,
-        batch: dict,
-        mc_samples: int,
-        norm: str,
-        indices: list) -> Tuple[np.ndarray, np.ndarray]:
+        self, batch: dict, mc_samples: int, norm: str, indices: list
+    ) -> Tuple[np.ndarray, np.ndarray]:
         """
         Approximate the distributions used as baselines for normalizing the local sample distances.
 
@@ -453,7 +446,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             A_s = self.module.apply(vars_in, rngs=rngs, method=get_A_s, u=u, sample_covariate=sample_covariate)
             return A_s
 
-        if self.can_compute_normalized_dists and norm=='l2':
+        if self.can_compute_normalized_dists and norm == "l2":
             jit_inference_fn = self.module.get_jit_inference_fn()
             qu = jit_inference_fn(self.module.rngs, batch)["qu"]
             qu_vars_diag = jax.vmap(jnp.diag)(qu.variance)
@@ -471,8 +464,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             )  # n_cells by mc_samples by n_latent
             squared_l2_dists = jnp.sum(jnp.einsum("cij, cj -> cij", (normal_samples**2), eigvals), axis=2)
             l2_dists = squared_l2_dists**0.5
-            
-            return l2_dists, 0.
+
+            return l2_dists, 0.0
         else:
             mc_samples_per_cell = mc_samples * 2  # need double for pairs of samples to compute distance between
             jit_inference_fn = self.module.get_jit_inference_fn(
@@ -480,15 +473,19 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             )
             outputs = jit_inference_fn(self.module.rngs, batch)
             sampled_zs_null = outputs["z"].transpose((1, 0, 2))
-            
+
             dists_null = self._compute_distances_from_representations(
-                sampled_zs_null[:, :mc_samples, :], indices, norm=norm, return_xarray=False).reshape(
-                    len(indices), -1)/(mc_samples**2 - mc_samples)
-                
-            dists_mc_error = self._compute_distances_from_representations(
-                sampled_zs_null[:, mc_samples:, :], indices, norm=norm, return_xarray=False).reshape(
-                    len(indices), -1)/(mc_samples**2 - mc_samples) - dists_null
-            
+                sampled_zs_null[:, :mc_samples, :], indices, norm=norm, return_xarray=False
+            ).reshape(len(indices), -1) / (mc_samples**2 - mc_samples)
+
+            dists_mc_error = (
+                self._compute_distances_from_representations(
+                    sampled_zs_null[:, mc_samples:, :], indices, norm=norm, return_xarray=False
+                ).reshape(len(indices), -1)
+                / (mc_samples**2 - mc_samples)
+                - dists_null
+            )
+
             return dists_null.sum(-1).reshape(-1, 1, 1, 1), np.percentile(np.abs(dists_mc_error.sum(-1)), 90)
 
     def _compute_distances_from_representations(self, reps, indices, return_xarray=True, norm="l2"):
@@ -504,6 +501,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             else:
                 raise ValueError(f"norm {norm} not supported")
             return res
+
         if len(reps.shape) == 3:
             dists = jax.vmap(_compute_distance)(reps)
             if return_xarray:
@@ -520,9 +518,9 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         else:
             dists = jax.vmap(jax.vmap(_compute_distance))(reps)
             if return_xarray:
-                dists =  xr.DataArray(
+                dists = xr.DataArray(
                     dists,
-                    dims=["cell_name","mc_sample", "sample_x", "sample_y"],
+                    dims=["cell_name", "mc_sample", "sample_x", "sample_y"],
                     coords={
                         "cell_name": self.adata.obs_names[indices],
                         "mc_sample": np.arange(reps.shape[1]),
@@ -642,14 +640,9 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                     )
                 )
         return self.compute_local_statistics(
-            reductions,
-            adata=adata,
-            batch_size=batch_size,
-            use_vmap=use_vmap,
-            norm=norm,
-            mc_samples=mc_samples
+            reductions, adata=adata, batch_size=batch_size, use_vmap=use_vmap, norm=norm, mc_samples=mc_samples
         )
-        
+
     def perform_multivariate_analysis(
         self,
         adata=None,
@@ -660,7 +653,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         normalize_design_matrix: bool = True,
         offset_design_matrix: bool = True,
         store_lfc: bool = False,
-        store_baseline: bool = False
+        store_baseline: bool = False,
     ) -> xr.Dataset:
         """Utility function to perform cell-specific multivariate analysis.
 
@@ -716,7 +709,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             cf_sample,
             use_mean,
             eps_lfc=1e-3,
-            stacked_rngs_de=None
+            stacked_rngs_de=None,
         ):
             def inference_fn(
                 rngs,
@@ -761,7 +754,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 # Xmat_hard = jnp.ceil(Xmat).T
                 # positive_category = jnp.einsum("ks,nsd->knd", Xmat_hard, betas_)
                 # negative_category = jnp.einsum("ks,nsd->knd", jnp.ones_like(Xmat_hard) - Xmat_hard, betas_)
-                
+
                 def h_inference_fn(rngs, extra_eps):
                     return self.module.apply(
                         vars_in,
@@ -775,19 +768,19 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                         continuous_covs=continuous_covs,
                         mc_samples=10,
                     )
-                
+
                 x_1 = jax.vmap(h_inference_fn, in_axes=(0), out_axes=0)(
                     rngs=stacked_rngs_de,
                     extra_eps=betas_,
                 )
-                
+
                 x_2 = jax.vmap(h_inference_fn, in_axes=(0), out_axes=0)(
                     rngs=stacked_rngs_de,
                     extra_eps=-betas_,
                 )
 
                 lfcs = (jnp.log(x_1 + eps_lfc) - jnp.log(x_2 + eps_lfc)).mean(1)
-               
+
             else:
                 lfcs = None
             if store_baseline:
@@ -801,6 +794,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 lfc=lfcs,
                 baseline_expression=baseline_expression,
             )
+
         Xmat = []
         Xmat_names = []
         for donor_key in tqdm(donor_keys):

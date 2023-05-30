@@ -348,7 +348,6 @@ class MrVAE(JaxBaseModuleClass):
     n_input: int
     n_sample: int
     n_batch: int
-    n_labels: int
     n_continuous_cov: int
     n_latent: int = 20
     n_latent_u: Optional[int] = None
@@ -428,10 +427,7 @@ class MrVAE(JaxBaseModuleClass):
             self.pz_scale = self.z_u_prior_scale
 
         if self.u_prior_mixture:
-            if self.n_labels>1:
-                u_prior_mixture_k = self.n_labels
-            else:
-                u_prior_mixture_k = self.u_prior_mixture_k
+            u_prior_mixture_k = self.u_prior_mixture_k
             u_dim = self.n_latent_u if self.n_latent_u is not None else self.n_latent
             self.u_prior_logits = self.param("u_prior_logits", nn.initializers.zeros, (u_prior_mixture_k,))
             self.u_prior_means = self.param("u_prior_means", nn.initializers.zeros, (u_dim, u_prior_mixture_k))
@@ -490,11 +486,10 @@ class MrVAE(JaxBaseModuleClass):
         z = inference_outputs["z"]
         library = inference_outputs["library"]
         batch_index = tensors[REGISTRY_KEYS.BATCH_KEY]
-        label_index = tensors[REGISTRY_KEYS.LABELS_KEY]
         continuous_covs = tensors.get(REGISTRY_KEYS.CONT_COVS_KEY, None)
-        return {"z": z, "library": library, "batch_index": batch_index, "label_index": label_index, "continuous_covs": continuous_covs}
+        return {"z": z, "library": library, "batch_index": batch_index, "continuous_covs": continuous_covs}
 
-    def generative(self, z, library, batch_index, label_index, continuous_covs):
+    def generative(self, z, library, batch_index, continuous_covs):
         """Generative model."""
         library_exp = jnp.exp(library)
         px = self.px(
@@ -503,9 +498,7 @@ class MrVAE(JaxBaseModuleClass):
         h = px.mean / library_exp
 
         if self.u_prior_mixture:
-            one_hot_labels = jax.nn.one_hot(label_index, self.n_labels)
-            # kind of arbitrary factor, I found it well balanced but might require adjustment.
-            cats = dist.Categorical(logits=10*one_hot_labels+self.u_prior_logits)
+            cats = dist.Categorical(logits=self.u_prior_logits)
             normal_dists = dist.Normal(self.u_prior_means, jnp.exp(self.u_prior_scales))
             pu = dist.MixtureSameFamily(cats, normal_dists)
         else:
@@ -530,7 +523,7 @@ class MrVAE(JaxBaseModuleClass):
         else:
             kl_u = dist.kl_divergence(inference_outputs["qu"], generative_outputs["pu"]).sum(-1)
         if self.qz_nn_flavor != "linear":
-            qeps = inference_outputs["qeps"]
+            inference_outputs["qeps"]
             eps = inference_outputs["z"] - inference_outputs["z_base"]
             if self.z_u_prior:
                 peps = dist.Normal(0, jnp.exp(self.pz_scale))
@@ -588,12 +581,13 @@ class MrVAE(JaxBaseModuleClass):
             "library": library,
             "batch_index": batch_index,
             "continuous_covs": continuous_covs,
-            "label_index": jnp.zeros(x.shape[0]),
         }
         generative_outputs = self.generative(**generative_inputs)
         return generative_outputs["h"]
 
-    def compute_h_from_x_eps(self, x, sample_index, batch_index, extra_eps, cf_sample=None, continuous_covs=None, mc_samples=10):
+    def compute_h_from_x_eps(
+        self, x, sample_index, batch_index, extra_eps, cf_sample=None, continuous_covs=None, mc_samples=10
+    ):
         """Compute normalized gene expression from observations using predefined eps"""
         library = 7.0 * jnp.ones_like(sample_index)  # placeholder, has no effect on the value of h.
         inference_outputs = self.inference(x, sample_index, mc_samples=mc_samples, cf_sample=cf_sample, use_mean=False)
@@ -602,7 +596,6 @@ class MrVAE(JaxBaseModuleClass):
             "library": library,
             "batch_index": batch_index,
             "continuous_covs": continuous_covs,
-            "label_index": jnp.zeros([x.shape[0], 1]),
         }
         generative_outputs = self.generative(**generative_inputs)
         return generative_outputs["px"].mean

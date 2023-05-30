@@ -654,6 +654,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         offset_design_matrix: bool = True,
         store_lfc: bool = False,
         store_baseline: bool = False,
+        eps_lfc: float = 1e-4,
     ) -> xr.Dataset:
         """Utility function to perform cell-specific multivariate analysis.
 
@@ -708,7 +709,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             continuous_covs,
             cf_sample,
             use_mean,
-            eps_lfc=1e-3,
             stacked_rngs_de=None,
         ):
             def inference_fn(
@@ -766,20 +766,20 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                         batch_index=batch_index,
                         cf_sample=None,
                         continuous_covs=continuous_covs,
-                        mc_samples=10,
+                        mc_samples=100,
                     )
 
                 x_1 = jax.vmap(h_inference_fn, in_axes=(0), out_axes=0)(
                     rngs=stacked_rngs_de,
                     extra_eps=betas_,
                 )
-
-                x_2 = jax.vmap(h_inference_fn, in_axes=(0), out_axes=0)(
+                betas_null = jnp.zeros_like(betas_) + eps_.mean(axis=1)
+                x_0 = jax.vmap(h_inference_fn, in_axes=(0), out_axes=0)(
                     rngs=stacked_rngs_de,
-                    extra_eps=-betas_,
+                    extra_eps= betas_null,
                 )
 
-                lfcs = (jnp.log(x_1 + eps_lfc) - jnp.log(x_2 + eps_lfc)).mean(1)
+                lfcs = (jnp.log(x_1 + eps_lfc) - jnp.log(x_0 + eps_lfc)).mean(1)
 
             else:
                 lfcs = None

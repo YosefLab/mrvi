@@ -598,4 +598,4 @@ class MrVAE(JaxBaseModuleClass):
             "continuous_covs": continuous_covs,
         }
         generative_outputs = self.generative(**generative_inputs)
-        return generative_outputs["px"].mean
+        return generative_outputs["h"]

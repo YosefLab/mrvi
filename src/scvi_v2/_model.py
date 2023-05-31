@@ -340,7 +340,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                     cf_sample=jnp.array(cf_sample),
                     use_mean=False,
                     mc_samples=mc_samples,
-                )
+                )  # (n_mc_samples, n_cells, n_samples, n_latent)
                 sampled_zs_ = sampled_zs_.transpose((1, 0, 2, 3))
                 sampled_zs = xr.DataArray(
                     sampled_zs_,
@@ -360,12 +360,14 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                         raise ValueError(f"Norm must be 'l2' when using normalized distances. Got {norm}.")
                     normalization_means, normalization_vars = self._compute_local_baseline_dists(
                         array_dict, mc_samples=mc_samples
-                    )
+                    )  # both are shape (n_cells,)
                     normalization_means = normalization_means.reshape(-1, 1, 1, 1)
                     normalization_vars = normalization_vars.reshape(-1, 1, 1, 1)
                     normalized_dists = (
                         np.clip(sampled_dists - normalization_means, a_min=0, a_max=None) / (normalization_vars**0.5)
-                    ).mean(dim="mc_sample")
+                    ).mean(
+                        dim="mc_sample"
+                    )  # (n_cells, n_samples, n_samples)
 
             # Compute each reduction
             for r in reductions:

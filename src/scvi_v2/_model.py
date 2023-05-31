@@ -1,5 +1,6 @@
 import logging
 import os
+import warnings
 from copy import deepcopy
 from functools import partial
 from typing import Dict, List, Optional, Sequence, Tuple, Union
@@ -243,6 +244,11 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             Batch size to use for computing the local statistics.
         use_vmap
             Whether to use vmap to compute the local statistics.
+        norm
+            Norm to use for computing the distances.
+        mc_samples
+            Number of Monte Carlo samples to use for computing the local statistics. Only applies if using
+            sampled representations.
         """
         if not reductions or len(reductions) == 0:
             raise ValueError("At least one reduction must be provided.")
@@ -261,13 +267,14 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
         vars_in = {"params": self.module.params, **self.module.state}
 
-        @partial(jax.jit, static_argnames=["use_mean"])
+        @partial(jax.jit, static_argnames=["use_mean", "mc_samples"])
         def mapped_inference_fn(
             stacked_rngs,
             x,
             sample_index,
             cf_sample,
             use_mean,
+            mc_samples=None,
         ):
             # TODO: use `self.module.get_jit_inference_fn` when it supports traced values.
             def inference_fn(
@@ -317,7 +324,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             # Compute necessary inputs.
             if reqs.needs_mean_representations:
                 mean_zs_ = mapped_inference_fn(
-                    stacked_rngs=stacked_rngs,
+                    stacked_rngs=stacked_rngs,  # OK to use stacked rngs here since there is no stochasticity for mean rep.
                     x=jnp.array(inf_inputs["x"]),
                     sample_index=jnp.array(inf_inputs["sample_index"]),
                     cf_sample=jnp.array(cf_sample),
@@ -336,7 +343,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                     sample_index=jnp.array(inf_inputs["sample_index"]),
                     cf_sample=jnp.array(cf_sample),
                     use_mean=False,
-                )
+                    mc_samples=mc_samples,
+                )  # (n_mc_samples, n_cells, n_samples, n_latent)
                 sampled_zs_ = sampled_zs_.transpose((1, 0, 2, 3))
                 sampled_zs = xr.DataArray(
                     sampled_zs_,
@@ -345,21 +353,25 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                     name="sample_representations",
                 )
 
-            if reqs.needs_sampled_distances:
-                sampled_dists = self._compute_distances_from_representations(sampled_zs_, indices, norm=norm)
-
-            if reqs.needs_normalized_distances:
-                dists_null, dists_mc_error = self._compute_local_baseline_dists(
-                    array_dict, mc_samples, norm=norm, indices=indices
-                )
-
-                # Please do experiment and check division by variance, not sure about its effect.
-                normalized_dists = ((sampled_dists - dists_null - dists_mc_error) / dists_null).mean("mc_sample")
-
-                normalized_dists = normalized_dists.clip(min=0, max=None)
-
             if reqs.needs_mean_distances:
                 mean_dists = self._compute_distances_from_representations(mean_zs_, indices, norm=norm)
+
+            if reqs.needs_sampled_distances or reqs.needs_normalized_distances:
+                sampled_dists = self._compute_distances_from_representations(sampled_zs_, indices, norm=norm)
+
+                if reqs.needs_normalized_distances:
+                    if norm != "l2":
+                        raise ValueError(f"Norm must be 'l2' when using normalized distances. Got {norm}.")
+                    normalization_means, normalization_vars = self._compute_local_baseline_dists(
+                        array_dict, mc_samples=mc_samples
+                    )  # both are shape (n_cells,)
+                    normalization_means = normalization_means.reshape(-1, 1, 1, 1)
+                    normalization_vars = normalization_vars.reshape(-1, 1, 1, 1)
+                    normalized_dists = (
+                        np.clip(sampled_dists - normalization_means, a_min=0, a_max=None) / (normalization_vars**0.5)
+                    ).mean(
+                        dim="mc_sample"
+                    )  # (n_cells, n_samples, n_samples)
 
             # Compute each reduction
             for r in reductions:
@@ -409,9 +421,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
         return xr.Dataset(data_vars=final_data_arrs)
 
-    def _compute_local_baseline_dists(
-        self, batch: dict, mc_samples: int, norm: str, indices: list
-    ) -> Tuple[np.ndarray, np.ndarray]:
+    def _compute_local_baseline_dists(self, batch: dict, mc_samples: int = 250) -> Tuple[np.ndarray, np.ndarray]:
         """
         Approximate the distributions used as baselines for normalizing the local sample distances.
 
@@ -446,7 +456,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             A_s = self.module.apply(vars_in, rngs=rngs, method=get_A_s, u=u, sample_covariate=sample_covariate)
             return A_s
 
-        if self.can_compute_normalized_dists and norm == "l2":
+        if self.can_compute_normalized_dists:
             jit_inference_fn = self.module.get_jit_inference_fn()
             qu = jit_inference_fn(self.module.rngs, batch)["qu"]
             qu_vars_diag = jax.vmap(jnp.diag)(qu.variance)
@@ -464,36 +474,28 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             )  # n_cells by mc_samples by n_latent
             squared_l2_dists = jnp.sum(jnp.einsum("cij, cj -> cij", (normal_samples**2), eigvals), axis=2)
             l2_dists = squared_l2_dists**0.5
-
-            return l2_dists, 0.0
         else:
             mc_samples_per_cell = mc_samples * 2  # need double for pairs of samples to compute distance between
             jit_inference_fn = self.module.get_jit_inference_fn(
                 inference_kwargs={"use_mean": False, "mc_samples": mc_samples_per_cell}
             )
+
             outputs = jit_inference_fn(self.module.rngs, batch)
-            sampled_zs_null = outputs["z"].transpose((1, 0, 2))
 
-            dists_null = self._compute_distances_from_representations(
-                sampled_zs_null[:, :mc_samples, :], indices, norm=norm, return_xarray=False
-            ).reshape(len(indices), -1) / (mc_samples**2 - mc_samples)
+            # figure out how to compute dists here
+            z = outputs["z"]
+            first_half_z, second_half_z = z[:mc_samples], z[mc_samples:]
+            l2_dists = jnp.sqrt(jnp.sum((first_half_z - second_half_z) ** 2, axis=2)).T
 
-            dists_mc_error = (
-                self._compute_distances_from_representations(
-                    sampled_zs_null[:, mc_samples:, :], indices, norm=norm, return_xarray=False
-                ).reshape(len(indices), -1)
-                / (mc_samples**2 - mc_samples)
-                - dists_null
-            )
+        return np.array(jnp.mean(l2_dists, axis=1)), np.array(jnp.var(l2_dists, axis=1))
 
-            return dists_null.sum(-1).reshape(-1, 1, 1, 1), np.percentile(np.abs(dists_mc_error.sum(-1)), 90)
-
-    def _compute_distances_from_representations(self, reps, indices, return_xarray=True, norm="l2"):
+    def _compute_distances_from_representations(self, reps, indices, norm="l2") -> xr.DataArray:
         @jax.jit
         def _compute_distance(rep):
             delta_mat = jnp.expand_dims(rep, 0) - jnp.expand_dims(rep, 1)
             if norm == "l2":
-                res = jnp.sqrt((delta_mat**2).sum(-1))
+                res = delta_mat**2
+                res = jnp.sqrt(res.sum(-1))
             elif norm == "l1":
                 res = jnp.abs(delta_mat).sum(-1)
             elif norm == "linf":
@@ -502,34 +504,32 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 raise ValueError(f"norm {norm} not supported")
             return res
 
-        if len(reps.shape) == 3:
+        if reps.ndim == 3:
             dists = jax.vmap(_compute_distance)(reps)
-            if return_xarray:
-                dists = xr.DataArray(
-                    dists,
-                    dims=["cell_name", "sample_x", "sample_y"],
-                    coords={
-                        "cell_name": self.adata.obs_names[indices],
-                        "sample_x": self.sample_order,
-                        "sample_y": self.sample_order,
-                    },
-                    name="mean_distances",
-                )
+            return xr.DataArray(
+                dists,
+                dims=["cell_name", "sample_x", "sample_y"],
+                coords={
+                    "cell_name": self.adata.obs_names[indices],
+                    "sample_x": self.sample_order,
+                    "sample_y": self.sample_order,
+                },
+                name="sample_distances",
+            )
         else:
+            # Case with sampled representations
             dists = jax.vmap(jax.vmap(_compute_distance))(reps)
-            if return_xarray:
-                dists = xr.DataArray(
-                    dists,
-                    dims=["cell_name", "mc_sample", "sample_x", "sample_y"],
-                    coords={
-                        "cell_name": self.adata.obs_names[indices],
-                        "mc_sample": np.arange(reps.shape[1]),
-                        "sample_x": self.sample_order,
-                        "sample_y": self.sample_order,
-                    },
-                    name="sample_distances",
-                )
-        return dists
+            return xr.DataArray(
+                dists,
+                dims=["cell_name", "mc_sample", "sample_x", "sample_y"],
+                coords={
+                    "cell_name": self.adata.obs_names[indices],
+                    "mc_sample": np.arange(reps.shape[1]),
+                    "sample_x": self.sample_order,
+                    "sample_y": self.sample_order,
+                },
+                name="sample_distances",
+            )
 
     def get_local_sample_representation(
         self,
@@ -577,8 +577,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         use_vmap: bool = True,
         groupby: Optional[Union[List[str], str]] = None,
         keep_cell: bool = True,
-        mc_samples: int = 10,
         norm: str = "l2",
+        mc_samples: int = 10,
     ) -> xr.Dataset:
         """
         Computes local sample distances as `xr.Dataset`.
@@ -608,13 +608,18 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             used to group the cells.
         keep_cell
             Whether to keep the original cell sample-sample distance matrices.
+        norm
+            Norm to use for computing the local sample distances.
         mc_samples
-            How many Monte Carlo samples are drawn for probabilistic variables.
+            Number of Monte Carlo samples to use for computing the local sample distances.
+            Only relevants if ``use_mean=False``.
         """
         input = "mean_distances" if use_mean else "sampled_distances"
         if normalize_distances:
-            if not use_mean:
-                raise ValueError("Normalizing distances requires `use_mean=True`.")
+            if use_mean:
+                warnings.warn(
+                    "Normalizing distances uses sampled distances. Ignoring ``use_mean``.", UserWarning, stacklevel=2
+                )
             input = "normalized_distances"
         if groupby and not isinstance(groupby, list):
             groupby = [groupby]
@@ -776,7 +781,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 betas_null = jnp.zeros_like(betas_) + eps_.mean(axis=1)
                 x_0 = jax.vmap(h_inference_fn, in_axes=(0), out_axes=0)(
                     rngs=stacked_rngs_de,
-                    extra_eps= betas_null,
+                    extra_eps=betas_null,
                 )
 
                 lfcs = (jnp.log(x_1 + eps_lfc) - jnp.log(x_0 + eps_lfc)).mean(1)
@@ -787,13 +792,13 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 baseline_expression = x_1.mean(1)
             else:
                 baseline_expression = None
-            return dict(
-                beta=betas,
-                effect_size=ts,
-                pvalue=pvals,
-                lfc=lfcs,
-                baseline_expression=baseline_expression,
-            )
+            return {
+                "beta": betas,
+                "effect_size": ts,
+                "pvalue": pvals,
+                "lfc": lfcs,
+                "baseline_expression": baseline_expression,
+            }
 
         Xmat = []
         Xmat_names = []

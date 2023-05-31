@@ -348,7 +348,7 @@ def test_mrvi_nonlinear():
     adata.obs["cont_cov"] = np.random.normal(0, 1, size=adata.shape[0])
     MrVI.setup_anndata(adata, sample_key="sample", batch_key="batch", continuous_covariate_keys=["cont_cov"])
 
-    n_latent = 10
+    n_latent = 11
     model = MrVI(
         adata,
         n_latent=n_latent,
@@ -497,18 +497,18 @@ def test_compute_local_statistics():
             group_by="meta1",
         ),
     ]
-    outs = model.compute_local_statistics(reductions)
+    outs = model.compute_local_statistics(reductions, mc_samples=10)
     assert len(outs.data_vars) == 3
     assert outs["test1"].shape == (adata.shape[0], n_sample, n_latent)
-    assert outs["test2"].shape == (2, n_sample, n_latent)
+    assert outs["test2"].shape == (2, 10, n_sample, n_latent)
     assert outs["test3"].shape == (2, n_sample, n_sample)
 
     adata2 = synthetic_iid()
     adata2.obs["sample"] = np.random.choice(15, size=adata.shape[0])
     meta1_2 = np.random.randint(0, 2, size=15)
     adata2.obs["meta1"] = meta1_2[adata2.obs["sample"].values]
-    outs2 = model.compute_local_statistics(reductions, adata=adata2)
+    outs2 = model.compute_local_statistics(reductions, adata=adata2, mc_samples=10)
     assert len(outs2.data_vars) == 3
     assert outs2["test1"].shape == (adata2.shape[0], n_sample, n_latent)
-    assert outs2["test2"].shape == (2, n_sample, n_latent)
+    assert outs2["test2"].shape == (2, 10, n_sample, n_latent)
     assert outs2["test3"].shape == (2, n_sample, n_sample)

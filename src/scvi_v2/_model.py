@@ -1,5 +1,6 @@
 import logging
 import os
+import warnings
 from copy import deepcopy
 from functools import partial
 from typing import Dict, List, Optional, Sequence, Tuple, Union
@@ -609,8 +610,10 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         """
         input = "mean_distances" if use_mean else "sampled_distances"
         if normalize_distances:
-            if not use_mean:
-                raise ValueError("Normalizing distances requires `use_mean=False`.")
+            if use_mean:
+                warnings.warn(
+                    "Normalizing distances uses sampled distances. Ignoring ``use_mean``.", UserWarning, stacklevel=2
+                )
             input = "normalized_distances"
         if groupby and not isinstance(groupby, list):
             groupby = [groupby]

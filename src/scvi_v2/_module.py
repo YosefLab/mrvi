@@ -96,7 +96,6 @@ class _DecoderZXAttention(nn.Module):
         continuous_covariates: Optional[NdArray],
         training: Optional[bool] = None,
     ) -> NegativeBinomial:
-
         has_mc_samples = z.ndim == 3
         z_stop = z if not self.stop_gradients else jax.lax.stop_gradient(z)
 
@@ -192,18 +191,26 @@ class _EncoderUZ(nn.Module):
         if not self.use_nonlinear:
             u_drop = self.dropout(jax.lax.stop_gradient(u), deterministic=not training)
             A_s = self.A_s_enc(sample_covariate)
+            # cells by n_latent by n_latent
+            A_s = A_s.reshape(sample_covariate.shape[0], self.n_latent, n_latent_u)
+            if u_drop.ndim == 3:
+                h2 = jnp.einsum("cgl,bcl->bcg", A_s, u_drop)
+            else:
+                h2 = jnp.einsum("cgl,cl->cg", A_s, u_drop)
         else:
             # A_s output by a non-linear function without an explicit intercept.
             u_drop = self.dropout(u, deterministic=not training)  # No stop gradient for nonlinear.
             sample_one_hot = jax.nn.one_hot(sample_covariate, self.n_sample)
+            if u_drop.ndim == 3:
+                sample_one_hot = jnp.tile(sample_one_hot, (u_drop.shape[0], 1, 1))
             A_s_enc_inputs = jnp.concatenate([u_drop, sample_one_hot], axis=-1)
             A_s = self.A_s_enc(A_s_enc_inputs, training=training)
-        # cells by n_latent by n_latent
-        A_s = A_s.reshape(sample_covariate.shape[0], self.n_latent, n_latent_u)
-        if u_drop.ndim == 3:
-            h2 = jnp.einsum("cgl,bcl->bcg", A_s, u_drop)
-        else:
-            h2 = jnp.einsum("cgl,cl->cg", A_s, u_drop)
+            if u_drop.ndim == 3:
+                A_s = A_s.reshape(u_drop.shape[0], sample_covariate.shape[0], self.n_latent, n_latent_u)
+                h2 = jnp.einsum("bcgl,bcl->bcg", A_s, u_drop)
+            else:
+                A_s = A_s.reshape(sample_covariate.shape[0], self.n_latent, n_latent_u)
+                h2 = jnp.einsum("cgl,cl->cg", A_s, u_drop)
         h3 = self.h3_embed(sample_covariate)
         delta = h2 + h3
         if self.n_latent_u is not None:
@@ -522,7 +529,7 @@ class MrVAE(JaxBaseModuleClass):
         else:
             kl_u = dist.kl_divergence(inference_outputs["qu"], generative_outputs["pu"]).sum(-1)
         if self.qz_nn_flavor != "linear":
-            qeps = inference_outputs["qeps"]
+            inference_outputs["qeps"]
             eps = inference_outputs["z"] - inference_outputs["z_base"]
             # if self.z_u_prior:
             #     peps = dist.Normal(0, jnp.exp(self.pz_scale))
@@ -542,7 +549,15 @@ class MrVAE(JaxBaseModuleClass):
                 peps = dist.Normal(0, jnp.exp(self.pz_scale))
                 kl_z = -peps.log_prob(eps).sum(-1)
             else:
-                kl_z = 0.0
+                kl_z = 0
+
+            kl_z += (
+                -dist.Normal(inference_outputs["z_base"], jnp.exp(self.z_u_prior_scale))
+                .log_prob(inference_outputs["z"])
+                .sum(-1)
+                if self.z_u_prior_scale is not None
+                else 0
+            )
         else:
             kl_z = (
                 -dist.Normal(inference_outputs["z_base"], jnp.exp(self.z_u_prior_scale))

@@ -96,14 +96,12 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
         self.data_splitter = None
         self.can_compute_normalized_dists = model_kwargs.get("qz_nn_flavor", "linear") == "linear"
-        sample_to_batch = jnp.array(self.donor_info["_scvi_batch"].values)[..., None]
         self.module = MrVAE(
             n_input=self.summary_stats.n_vars,
             n_sample=n_sample,
             n_batch=n_batch,
             n_continuous_cov=n_continuous_cov,
             n_obs_per_sample=self.n_obs_per_sample,
-            sample_to_batch=sample_to_batch,
             **model_kwargs,
         )
         self.can_compute_normalized_dists = (model_kwargs.get("qz_nn_flavor", "linear") == "linear") and (
@@ -1354,16 +1352,16 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             distances_ = distances.sel(dimname_to_vals)
 
         figs = []
-        for d in distances_:
-            celltype_name = d.coords[celltype_dimname].item()
+        for dist_ in distances_:
+            celltype_name = dist_.coords[celltype_dimname].item()
             dendrogram = compute_dendrogram_from_distance_matrix(
-                d,
+                dist_,
                 linkage_method=linkage_method,
             )
-            assert d.ndim == 2
+            assert dist_.ndim == 2
 
             fig = sns.clustermap(
-                d.to_pandas(), row_linkage=dendrogram, col_linkage=dendrogram, row_colors=colors, **sns_kwargs
+                dist_.to_pandas(), row_linkage=dendrogram, col_linkage=dendrogram, row_colors=colors, **sns_kwargs
             )
             fig.fig.suptitle(celltype_name)
             if figure_dir is not None:

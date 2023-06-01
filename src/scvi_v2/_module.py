@@ -85,7 +85,6 @@ class _DecoderZXAttention(nn.Module):
     low_dim_batch: bool = True
     activation: Callable = nn.gelu
     batch_values: bool = True
-    use_conditional_norm: bool = False
 
     @nn.compact
     def __call__(
@@ -99,12 +98,7 @@ class _DecoderZXAttention(nn.Module):
 
         has_mc_samples = z.ndim == 3
         z_stop = z if not self.stop_gradients else jax.lax.stop_gradient(z)
-
-        if self.use_conditional_norm:
-            z_dim = z.shape[-1]
-            z_ = ConditionalNormalization(z_dim, self.n_batch)(z_stop, batch_covariate, training=training)
-        else:
-            z_ = nn.LayerNorm(name="u_ln")(z_stop)
+        z_ = nn.LayerNorm(name="u_ln")(z_stop)
 
         batch_covariate = batch_covariate.astype(int).flatten()
 
@@ -153,7 +147,6 @@ class _DecoderZXAttention(nn.Module):
 class _EncoderUZ(nn.Module):
     n_latent: int
     n_sample: int
-    n_batch: int
     n_latent_u: Optional[int] = None
     use_nonlinear: bool = False
     n_factorized_embed_dims: Optional[int] = None
@@ -224,7 +217,6 @@ class _EncoderUZ(nn.Module):
 class _EncoderUZ2(nn.Module):
     n_latent: int
     n_sample: int
-    n_batch: int
     n_latent_u: Optional[int] = None
     use_map: bool = False
     n_hidden: int = 32
@@ -234,9 +226,7 @@ class _EncoderUZ2(nn.Module):
     activation: Callable = nn.gelu
 
     @nn.compact
-    def __call__(
-        self, u: NdArray, sample_covariate: NdArray, batch_covariate: NdArray, training: Optional[bool] = None
-    ):
+    def __call__(self, u: NdArray, sample_covariate: NdArray, training: Optional[bool] = None):
         training = nn.merge_param("training", self.training, training)
         sample_covariate = sample_covariate.astype(int).flatten()
         self.n_latent_u if self.n_latent_u is not None else self.n_latent
@@ -267,7 +257,6 @@ class _EncoderUZ2(nn.Module):
 class _EncoderUZ2Attention(nn.Module):
     n_latent: int
     n_sample: int
-    n_batch: int = None
     n_latent_u: Optional[int] = None
     n_latent_sample: int = 16
     n_channels: int = 4
@@ -280,12 +269,9 @@ class _EncoderUZ2Attention(nn.Module):
     n_layers: int = 1
     training: Optional[bool] = None
     activation: Callable = nn.gelu
-    use_conditional_norm: bool = False
 
     @nn.compact
-    def __call__(
-        self, u: NdArray, sample_covariate: NdArray, batch_covariate: NdArray, training: Optional[bool] = None
-    ):
+    def __call__(self, u: NdArray, sample_covariate: NdArray, training: Optional[bool] = None):
         training = nn.merge_param("training", self.training, training)
         sample_covariate = sample_covariate.astype(int).flatten()
         self.n_latent_u if self.n_latent_u is not None else self.n_latent
@@ -296,11 +282,7 @@ class _EncoderUZ2Attention(nn.Module):
         sample_embed = nn.Embed(self.n_sample, self.n_latent_sample, embedding_init=_normal_initializer)(
             sample_covariate
         )  # (batch, n_latent_sample)
-        if self.use_conditional_norm:
-            sample_embed = ConditionalNormalization(self.n_latent_sample, self.n_batch)(
-                sample_embed, batch_covariate, training=training
-            )
-        # sample_embed = nn.LayerNorm(name="sample_embed_ln")(sample_embed)
+        sample_embed = nn.LayerNorm(name="sample_embed_ln")(sample_embed)
         if has_mc_samples:
             sample_embed = jnp.tile(sample_embed, (u_.shape[0], 1, 1))
 
@@ -376,7 +358,6 @@ class MrVAE(JaxBaseModuleClass):
     qu_kwargs: Optional[dict] = None
     training: bool = True
     n_obs_per_sample: Optional[jnp.ndarray] = None
-    sample_to_batch: NdArray = None
 
     def setup(self):  # noqa: D102
         px_kwargs = DEFAULT_PX_KWARGS.copy()
@@ -415,7 +396,6 @@ class MrVAE(JaxBaseModuleClass):
         self.qz = qz_cls(
             self.n_latent,
             self.n_sample,
-            self.n_batch,
             n_latent_u=n_latent_u,
             **qz_kwargs,
         )
@@ -435,11 +415,10 @@ class MrVAE(JaxBaseModuleClass):
             self.pz_scale = self.z_u_prior_scale
 
         if self.u_prior_mixture:
-            u_prior_mixture_k = self.u_prior_mixture_k
             u_dim = self.n_latent_u if self.n_latent_u is not None else self.n_latent
-            self.u_prior_logits = self.param("u_prior_logits", nn.initializers.zeros, (u_prior_mixture_k,))
-            self.u_prior_means = self.param("u_prior_means", nn.initializers.zeros, (u_dim, u_prior_mixture_k))
-            self.u_prior_scales = self.param("u_prior_scales", nn.initializers.zeros, (u_dim, u_prior_mixture_k))
+            self.u_prior_logits = self.param("u_prior_logits", nn.initializers.zeros, (self.u_prior_mixture_k,))
+            self.u_prior_means = self.param("u_prior_means", jax.random.normal, (u_dim, self.u_prior_mixture_k))
+            self.u_prior_scales = self.param("u_prior_scales", nn.initializers.zeros, (u_dim, self.u_prior_mixture_k))
 
     @property
     def required_rngs(self):  # noqa: D102
@@ -462,8 +441,7 @@ class MrVAE(JaxBaseModuleClass):
 
         sample_index_cf = sample_index if cf_sample is None else cf_sample
         if self.qz_nn_flavor != "linear":
-            batch_indices = self.sample_to_batch[sample_index_cf.flatten().astype(int)]
-            z_base, eps = self.qz(u, sample_index_cf, batch_indices, training=self.training)
+            z_base, eps = self.qz(u, sample_index_cf, training=self.training)
             qeps_ = eps
 
             qeps = None
@@ -533,20 +511,6 @@ class MrVAE(JaxBaseModuleClass):
         if self.qz_nn_flavor != "linear":
             inference_outputs["qeps"]
             eps = inference_outputs["z"] - inference_outputs["z_base"]
-            # if self.z_u_prior:
-            #     peps = dist.Normal(0, jnp.exp(self.pz_scale))
-            #     kl_z = dist.kl_divergence(qeps, peps).sum(-1) if qeps is not None else -peps.log_prob(eps).sum(-1)
-            # else:
-            #     kl_z = 0
-            # kl_z += (
-            #     -dist.Normal(inference_outputs["z_base"], jnp.exp(self.z_u_prior_scale))
-            #     .log_prob(inference_outputs["z"])
-            #     .sum(-1)
-            #     if self.z_u_prior_scale is not None
-            #     else 0
-            # )
-
-            ## Can loss
             if self.z_u_prior:
                 peps = dist.Normal(0, jnp.exp(self.pz_scale))
                 kl_z = -peps.log_prob(eps).sum(-1)

@@ -3,12 +3,13 @@ import os
 import warnings
 from copy import deepcopy
 from functools import partial
-from typing import Dict, List, Optional, Sequence, Tuple, Union
+from typing import Dict, List, Literal, Optional, Sequence, Tuple, Union
 
 import jax
 import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
+import numpyro.distributions as dist
 import pandas as pd
 import seaborn as sns
 import xarray as xr
@@ -23,6 +24,7 @@ from scvi.data.fields import (
     NumericalObsField,
 )
 from scvi.model.base import BaseModelClass, JaxTrainingMixin
+from sklearn.mixture import GaussianMixture
 from statsmodels.stats.multitest import multipletests
 from tqdm import tqdm
 
@@ -87,6 +89,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         obs_df = adata.obs.copy()
         obs_df = obs_df.loc[~obs_df._scvi_sample.duplicated("first")]
         self.donor_info = obs_df.set_index("_scvi_sample").sort_index()
+        self.sample_key = self.adata_manager.get_state_registry("sample").original_key
         self.sample_order = self.adata_manager.get_state_registry(MRVI_REGISTRY_KEYS.SAMPLE_KEY).categorical_mapping
 
         self.n_obs_per_sample = jnp.array(adata.obs._scvi_sample.value_counts().sort_index().values)
@@ -648,6 +651,132 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             reductions, adata=adata, batch_size=batch_size, use_vmap=use_vmap, norm=norm, mc_samples=mc_samples
         )
 
+    def get_aggregated_posterior(
+        self,
+        adata: Optional[AnnData] = None,
+        indices: Optional[List[str]] = None,
+        batch_size: int = 256,
+    ) -> dist.Distribution:
+        """
+        Computes the aggregated posterior over the ``u`` latent representations.
+
+        Parameters
+        ----------
+        adata
+            AnnData object to use. Defaults to the AnnData object used to initialize the model.
+        indices
+            Indices of cells to use.
+        batch_size
+            Batch size to use for computing the latent representation.
+
+        Returns
+        -------
+        A mixture distribution of the aggregated posterior.
+        """
+        self._check_if_trained(warn=False)
+        adata = self._validate_anndata(adata)
+        scdl = self._make_data_loader(adata=adata, indices=indices, batch_size=batch_size, iter_ndarray=True)
+
+        qu_locs = []
+        qu_scales = []
+        jit_inference_fn = self.module.get_jit_inference_fn(inference_kwargs={"use_mean": True})
+        for array_dict in scdl:
+            outputs = jit_inference_fn(self.module.rngs, array_dict)
+
+            qu_locs.append(outputs["qu"].loc)
+            qu_scales.append(outputs["qu"].scale)
+
+        qu_loc = jnp.concatenate(qu_locs, axis=0).T
+        qu_scale = jnp.concatenate(qu_scales, axis=0).T
+        return dist.MixtureSameFamily(
+            dist.Categorical(probs=jnp.ones(qu_loc.shape[1]) / qu_loc.shape[1]), dist.Normal(qu_loc, qu_scale)
+        )
+
+    def get_outlier_cell_sample_pairs(
+        self,
+        adata=None,
+        flavor: Literal["MoG", "ap"] = "MoG",
+        subsample_size: Optional[int] = None,
+        quantile_threshold: float = 0.0,
+        admissibility_threshold: float = 0.0,
+    ):
+        """Utils function to get outlier cell-sample pairs.
+
+        This function fits a GMM for each sample based on the latent representation
+        of the cells in the sample or computes an approximate aggregated posterior for each sample.
+        Then, for every cell, it computes the log-probability of the cell under the approximated posterior
+        of each sample as a measure of admissibility.
+
+        Parameters
+        ----------
+        adata
+            AnnData object containing the cells for which to compute the outlier cell-sample pairs.
+        flavor
+            Method of approximating posterior on latent representation.
+        subsample_size
+            Number of cells to use from each sample to approximate the posterior. If None, uses all of the available cells.
+        quantile_threshold
+            Quantile of the within-sample log probabilities to use as a baseline for admissibility.
+        admissibility_threshold
+            Threshold for admissibility. Cell-sample pairs with admissibility below this threshold are considered outliers.
+        """
+        adata = self.adata if adata is None else adata
+        adata = self._validate_anndata(adata)
+
+        # Compute u reps
+        us = self.get_latent_representation(adata, use_mean=True, give_z=False)
+        adata.obsm["U"] = us
+
+        log_probs = []
+        threshs = []
+        unique_samples = adata.obs[self.sample_key].unique()
+        for donor_name in tqdm(unique_samples):
+            adata_s = adata[adata.obs[self.sample_key] == donor_name].copy()
+            if subsample_size is not None and adata_s.n_obs > subsample_size:
+                adata_s = adata_s[np.random.choice(adata_s.n_obs, size=subsample_size, replace=False)]
+
+            if flavor == "MoG":
+                n_components = min(adata_s.n_obs // 4, 20)
+                gmm_ = GaussianMixture(n_components=n_components).fit(adata_s.obsm["U"])
+                log_probs_s = jnp.quantile(gmm_.score_samples(adata_s.obsm["U"]), q=quantile_threshold)
+                log_probs_ = gmm_.score_samples(adata.obsm["U"])[:, None]
+            elif flavor == "ap":
+                ap = self.get_aggregated_posterior(adata=adata_s)
+                log_probs_s = jnp.quantile(ap.log_prob(adata_s.obsm["U"]).sum(axis=1), q=quantile_threshold)
+                log_probs_ = (
+                    self.get_aggregated_posterior(adata=adata).log_prob(adata.obsm["U"]).sum(axis=1, keepdims=True)
+                )
+            else:
+                raise ValueError(f"Unknown flavor {flavor}")
+
+            threshs.append(log_probs_s)
+            log_probs.append(log_probs_)
+        log_probs = np.concatenate(log_probs, 1)
+        threshs = np.array(threshs)
+        log_ratios = log_probs - threshs
+
+        coord_info = {
+            "coords": [adata.obs_names, unique_samples],
+            "dims": ["cell", "sample"],
+        }
+        log_probs = xr.DataArray(
+            log_probs,
+            **coord_info,
+        )
+        log_ratios = xr.DataArray(
+            log_ratios,
+            **coord_info,
+        )
+        cell_sample_admissible = log_ratios > admissibility_threshold
+        results = xr.Dataset(
+            {
+                "log_probs": log_probs,
+                "log_ratios": log_ratios,
+                "is_admissible": cell_sample_admissible,
+            }
+        )
+        return results
+
     def perform_multivariate_analysis(
         self,
         adata=None,
@@ -705,7 +834,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         )
         donor_mask = np.array(donor_mask)
 
-        @partial(jax.jit, static_argnames=["use_mean"])
+        @partial(jax.jit, static_argnames=["use_mean", "Amat", "prefactor"])
         def mapped_inference_fn(
             stacked_rngs,
             x,
@@ -1225,16 +1354,16 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             distances_ = distances.sel(dimname_to_vals)
 
         figs = []
-        for dist in distances_:
-            celltype_name = dist.coords[celltype_dimname].item()
+        for d in distances_:
+            celltype_name = d.coords[celltype_dimname].item()
             dendrogram = compute_dendrogram_from_distance_matrix(
-                dist,
+                d,
                 linkage_method=linkage_method,
             )
-            assert dist.ndim == 2
+            assert d.ndim == 2
 
             fig = sns.clustermap(
-                dist.to_pandas(), row_linkage=dendrogram, col_linkage=dendrogram, row_colors=colors, **sns_kwargs
+                d.to_pandas(), row_linkage=dendrogram, col_linkage=dendrogram, row_colors=colors, **sns_kwargs
             )
             fig.fig.suptitle(celltype_name)
             if figure_dir is not None:

@@ -533,6 +533,20 @@ class MrVAE(JaxBaseModuleClass):
         if self.qz_nn_flavor != "linear":
             inference_outputs["qeps"]
             eps = inference_outputs["z"] - inference_outputs["z_base"]
+            # if self.z_u_prior:
+            #     peps = dist.Normal(0, jnp.exp(self.pz_scale))
+            #     kl_z = dist.kl_divergence(qeps, peps).sum(-1) if qeps is not None else -peps.log_prob(eps).sum(-1)
+            # else:
+            #     kl_z = 0
+            # kl_z += (
+            #     -dist.Normal(inference_outputs["z_base"], jnp.exp(self.z_u_prior_scale))
+            #     .log_prob(inference_outputs["z"])
+            #     .sum(-1)
+            #     if self.z_u_prior_scale is not None
+            #     else 0
+            # )
+
+            ## Can loss
             if self.z_u_prior:
                 peps = dist.Normal(0, jnp.exp(self.pz_scale))
                 kl_z = -peps.log_prob(eps).sum(-1)

@@ -96,6 +96,7 @@ class _DecoderZXAttention(nn.Module):
         continuous_covariates: Optional[NdArray],
         training: Optional[bool] = None,
     ) -> NegativeBinomial:
+
         has_mc_samples = z.ndim == 3
         z_stop = z if not self.stop_gradients else jax.lax.stop_gradient(z)
 
@@ -434,10 +435,11 @@ class MrVAE(JaxBaseModuleClass):
             self.pz_scale = self.z_u_prior_scale
 
         if self.u_prior_mixture:
+            u_prior_mixture_k = self.u_prior_mixture_k
             u_dim = self.n_latent_u if self.n_latent_u is not None else self.n_latent
-            self.u_prior_logits = self.param("u_prior_logits", nn.initializers.zeros, (self.u_prior_mixture_k,))
-            self.u_prior_means = self.param("u_prior_means", jax.random.normal, (u_dim, self.u_prior_mixture_k))
-            self.u_prior_scales = self.param("u_prior_scales", nn.initializers.zeros, (u_dim, self.u_prior_mixture_k))
+            self.u_prior_logits = self.param("u_prior_logits", nn.initializers.zeros, (u_prior_mixture_k,))
+            self.u_prior_means = self.param("u_prior_means", nn.initializers.zeros, (u_dim, u_prior_mixture_k))
+            self.u_prior_scales = self.param("u_prior_scales", nn.initializers.zeros, (u_dim, u_prior_mixture_k))
 
     @property
     def required_rngs(self):  # noqa: D102
@@ -600,6 +602,21 @@ class MrVAE(JaxBaseModuleClass):
         inference_outputs = self.inference(x, sample_index, mc_samples=mc_samples, cf_sample=cf_sample, use_mean=False)
         generative_inputs = {
             "z": inference_outputs["z"],
+            "library": library,
+            "batch_index": batch_index,
+            "continuous_covs": continuous_covs,
+        }
+        generative_outputs = self.generative(**generative_inputs)
+        return generative_outputs["h"]
+
+    def compute_h_from_x_eps(
+        self, x, sample_index, batch_index, extra_eps, cf_sample=None, continuous_covs=None, mc_samples=10
+    ):
+        """Compute normalized gene expression from observations using predefined eps"""
+        library = 7.0 * jnp.ones_like(sample_index)  # placeholder, has no effect on the value of h.
+        inference_outputs = self.inference(x, sample_index, mc_samples=mc_samples, cf_sample=cf_sample, use_mean=False)
+        generative_inputs = {
+            "z": inference_outputs["z_base"] + extra_eps,
             "library": library,
             "batch_index": batch_index,
             "continuous_covs": continuous_covs,

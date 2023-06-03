@@ -787,6 +787,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         store_lfc: bool = False,
         store_baseline: bool = False,
         eps_lfc: float = 1e-4,
+        filter_donors: bool = False,
+        filter_donors_kwargs: Optional[Dict] = None,
     ) -> xr.Dataset:
         """Utility function to perform cell-specific multivariate analysis.
 
@@ -831,8 +833,39 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             np.isin(self.sample_order, donor_subset) if donor_subset is not None else np.ones(n_sample, dtype=bool)
         )
         donor_mask = np.array(donor_mask)
+        donor_order = self.sample_order[donor_mask]
+        n_samples_kept = donor_mask.sum()
 
-        @partial(jax.jit, static_argnames=["use_mean", "Amat", "prefactor"])
+        if filter_donors:
+            admissible_donors = self.get_outlier_cell_sample_pairs(adata=adata, **filter_donors_kwargs)["is_admissible"].loc[{"sample": donor_order}]
+            assert (admissible_donors.sample == donor_order).all()
+            admissible_donors = admissible_donors.values
+        else:
+            admissible_donors = np.ones((adata.n_obs, n_samples_kept), dtype=bool)
+
+        Xmat, Xmat_names = self._construct_design_matrix(
+            donor_keys=donor_keys,
+            donor_mask=donor_mask,
+            normalize_design_matrix=normalize_design_matrix,
+            offset_design_matrix=offset_design_matrix,
+        )
+        Xmat = jnp.array(Xmat)
+
+        @partial(jax.jit, backend="cpu", static_argnames="Xmat")
+        def process_design_matrix(
+            admissible_donors_dmat,
+            Xmat,
+        ):
+            # TODO: make sure to write math down
+            # X^T X with masking
+            xtmx = jnp.einsum("ak,nkl,lm->nam", Xmat, admissible_donors_dmat, Xmat.T)
+
+            prefactor = jax.vmap(jax.scipy.linalg.sqrtm)(xtmx)
+            inv_ = jax.vmap(jnp.linalg.pinv)(xtmx)
+            Amat = jnp.einsum("nab,bc,ncd->nad", inv_, Xmat, admissible_donors_dmat)
+            return Amat, prefactor
+
+        # @partial(jax.jit, static_argnames=["use_mean", "Xmat"])
         def mapped_inference_fn(
             stacked_rngs,
             x,
@@ -840,6 +873,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             batch_index,
             continuous_covs,
             cf_sample,
+            admissible_donors_dmat,
             use_mean,
             stacked_rngs_de=None,
         ):
@@ -883,10 +917,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             betas_ = betas.transpose((1, 0, 2))  # (n_metadata, n_cells, n_latent)
             betas_ = betas_ * eps_.std(axis=1) + eps_.mean(axis=1)
             if store_lfc:
-                # Xmat_hard = jnp.ceil(Xmat).T
-                # positive_category = jnp.einsum("ks,nsd->knd", Xmat_hard, betas_)
-                # negative_category = jnp.einsum("ks,nsd->knd", jnp.ones_like(Xmat_hard) - Xmat_hard, betas_)
-
                 def h_inference_fn(rngs, extra_eps):
                     return self.module.apply(
                         vars_in,
@@ -927,41 +957,13 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 "baseline_expression": baseline_expression,
             }
 
-        Xmat = []
-        Xmat_names = []
-        for donor_key in tqdm(donor_keys):
-            cov = self.donor_info[donor_key]
-            if (cov.dtype == str) or (cov.dtype == "category"):
-                cov = pd.get_dummies(cov, drop_first=True)
-                cov_names = donor_key + np.array(cov.columns)
-                cov = cov.values
-            else:
-                cov_names = np.array([donor_key])
-                cov = cov.values[:, None]
-            Xmat.append(cov)
-            Xmat_names.append(cov_names)
-        Xmat_names = np.concatenate(Xmat_names)
-        Xmat = np.concatenate(Xmat, axis=1).astype(np.float32)
-        Xmat = Xmat[donor_mask]
-
-        if normalize_design_matrix:
-            Xmat = (Xmat - Xmat.mean(axis=0)) / (1e-6 + Xmat.std(axis=0))
-        if offset_design_matrix:
-            Xmat = np.concatenate([np.ones((Xmat.shape[0], 1)), Xmat], axis=1)
-            Xmat_names = np.concatenate([np.array(["offset"]), Xmat_names])
-        prefactor = sqrtm(Xmat.T @ Xmat)
-        Amat = np.linalg.pinv(Xmat.T @ Xmat) @ Xmat.T
-
-        Xmat = jnp.array(Xmat)
-        prefactor = jnp.array(prefactor)
-        Amat = jnp.array(Amat)
-
         beta = []
         effect_size = []
         pvalue = []
         lfc = []
         baseline_expression = []
         for array_dict in tqdm(scdl):
+            indices = array_dict[REGISTRY_KEYS.INDICES_KEY].astype(int).flatten()
             n_cells = array_dict[REGISTRY_KEYS.X_KEY].shape[0]
             cf_sample = np.broadcast_to(np.arange(n_sample)[:, None, None], (n_sample, n_cells, 1))
             inf_inputs = self.module._get_inference_input(
@@ -972,6 +974,12 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 continuous_covs = jnp.array(continuous_covs)
             stacked_rngs = self._generate_stacked_rngs(cf_sample.shape[0])
             stacked_rngs_de = self._generate_stacked_rngs(Xmat.shape[1])
+
+            admissible_donors_dmat = jnp.array(admissible_donors[indices])  # (n_cells, n_donors)
+            admissible_donors_dmat = jax.vmap(jnp.diag)(admissible_donors_dmat).astype(float)  # (n_cells, n_donors, n_donors)
+            # element nij is 1 if donor i is admissible and i=j for cell n
+            Amat, prefactor = process_design_matrix(admissible_donors_dmat, Xmat)
+
             res = mapped_inference_fn(
                 stacked_rngs=stacked_rngs,
                 x=jnp.array(inf_inputs["x"]),
@@ -979,6 +987,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 batch_index=jnp.array(array_dict[REGISTRY_KEYS.BATCH_KEY]),
                 continuous_covs=continuous_covs,
                 cf_sample=jnp.array(cf_sample),
+                admissible_donors_dmat=admissible_donors_dmat,
                 use_mean=False,
                 stacked_rngs_de=stacked_rngs_de,
             )  # (n_cells, n_donors, n_latent)
@@ -1053,6 +1062,38 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             res["baseline_expression"] = baseline_expression
         data = xr.Dataset(res)
         return data
+
+    def _construct_design_matrix(
+        self,
+        donor_keys,
+        donor_mask,
+        normalize_design_matrix,
+        offset_design_matrix,
+    ):
+        Xmat = []
+        Xmat_names = []
+        for donor_key in tqdm(donor_keys):
+            cov = self.donor_info[donor_key]
+            if (cov.dtype == str) or (cov.dtype == "category"):
+                cov = pd.get_dummies(cov, drop_first=True)
+                cov_names = donor_key + np.array(cov.columns)
+                cov = cov.values
+            else:
+                cov_names = np.array([donor_key])
+                cov = cov.values[:, None]
+            Xmat.append(cov)
+            Xmat_names.append(cov_names)
+        Xmat_names = np.concatenate(Xmat_names)
+        Xmat = np.concatenate(Xmat, axis=1).astype(np.float32)
+        Xmat = Xmat[donor_mask]
+
+        if normalize_design_matrix:
+            Xmat = (Xmat - Xmat.mean(axis=0)) / (1e-6 + Xmat.std(axis=0))
+        if offset_design_matrix:
+            Xmat = np.concatenate([np.ones((Xmat.shape[0], 1)), Xmat], axis=1)
+            Xmat_names = np.concatenate([np.array(["offset"]), Xmat_names])
+        return Xmat, Xmat_names
+
 
     def compute_cell_scores(
         self,

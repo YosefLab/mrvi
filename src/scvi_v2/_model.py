@@ -776,10 +776,10 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
     def perform_multivariate_analysis(
         self,
-        adata=None,
+        adata: Optional[AnnData] = None,
         donor_keys: List[Tuple] = None,
         donor_subset: Optional[List[str]] = None,
-        batch_size=256,
+        batch_size: int = 256,
         use_vmap: bool = True,
         normalize_design_matrix: bool = True,
         offset_design_matrix: bool = True,
@@ -1026,65 +1026,43 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         pvalue_shape = pvalue.shape
         padj = multipletests(pvalue.flatten(), method="fdr_bh")[1].reshape(pvalue_shape)
 
-        n_latent = beta.shape[2]
-        beta = xr.DataArray(
-            beta,
-            dims=["cell_name", "covariate", "latent_dim"],
-            coords={"cell_name": adata.obs_names, "covariate": Xmat_names, "latent_dim": np.arange(n_latent)},
-            name="beta",
-        )
-        effect_size = xr.DataArray(
-            effect_size,
-            dims=["cell_name", "covariate"],
-            coords={"cell_name": adata.obs_names, "covariate": Xmat_names},
-            name="effect_size",
-        )
-        pvalue = xr.DataArray(
-            pvalue,
-            dims=["cell_name", "covariate"],
-            coords={"cell_name": adata.obs_names, "covariate": Xmat_names},
-            name="pvalue",
-        )
-        padj = xr.DataArray(
-            padj,
-            dims=["cell_name", "covariate"],
-            coords={"cell_name": adata.obs_names, "covariate": Xmat_names},
-            name="padj",
-        )
-        res = {
-            "beta": beta,
-            "effect_size": effect_size,
-            "pvalue": pvalue,
-            "padj": padj,
+        coords = {
+            "cell_name": adata.obs_names,
+            "covariate": Xmat_names,
+            "latent_dim": np.arange(beta.shape[2]),
+            "gene": adata.var_names,
+        }
+        data_vars = {
+            "beta": (
+                ["cell_name", "covariate", "latent_dim"],
+                beta,
+            ),
+            "effect_size": (
+                ["cell_name", "covariate"],
+                effect_size,
+            ),
+            "pvalue": (
+                ["cell_name", "covariate"],
+                pvalue,
+            ),
+            "padj": (
+                ["cell_name", "covariate"],
+                padj,
+            ),
         }
         if store_lfc:
             lfc = np.concatenate(lfc, axis=1)
-            lfc = xr.DataArray(
+            data_vars["lfc"] = (
+                ["covariate", "cell_name", "gene"],
                 lfc,
-                dims=["covariate", "cell_name", "gene"],
-                coords={
-                    "covariate": Xmat_names,
-                    "cell_name": adata.obs_names,
-                    "gene": adata.var_names,
-                },
-                name="lfc",
             )
-            res["lfc"] = lfc
         if store_baseline:
             baseline_expression = np.concatenate(baseline_expression, axis=1)
-            baseline_expression = xr.DataArray(
+            data_vars["baseline_expression"] = (
+                ["covariate", "cell_name", "gene"],
                 baseline_expression,
-                dims=["covariate", "cell_name", "gene"],
-                coords={
-                    "covariate": Xmat_names,
-                    "cell_name": adata.obs_names,
-                    "gene": adata.var_names,
-                },
-                name="baseline_expression",
             )
-            res["baseline_expression"] = baseline_expression
-        data = xr.Dataset(res)
-        return data
+        return xr.Dataset(data_vars, coords=coords)
 
     def _construct_design_matrix(
         self,

@@ -33,6 +33,7 @@ def test_mrvi():
     model.get_outlier_cell_sample_pairs(flavor="ap", subsample_size=50)
     donor_keys = ["meta1_cat", "meta2", "cont_cov"]
     model.perform_multivariate_analysis(donor_keys=donor_keys, store_lfc=True)
+    model.perform_multivariate_analysis(donor_keys=donor_keys, store_lfc=True, filter_donors=True)
     model.get_local_sample_distances(normalize_distances=True)
 
     MrVI.setup_anndata(adata, sample_key="sample_str", batch_key="batch", continuous_covariate_keys=["cont_cov"])

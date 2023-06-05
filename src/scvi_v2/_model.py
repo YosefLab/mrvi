@@ -787,7 +787,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         store_baseline: bool = False,
         eps_lfc: float = 1e-4,
         filter_donors: bool = False,
-        filter_donors_kwargs: Optional[Dict] = None,
+        **filter_donors_kwargs,
     ) -> xr.Dataset:
         """Utility function to perform cell-specific multivariate analysis.
 
@@ -921,12 +921,10 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             eps = (eps_ - eps_.mean(axis=1, keepdims=True)) / (1e-6 + eps_.std(axis=1, keepdims=True))  # over samples
 
             # MLE for betas
-            Amat_ = jax.device_put(Amat, eps.device_buffer.device())
-            prefactor_ = jax.device_put(prefactor, eps.device_buffer.device())
-            betas = jnp.einsum("nks,nsd->nkd", Amat_, eps)
+            betas = jnp.einsum("nks,nsd->nkd", Amat, eps)
 
             # Statistical tests
-            betas_norm = jnp.einsum("nkd,nkl->nld", betas, prefactor_)
+            betas_norm = jnp.einsum("nkd,nkl->nld", betas, prefactor)
             ts = (betas_norm**2).sum(axis=-1)
             pvals = 1 - jax.scipy.stats.chi2.cdf(ts, df=n_donors_per_cell[:, None])
 
@@ -1000,6 +998,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             )  # (n_cells, n_donors, n_donors)
             # element nij is 1 if donor i is admissible and i=j for cell n
             Amat, prefactor = process_design_matrix(admissible_donors_dmat, Xmat)
+            Amat = jax.device_put(Amat, self.device)
+            prefactor = jax.device_put(prefactor, self.device)
 
             res = mapped_inference_fn(
                 stacked_rngs=stacked_rngs,

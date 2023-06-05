@@ -256,8 +256,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         adata = self.adata if adata is None else adata
         self._check_if_trained(warn=False)
         # Hack to ensure new AnnDatas have indices.
-        if "_indices" not in adata.obs:
-            adata.obs["_indices"] = np.arange(adata.n_obs).astype(int)
+        adata.obs["_indices"] = np.arange(adata.n_obs).astype(int)
 
         adata = self._validate_anndata(adata)
         scdl = self._make_data_loader(adata=adata, indices=indices, batch_size=batch_size, iter_ndarray=True)
@@ -692,7 +691,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
     def get_outlier_cell_sample_pairs(
         self,
         adata=None,
-        flavor: Literal["MoG", "ap"] = "MoG",
+        flavor: Literal["MoG", "ap"] = "ap",
         subsample_size: Optional[int] = None,
         quantile_threshold: float = 0.0,
         admissibility_threshold: float = 0.0,
@@ -746,33 +745,25 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             else:
                 raise ValueError(f"Unknown flavor {flavor}")
 
-            threshs.append(log_probs_s)
-            log_probs.append(log_probs_)
+            threshs.append(np.array(jax.device_get(log_probs_s)))
+            log_probs.append(np.array(jax.device_get(log_probs_)))
         log_probs = np.concatenate(log_probs, 1)
         threshs = np.array(threshs)
         log_ratios = log_probs - threshs
 
-        coord_info = {
-            "coords": [adata.obs_names, unique_samples],
-            "dims": ["cell", "sample"],
+        coords = {
+            "cell_name": adata.obs_names,
+            "sample": unique_samples,
         }
-        log_probs = xr.DataArray(
-            log_probs,
-            **coord_info,
-        )
-        log_ratios = xr.DataArray(
-            log_ratios,
-            **coord_info,
-        )
-        cell_sample_admissible = log_ratios > admissibility_threshold
-        results = xr.Dataset(
-            {
-                "log_probs": log_probs,
-                "log_ratios": log_ratios,
-                "is_admissible": cell_sample_admissible,
-            }
-        )
-        return results
+        data_vars = {
+            "log_probs": (["cell_name", "sample"], log_probs),
+            "log_ratios": (
+                ["cell_name", "sample"],
+                log_ratios,
+            ),
+            "is_admissible": (["cell_name", "sample"], log_ratios > admissibility_threshold),
+        }
+        return xr.Dataset(data_vars, coords=coords)
 
     def perform_multivariate_analysis(
         self,

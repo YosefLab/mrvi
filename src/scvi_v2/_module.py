@@ -84,7 +84,6 @@ class _DecoderZXAttention(nn.Module):
     training: Optional[bool] = None
     low_dim_batch: bool = True
     activation: Callable = nn.gelu
-    batch_values: bool = True
 
     @nn.compact
     def __call__(
@@ -112,12 +111,8 @@ class _DecoderZXAttention(nn.Module):
 
             res_dim = self.n_in if self.low_dim_batch else self.n_out
 
-            if self.batch_values:
-                query_embed = z_
-                kv_embed = batch_embed
-            else:
-                query_embed = batch_embed
-                kv_embed = z_
+            query_embed = z_
+            kv_embed = batch_embed
             residual = AttentionBlock(
                 query_dim=self.n_in,
                 out_dim=res_dim,

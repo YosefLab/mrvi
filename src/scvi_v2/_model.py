@@ -14,7 +14,6 @@ import pandas as pd
 import seaborn as sns
 import xarray as xr
 from anndata import AnnData
-from scipy.linalg import sqrtm
 from scvi import REGISTRY_KEYS
 from scvi.data import AnnDataManager
 from scvi.data.fields import (
@@ -837,7 +836,9 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         n_samples_kept = donor_mask.sum()
 
         if filter_donors:
-            admissible_donors = self.get_outlier_cell_sample_pairs(adata=adata, **filter_donors_kwargs)["is_admissible"].loc[{"sample": donor_order}]
+            admissible_donors = self.get_outlier_cell_sample_pairs(adata=adata, **filter_donors_kwargs)[
+                "is_admissible"
+            ].loc[{"sample": donor_order}]
             assert (admissible_donors.sample == donor_order).all()
             admissible_donors = admissible_donors.values
         else:
@@ -851,21 +852,21 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         )
         Xmat = jnp.array(Xmat)
 
-        @partial(jax.jit, backend="cpu", static_argnames="Xmat")
+        @partial(jax.jit, backend="cpu")
         def process_design_matrix(
             admissible_donors_dmat,
             Xmat,
         ):
             # TODO: make sure to write math down
             # X^T X with masking
-            xtmx = jnp.einsum("ak,nkl,lm->nam", Xmat, admissible_donors_dmat, Xmat.T)
+            xtmx = jnp.einsum("ak,nkl,lm->nam", Xmat.T, admissible_donors_dmat, Xmat)
 
-            prefactor = jax.vmap(jax.scipy.linalg.sqrtm)(xtmx)
+            prefactor = jnp.real(jax.vmap(jax.scipy.linalg.sqrtm)(xtmx))
             inv_ = jax.vmap(jnp.linalg.pinv)(xtmx)
-            Amat = jnp.einsum("nab,bc,ncd->nad", inv_, Xmat, admissible_donors_dmat)
+            Amat = jnp.einsum("nab,bc,ncd->nad", inv_, Xmat.T, admissible_donors_dmat)
             return Amat, prefactor
 
-        # @partial(jax.jit, static_argnames=["use_mean", "Xmat"])
+        @partial(jax.jit, static_argnames=["use_mean", "Xmat"])
         def mapped_inference_fn(
             stacked_rngs,
             x,
@@ -873,7 +874,9 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             batch_index,
             continuous_covs,
             cf_sample,
-            admissible_donors_dmat,
+            Amat,
+            prefactor,
+            n_donors_per_cell,
             use_mean,
             stacked_rngs_de=None,
         ):
@@ -906,17 +909,21 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             eps_ = eps_[:, donor_mask]
             eps = (eps_ - eps_.mean(axis=1, keepdims=True)) / (1e-6 + eps_.std(axis=1, keepdims=True))  # over samples
 
-            betas = jnp.einsum("ks,nsd->nkd", Amat, eps)
-            # Statistical test
-            betas_norm = jnp.einsum("nkd,kl->nld", betas, prefactor)
-            df = betas_norm.shape[-1]
-            ts = (betas_norm**2).sum(axis=-1)
-            pvals = 1 - jax.scipy.stats.chi2.cdf(ts, df=df)
+            # MLE for betas
+            Amat_ = jax.device_put(Amat, eps.device_buffer.device())
+            prefactor_ = jax.device_put(prefactor, eps.device_buffer.device())
+            betas = jnp.einsum("nks,nsd->nkd", Amat_, eps)
 
-            # Decoding
+            # Statistical tests
+            betas_norm = jnp.einsum("nkd,nkl->nld", betas, prefactor_)
+            ts = (betas_norm**2).sum(axis=-1)
+            pvals = 1 - jax.scipy.stats.chi2.cdf(ts, df=n_donors_per_cell[:, None])
+
+            # Optional: compute log-fold changes
             betas_ = betas.transpose((1, 0, 2))  # (n_metadata, n_cells, n_latent)
             betas_ = betas_ * eps_.std(axis=1) + eps_.mean(axis=1)
             if store_lfc:
+
                 def h_inference_fn(rngs, extra_eps):
                     return self.module.apply(
                         vars_in,
@@ -975,8 +982,11 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             stacked_rngs = self._generate_stacked_rngs(cf_sample.shape[0])
             stacked_rngs_de = self._generate_stacked_rngs(Xmat.shape[1])
 
-            admissible_donors_dmat = jnp.array(admissible_donors[indices])  # (n_cells, n_donors)
-            admissible_donors_dmat = jax.vmap(jnp.diag)(admissible_donors_dmat).astype(float)  # (n_cells, n_donors, n_donors)
+            admissible_donors_mat = jnp.array(admissible_donors[indices])  # (n_cells, n_donors)
+            n_donors_per_cell = admissible_donors_mat.sum(axis=1)
+            admissible_donors_dmat = jax.vmap(jnp.diag)(admissible_donors_mat).astype(
+                float
+            )  # (n_cells, n_donors, n_donors)
             # element nij is 1 if donor i is admissible and i=j for cell n
             Amat, prefactor = process_design_matrix(admissible_donors_dmat, Xmat)
 
@@ -987,7 +997,9 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 batch_index=jnp.array(array_dict[REGISTRY_KEYS.BATCH_KEY]),
                 continuous_covs=continuous_covs,
                 cf_sample=jnp.array(cf_sample),
-                admissible_donors_dmat=admissible_donors_dmat,
+                Amat=Amat,
+                prefactor=prefactor,
+                n_donors_per_cell=n_donors_per_cell,
                 use_mean=False,
                 stacked_rngs_de=stacked_rngs_de,
             )  # (n_cells, n_donors, n_latent)
@@ -1093,7 +1105,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             Xmat = np.concatenate([np.ones((Xmat.shape[0], 1)), Xmat], axis=1)
             Xmat_names = np.concatenate([np.array(["offset"]), Xmat_names])
         return Xmat, Xmat_names
-
 
     def compute_cell_scores(
         self,

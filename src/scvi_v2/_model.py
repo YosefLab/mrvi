@@ -791,6 +791,11 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
     ) -> xr.Dataset:
         """Utility function to perform cell-specific multivariate analysis.
 
+        For every cell, we first compute all counterfactual cell-state shifts, defined as
+        e_d = z_d - u, where z_d is the latent representation of the cell for donor d and u is the donor-unaware latent representation.
+        Then, we fit a linear model in each cell of the form
+        e_d = X_d * beta_d + iid gaussian noise.
+
         Parameters
         ----------
         adata
@@ -816,6 +821,12 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             a smaller set of cells to analyze, e.g., by specifying `adata`.
         store_baseline
             Whether to store the expression in the module if logfoldchanges are computed.
+        eps_lfc
+            Epsilon to add to the log-fold changes to avoid detecting genes with low expression.
+        filter_donors
+            Whether to filter out-of-distribution donors prior to performing the analysis.
+        filter_donors_kwargs
+            Keyword arguments to pass to `get_outlier_cell_sample_pairs`.
         """
         adata = self.adata if adata is None else adata
         self._check_if_trained(warn=False)

@@ -72,7 +72,7 @@ class _DecoderZXAttention(nn.Module):
     n_out: int
     n_batch: int
     n_latent_sample: int = 16
-    h_activation: Callable = nn.softplus
+    h_activation: Callable = nn.softmax
     n_channels: int = 4
     n_heads: int = 2
     dropout_rate: float = 0.1
@@ -82,7 +82,7 @@ class _DecoderZXAttention(nn.Module):
     n_hidden: int = 32
     n_layers: int = 1
     training: Optional[bool] = None
-    low_dim_batch: bool = False
+    low_dim_batch: bool = True
     activation: Callable = nn.gelu
 
     @nn.compact
@@ -94,37 +94,45 @@ class _DecoderZXAttention(nn.Module):
         continuous_covariates: Optional[NdArray],
         training: Optional[bool] = None,
     ) -> NegativeBinomial:
+
         has_mc_samples = z.ndim == 3
         z_stop = z if not self.stop_gradients else jax.lax.stop_gradient(z)
         z_ = nn.LayerNorm(name="u_ln")(z_stop)
 
         batch_covariate = batch_covariate.astype(int).flatten()
-        batch_embed = nn.Embed(self.n_batch, self.n_latent_sample, embedding_init=_normal_initializer)(
-            batch_covariate
-        )  # (batch, n_latent_sample)
-        batch_embed = nn.LayerNorm(name="batch_embed_ln")(batch_embed)
-        if has_mc_samples:
-            batch_embed = jnp.tile(batch_embed, (z_.shape[0], 1, 1))
 
-        res_dim = self.n_in if self.low_dim_batch else self.n_out
-        residual = AttentionBlock(
-            query_dim=self.n_in,
-            out_dim=res_dim,
-            outerprod_dim=self.n_latent_sample,
-            n_channels=self.n_channels,
-            n_heads=self.n_heads,
-            dropout_rate=self.dropout_rate,
-            n_hidden_mlp=self.n_hidden,
-            n_layers_mlp=self.n_layers,
-            stop_gradients_mlp=self.stop_gradients_mlp,
-            training=training,
-            activation=self.activation,
-        )(query_embed=z_, kv_embed=batch_embed)
+        if self.n_batch >= 2:
+            batch_embed = nn.Embed(self.n_batch, self.n_latent_sample, embedding_init=_normal_initializer)(
+                batch_covariate
+            )  # (batch, n_latent_sample)
+            batch_embed = nn.LayerNorm(name="batch_embed_ln")(batch_embed)
+            if has_mc_samples:
+                batch_embed = jnp.tile(batch_embed, (z_.shape[0], 1, 1))
 
-        if self.low_dim_batch:
-            mu = nn.Dense(self.n_out)(z + residual)
+            res_dim = self.n_in if self.low_dim_batch else self.n_out
+
+            query_embed = z_
+            kv_embed = batch_embed
+            residual = AttentionBlock(
+                query_dim=self.n_in,
+                out_dim=res_dim,
+                outerprod_dim=self.n_latent_sample,
+                n_channels=self.n_channels,
+                n_heads=self.n_heads,
+                dropout_rate=self.dropout_rate,
+                n_hidden_mlp=self.n_hidden,
+                n_layers_mlp=self.n_layers,
+                stop_gradients_mlp=self.stop_gradients_mlp,
+                training=training,
+                activation=self.activation,
+            )(query_embed=query_embed, kv_embed=kv_embed)
+
+            if self.low_dim_batch:
+                mu = nn.Dense(self.n_out)(z + residual)
+            else:
+                mu = nn.Dense(self.n_out)(z) + residual
         else:
-            mu = nn.Dense(self.n_out)(z) + residual
+            mu = nn.Dense(self.n_out)(z_)
         mu = self.h_activation(mu)
         return NegativeBinomial(
             mean=mu * size_factor, inverse_dispersion=jnp.exp(self.param("px_r", jax.random.normal, (self.n_out,)))
@@ -447,6 +455,7 @@ class MrVAE(JaxBaseModuleClass):
         return {
             "qu": qu,
             "qeps": qeps,
+            "eps": eps,
             "As": As,
             "u": u,
             "z": z,
@@ -552,6 +561,21 @@ class MrVAE(JaxBaseModuleClass):
         inference_outputs = self.inference(x, sample_index, mc_samples=mc_samples, cf_sample=cf_sample, use_mean=False)
         generative_inputs = {
             "z": inference_outputs["z"],
+            "library": library,
+            "batch_index": batch_index,
+            "continuous_covs": continuous_covs,
+        }
+        generative_outputs = self.generative(**generative_inputs)
+        return generative_outputs["h"]
+
+    def compute_h_from_x_eps(
+        self, x, sample_index, batch_index, extra_eps, cf_sample=None, continuous_covs=None, mc_samples=10
+    ):
+        """Compute normalized gene expression from observations using predefined eps"""
+        library = 7.0 * jnp.ones_like(sample_index)  # placeholder, has no effect on the value of h.
+        inference_outputs = self.inference(x, sample_index, mc_samples=mc_samples, cf_sample=cf_sample, use_mean=False)
+        generative_inputs = {
+            "z": inference_outputs["z_base"] + extra_eps,
             "library": library,
             "batch_index": batch_index,
             "continuous_covs": continuous_covs,

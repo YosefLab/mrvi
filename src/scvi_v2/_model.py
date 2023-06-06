@@ -692,9 +692,10 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         self,
         adata=None,
         flavor: Literal["MoG", "ap"] = "ap",
-        subsample_size: Optional[int] = None,
+        subsample_size: Optional[int] = 5000,
         quantile_threshold: float = 0.0,
         admissibility_threshold: float = 0.0,
+        minibatch_size: int = 256,
     ):
         """Utils function to get outlier cell-sample pairs.
 
@@ -730,7 +731,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             adata_s = adata[adata.obs[self.sample_key] == donor_name].copy()
             if subsample_size is not None and adata_s.n_obs > subsample_size:
                 adata_s = adata_s[np.random.choice(adata_s.n_obs, size=subsample_size, replace=False)]
-
             if flavor == "MoG":
                 n_components = min(adata_s.n_obs // 4, 20)
                 gmm_ = GaussianMixture(n_components=n_components).fit(adata_s.obsm["U"])
@@ -739,14 +739,19 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             elif flavor == "ap":
                 ap = self.get_aggregated_posterior(adata=adata_s)
                 log_probs_s = jnp.quantile(ap.log_prob(adata_s.obsm["U"]).sum(axis=1), q=quantile_threshold)
-                log_probs_ = (
-                    self.get_aggregated_posterior(adata=adata).log_prob(adata.obsm["U"]).sum(axis=1, keepdims=True)
-                )
+                n_splits = adata.n_obs // minibatch_size
+                log_probs_ = []
+                for u_rep in np.array_split(adata.obsm["U"], n_splits):
+                    log_probs_.append(
+                        jax.device_put(ap.log_prob(u_rep).sum(-1, keepdims=True))
+                    )
+
+                log_probs_ = np.concatenate(log_probs_, axis=0)  # (n_cells, 1)
             else:
                 raise ValueError(f"Unknown flavor {flavor}")
 
-            threshs.append(np.array(jax.device_get(log_probs_s)))
-            log_probs.append(np.array(jax.device_get(log_probs_)))
+            threshs.append(np.array(log_probs_s))
+            log_probs.append(np.array(log_probs_))
         log_probs = np.concatenate(log_probs, 1)
         threshs = np.array(threshs)
         log_ratios = log_probs - threshs

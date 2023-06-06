@@ -743,7 +743,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 log_probs_ = []
                 for u_rep in np.array_split(adata.obsm["U"], n_splits):
                     log_probs_.append(
-                        jax.device_put(ap.log_prob(u_rep).sum(-1, keepdims=True))
+                        jax.device_get(ap.log_prob(u_rep).sum(-1, keepdims=True))
                     )
 
                 log_probs_ = np.concatenate(log_probs_, axis=0)  # (n_cells, 1)

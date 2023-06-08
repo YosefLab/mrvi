@@ -692,11 +692,11 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         self,
         adata=None,
         flavor: Literal["MoG", "ap"] = "ap",
-        subsample_size: Optional[int] = 5000,
+        subsample_size: int = 5000,
         quantile_threshold: float = 0.0,
         admissibility_threshold: float = 0.0,
         minibatch_size: int = 256,
-    ):
+    ) -> xr.Dataset:
         """Utils function to get outlier cell-sample pairs.
 
         This function fits a GMM for each sample based on the latent representation
@@ -727,24 +727,23 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         log_probs = []
         threshs = []
         unique_samples = adata.obs[self.sample_key].unique()
-        for donor_name in tqdm(unique_samples):
-            adata_s = adata[adata.obs[self.sample_key] == donor_name].copy()
-            if subsample_size is not None and adata_s.n_obs > subsample_size:
-                adata_s = adata_s[np.random.choice(adata_s.n_obs, size=subsample_size, replace=False)]
+        for sample_name in tqdm(unique_samples):
+            sample_idxs = np.where(adata.obs[self.sample_key] == sample_name)[0]
+            if subsample_size is not None and sample_idxs.shape[0] > subsample_size:
+                sample_idxs = np.random.choice(sample_idxs, size=subsample_size, replace=False)
+            adata_s = adata[sample_idxs]
             if flavor == "MoG":
                 n_components = min(adata_s.n_obs // 4, 20)
                 gmm_ = GaussianMixture(n_components=n_components).fit(adata_s.obsm["U"])
                 log_probs_s = jnp.quantile(gmm_.score_samples(adata_s.obsm["U"]), q=quantile_threshold)
                 log_probs_ = gmm_.score_samples(adata.obsm["U"])[:, None]
             elif flavor == "ap":
-                ap = self.get_aggregated_posterior(adata=adata_s)
+                ap = self.get_aggregated_posterior(adata=adata, indices=sample_idxs)
                 log_probs_s = jnp.quantile(ap.log_prob(adata_s.obsm["U"]).sum(axis=1), q=quantile_threshold)
                 n_splits = adata.n_obs // minibatch_size
                 log_probs_ = []
                 for u_rep in np.array_split(adata.obsm["U"], n_splits):
-                    log_probs_.append(
-                        jax.device_get(ap.log_prob(u_rep).sum(-1, keepdims=True))
-                    )
+                    log_probs_.append(jax.device_get(ap.log_prob(u_rep).sum(-1, keepdims=True)))
 
                 log_probs_ = np.concatenate(log_probs_, axis=0)  # (n_cells, 1)
             else:

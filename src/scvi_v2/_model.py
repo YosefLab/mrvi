@@ -38,6 +38,7 @@ from ._utils import (
     _parse_local_statistics_requirements,
     compute_statistic,
     permutation_test,
+    rowwise_max_excluding_diagonal,
 )
 
 logger = logging.getLogger(__name__)
@@ -691,7 +692,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
     def get_outlier_cell_sample_pairs(
         self,
         adata=None,
-        flavor: Literal["MoG", "ap"] = "ap",
+        flavor: Literal["ball", "ap", "MoG"] = "ball",
         subsample_size: int = 5000,
         quantile_threshold: float = 0.0,
         admissibility_threshold: float = 0.0,
@@ -746,6 +747,25 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                     log_probs_.append(jax.device_get(ap.log_prob(u_rep).sum(-1, keepdims=True)))
 
                 log_probs_ = np.concatenate(log_probs_, axis=0)  # (n_cells, 1)
+            elif flavor == "ball":
+                ap = self.get_aggregated_posterior(adata=adata, indices=sample_idxs)
+                in_max_comp_log_probs = ap.component_distribution.log_prob(
+                    np.expand_dims(adata_s.obsm["U"], ap.mixture_dim)
+                ).sum(axis=1)
+                log_probs_s = jnp.quantile(rowwise_max_excluding_diagonal(in_max_comp_log_probs), q=quantile_threshold)
+
+                log_probs_ = []
+                n_splits = adata.n_obs // minibatch_size
+                for u_rep in np.array_split(adata.obsm["U"], n_splits):
+                    log_probs_.append(
+                        jax.device_get(
+                            ap.component_distribution.log_prob(np.expand_dims(u_rep, ap.mixture_dim))
+                            .sum(axis=1)
+                            .max(axis=1, keepdims=True)
+                        )
+                    )
+
+                log_probs_ = np.concatenate(log_probs_, axis=0)  # (n_cells, 1)
             else:
                 raise ValueError(f"Unknown flavor {flavor}")
 
@@ -756,7 +776,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         log_ratios = log_probs - threshs
 
         coords = {
-            "cell_name": adata.obs_names,
+            "cell_name": adata.obs_names.to_numpy(),
             "sample": unique_samples,
         }
         data_vars = {

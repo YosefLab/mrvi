@@ -53,6 +53,15 @@ def _parse_local_statistics_requirements(
     )
 
 
+@jax.jit
+def rowwise_max_excluding_diagonal(matrix):
+    """Returns the rowwise maximum of a matrix excluding the diagonal."""
+    assert matrix.ndim == 2
+    num_cols = matrix.shape[1]
+    mask = (1 - jnp.eye(num_cols)).astype(bool)
+    return (jnp.where(mask, matrix, -jnp.inf)).max(axis=1)
+
+
 def simple_reciprocal(w, eps=1e-6):
     """Convert distances to similarities via a reciprocal."""
     return 1.0 / (w + eps)

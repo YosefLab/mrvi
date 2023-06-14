@@ -38,6 +38,7 @@ from ._utils import (
     _parse_local_statistics_requirements,
     compute_statistic,
     permutation_test,
+    rowwise_max_excluding_diagonal,
 )
 
 logger = logging.getLogger(__name__)
@@ -691,12 +692,12 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
     def get_outlier_cell_sample_pairs(
         self,
         adata=None,
-        flavor: Literal["MoG", "ap"] = "ap",
-        subsample_size: Optional[int] = 5000,
+        flavor: Literal["ball", "ap", "MoG"] = "ball",
+        subsample_size: int = 5000,
         quantile_threshold: float = 0.0,
         admissibility_threshold: float = 0.0,
         minibatch_size: int = 256,
-    ):
+    ) -> xr.Dataset:
         """Utils function to get outlier cell-sample pairs.
 
         This function fits a GMM for each sample based on the latent representation
@@ -727,23 +728,41 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         log_probs = []
         threshs = []
         unique_samples = adata.obs[self.sample_key].unique()
-        for donor_name in tqdm(unique_samples):
-            adata_s = adata[adata.obs[self.sample_key] == donor_name].copy()
-            if subsample_size is not None and adata_s.n_obs > subsample_size:
-                adata_s = adata_s[np.random.choice(adata_s.n_obs, size=subsample_size, replace=False)]
+        for sample_name in tqdm(unique_samples):
+            sample_idxs = np.where(adata.obs[self.sample_key] == sample_name)[0]
+            if subsample_size is not None and sample_idxs.shape[0] > subsample_size:
+                sample_idxs = np.random.choice(sample_idxs, size=subsample_size, replace=False)
+            adata_s = adata[sample_idxs]
             if flavor == "MoG":
                 n_components = min(adata_s.n_obs // 4, 20)
                 gmm_ = GaussianMixture(n_components=n_components).fit(adata_s.obsm["U"])
                 log_probs_s = jnp.quantile(gmm_.score_samples(adata_s.obsm["U"]), q=quantile_threshold)
                 log_probs_ = gmm_.score_samples(adata.obsm["U"])[:, None]
             elif flavor == "ap":
-                ap = self.get_aggregated_posterior(adata=adata_s)
+                ap = self.get_aggregated_posterior(adata=adata, indices=sample_idxs)
                 log_probs_s = jnp.quantile(ap.log_prob(adata_s.obsm["U"]).sum(axis=1), q=quantile_threshold)
                 n_splits = adata.n_obs // minibatch_size
                 log_probs_ = []
                 for u_rep in np.array_split(adata.obsm["U"], n_splits):
+                    log_probs_.append(jax.device_get(ap.log_prob(u_rep).sum(-1, keepdims=True)))
+
+                log_probs_ = np.concatenate(log_probs_, axis=0)  # (n_cells, 1)
+            elif flavor == "ball":
+                ap = self.get_aggregated_posterior(adata=adata, indices=sample_idxs)
+                in_max_comp_log_probs = ap.component_distribution.log_prob(
+                    np.expand_dims(adata_s.obsm["U"], ap.mixture_dim)
+                ).sum(axis=1)
+                log_probs_s = rowwise_max_excluding_diagonal(in_max_comp_log_probs)
+
+                log_probs_ = []
+                n_splits = adata.n_obs // minibatch_size
+                for u_rep in np.array_split(adata.obsm["U"], n_splits):
                     log_probs_.append(
-                        jax.device_get(ap.log_prob(u_rep).sum(-1, keepdims=True))
+                        jax.device_get(
+                            ap.component_distribution.log_prob(np.expand_dims(u_rep, ap.mixture_dim))
+                            .sum(axis=1)
+                            .max(axis=1, keepdims=True)
+                        )
                     )
 
                 log_probs_ = np.concatenate(log_probs_, axis=0)  # (n_cells, 1)
@@ -752,12 +771,19 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
             threshs.append(np.array(log_probs_s))
             log_probs.append(np.array(log_probs_))
+
+        if flavor == "ball":
+            # Compute a threshold across all samples
+            threshs_all = np.concatenate(threshs)
+            global_thresh = np.quantile(threshs_all, q=quantile_threshold)
+            threshs = len(log_probs) * [global_thresh]
+
         log_probs = np.concatenate(log_probs, 1)
         threshs = np.array(threshs)
         log_ratios = log_probs - threshs
 
         coords = {
-            "cell_name": adata.obs_names,
+            "cell_name": adata.obs_names.to_numpy(),
             "sample": unique_samples,
         }
         data_vars = {

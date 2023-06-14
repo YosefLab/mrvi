@@ -752,7 +752,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 in_max_comp_log_probs = ap.component_distribution.log_prob(
                     np.expand_dims(adata_s.obsm["U"], ap.mixture_dim)
                 ).sum(axis=1)
-                log_probs_s = jnp.quantile(rowwise_max_excluding_diagonal(in_max_comp_log_probs), q=quantile_threshold)
+                log_probs_s = rowwise_max_excluding_diagonal(in_max_comp_log_probs)
 
                 log_probs_ = []
                 n_splits = adata.n_obs // minibatch_size
@@ -771,6 +771,13 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
             threshs.append(np.array(log_probs_s))
             log_probs.append(np.array(log_probs_))
+
+        if flavor == "ball":
+            # Compute a threshold across all samples
+            threshs_all = np.concatenate(threshs)
+            global_thresh = np.quantile(threshs_all, q=quantile_threshold)
+            threshs = len(log_probs) * [global_thresh]
+
         log_probs = np.concatenate(log_probs, 1)
         threshs = np.array(threshs)
         log_ratios = log_probs - threshs

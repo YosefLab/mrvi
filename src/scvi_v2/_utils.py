@@ -33,7 +33,6 @@ def _parse_local_statistics_requirements(
             needs_sampled_dists = True
         elif r.input == "normalized_distances":
             needs_sampled_rep = True
-            needs_sampled_dists = True
             needs_normalized_dists = True
         else:
             raise ValueError(f"Unknown reduction input: {r.input}")
@@ -52,6 +51,15 @@ def _parse_local_statistics_requirements(
         grouped_reductions=grouped_reductions,
         ungrouped_reductions=ungrouped_reductions,
     )
+
+
+@jax.jit
+def rowwise_max_excluding_diagonal(matrix):
+    """Returns the rowwise maximum of a matrix excluding the diagonal."""
+    assert matrix.ndim == 2
+    num_cols = matrix.shape[1]
+    mask = (1 - jnp.eye(num_cols)).astype(bool)
+    return (jnp.where(mask, matrix, -jnp.inf)).max(axis=1)
 
 
 def simple_reciprocal(w, eps=1e-6):

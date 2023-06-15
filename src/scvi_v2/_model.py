@@ -478,13 +478,12 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             )  # n_cells by mc_samples by n_latent
             squared_l2_dists = jnp.sum(jnp.einsum("cij, cj -> cij", (normal_samples**2), eigvals), axis=2)
             l2_dists = squared_l2_dists**0.5
-
         else:
             mc_samples_per_cell = mc_samples * 2  # need double for pairs of samples to compute distance between
             jit_inference_fn = self.module.get_jit_inference_fn(
                 inference_kwargs={"use_mean": False, "mc_samples": mc_samples_per_cell}
             )
-            
+
             outputs = jit_inference_fn(self.module.rngs, batch)
 
             # figure out how to compute dists here
@@ -959,7 +958,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             betas_ = betas.transpose((1, 0, 2))  # (n_metadata, n_cells, n_latent)
             betas_ = betas_ * eps_.std(axis=1) + eps_.mean(axis=1)
             if store_lfc:
-                
+
                 def h_inference_fn(rngs, extra_eps):
                     return self.module.apply(
                         vars_in,

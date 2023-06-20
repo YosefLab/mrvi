@@ -123,7 +123,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         }
 
     @classmethod
-    def setup_anndata(  # noqa: #D102
+    def setup_anndata(  # noqa: #D102s
         cls,
         adata: AnnData,
         layer: Optional[str] = None,
@@ -948,7 +948,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             # Statistical tests
             betas_norm = jnp.einsum("nkd,nkl->nld", betas, prefactor)
             ts = (betas_norm**2).sum(axis=-1)
-            pvals = 1 - jax.scipy.stats.chi2.cdf(ts, df=n_donors_per_cell[:, None])
+            #pvals = 1 - jax.scipy.stats.chi2.cdf(ts, df=df)
+            pvals = 1 - jax.numpy.cumsum(jax.scipy.stats.chi2.pdf(ts, df=df),axis = 1)
 
             # Optional: compute log-fold changes
             betas_ = betas.transpose((1, 0, 2))  # (n_metadata, n_cells, n_latent)
@@ -1334,6 +1335,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 hb_samples.append(
                     np.asarray(jax.device_put(_hb.reshape((samples_idx_b_.shape[0], -1, self.summary_stats.n_vars))))
                 )
+
         ha_samples = np.concatenate(ha_samples, axis=1)
         hb_samples = np.concatenate(hb_samples, axis=1)
 
@@ -1363,7 +1365,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 .set_index("gene_name")
                 .sort_values("de_prob", ascending=False)
             )
-            return results
+            return results, ha_samples, hb_samples
 
     def explore_stratifications(
         self,
@@ -1434,3 +1436,151 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 plt.clf()
             figs.append(fig)
         return figs
+
+    def get_decoded_expression(
+        self,
+        adata: AnnData,
+        samples_a: List[str] = None,
+        batch_size: int = 128,
+        mc_samples_total: int = 10000,
+        max_mc_samples_per_pass: int = 50,
+        use_vmap: bool = False,
+        eps: float = 1e-4,
+    ):
+        """Computes h based on differential expression function.
+
+        Parameters
+        ----------
+        adata
+            AnnData object to use.
+        samples_a
+            Set of samples to characterize the first sample subpopulation.
+            Should be a subset of values associated to the sample key.
+        samples_b
+            Set of samples to characterize the second sample subpopulation.
+            Should be a subset of values associated to the sample key.
+        batch_size
+            Batch size to use for inference.
+        mc_samples_total
+            Number of Monte Carlo samples to sample normalized gene expressions, per group of samples.
+        max_mc_samples_per_pass
+            Maximum number of Monte Carlo samples to sample normalized gene expressions at once.
+            Lowering this value can help with memory issues.
+         use_vmap
+            Determines which parallelization strategy to use. If True, uses `jax.vmap`, otherwise uses `jax.lax.map`.
+            The former is faster, but requires more memory.
+        eps
+            Pseudo-count to add to the normalized expression levels.
+        """
+        mc_samples_per_obs = np.maximum((mc_samples_total // adata.n_obs), 1)
+        if mc_samples_per_obs >= max_mc_samples_per_pass:
+            n_passes_per_obs = np.maximum((mc_samples_per_obs // max_mc_samples_per_pass), 1)
+            mc_samples_per_obs = max_mc_samples_per_pass
+        else:
+            n_passes_per_obs = 1
+
+        self._check_if_trained(warn=False)
+        adata = self._validate_anndata(adata)
+        scdl = self._make_data_loader(adata=adata, batch_size=batch_size, iter_ndarray=True)
+
+        donor_mapper = self.donor_info.reset_index().set_index(self.original_donor_key)
+
+        try:
+            #if samples_a is not None:
+            samples_idx_a_ = np.array(donor_mapper.loc[samples_a, "_scvi_sample"])
+        except KeyError:
+            raise KeyError(
+                "Some samples cannot be found."
+                "Please make sure that the provided samples can be found in {}.".format(self.original_donor_key)
+            )
+
+        vars_in = {"params": self.module.params, **self.module.state}
+        rngs = self.module.rngs
+
+        def _get_all_inputs(
+            inputs,
+        ):
+            x = jnp.array(inputs[REGISTRY_KEYS.X_KEY])
+            sample_index = jnp.array(inputs[MRVI_REGISTRY_KEYS.SAMPLE_KEY])
+            batch_index = jnp.array(inputs[REGISTRY_KEYS.BATCH_KEY])
+            continuous_covs = inputs.get(REGISTRY_KEYS.CONT_COVS_KEY, None)
+            if continuous_covs is not None:
+                continuous_covs = jnp.array(continuous_covs)
+            return {
+                "x": x,
+                "sample_index": sample_index,
+                "batch_index": batch_index,
+                "continuous_covs": continuous_covs,
+            }
+
+        def h_inference_fn(x, sample_index, batch_index, cf_sample, continuous_covs):
+            return self.module.apply(
+                vars_in,
+                rngs=rngs,
+                method=self.module.compute_h_from_x,
+                x=x,
+                sample_index=sample_index,
+                batch_index=batch_index,
+                cf_sample=cf_sample,
+                continuous_covs=continuous_covs,
+                mc_samples=mc_samples_per_obs,
+            )
+        
+        @jax.jit
+        def get_hs(inputs, cf_sample):
+            _h_inference_fn = lambda cf_sample: h_inference_fn(
+                inputs["x"],
+                inputs["sample_index"],
+                inputs["batch_index"],
+                cf_sample,
+                inputs["continuous_covs"],
+            )
+            if use_vmap:
+                hs = jax.vmap(h_inference_fn, in_axes=(None, None, None, 0, None), out_axes=0)(
+                    inputs["x"],
+                    inputs["sample_index"],
+                    inputs["batch_index"],
+                    cf_sample,
+                    inputs["continuous_covs"],
+                )
+            else:
+                hs = jax.lax.map(_h_inference_fn, cf_sample)
+
+            # convert to pseudocounts
+            #hs = jnp.log(hs + eps)
+            hs = hs.mean(1)
+            return hs
+
+        ha_samples = []
+
+        for array_dict in tqdm(scdl):
+            n_cells = array_dict[REGISTRY_KEYS.X_KEY].shape[0]
+            inputs = _get_all_inputs(
+                array_dict,
+            )
+            #if samples_a is not None:
+            cf_sample_a = np.broadcast_to(samples_idx_a_[:, None, None], (samples_idx_a_.shape[0], n_cells, 1))
+            #else:
+            #    cf_sample_a = None
+            for _ in range(n_passes_per_obs):
+             #   if samples_a is not None:
+                _ha = get_hs(inputs, cf_sample_a)
+            #  else:
+            #      _ha = jax.vmap(h_inference_fn, in_axes=(0), out_axes=0)(
+            #          rngs=stacked_rngs_de,
+            #         extra_eps=betas_,
+            #     )
+                    #_ha = get_hs_none(inputs, cf_sample_a)
+
+                # shapes (n_samples_x, max_mc_samples_per_pass, n_cells, n_vars)
+                ha_samples.append(
+                    np.asarray(jax.device_put(_ha.reshape((samples_idx_a_.shape[0], -1, self.summary_stats.n_vars))))
+                )
+
+
+        ha_samples = np.concatenate(ha_samples, axis=1)
+
+        # Giving equal weight to each sample ==> exchangeability assumption
+        ha_samples = ha_samples.reshape((-1, self.summary_stats.n_vars))
+
+        return ha_samples

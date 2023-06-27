@@ -178,6 +178,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         batch_size: Optional[int] = None,
         use_mean: bool = True,
         give_z: bool = False,
+        give_zb: bool = False,
     ) -> np.ndarray:
         """
         Computes the latent representation of the data.
@@ -205,16 +206,28 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
         us = []
         zs = []
+        zb = []
         jit_inference_fn = self.module.get_jit_inference_fn(inference_kwargs={"use_mean": use_mean})
         for array_dict in tqdm(scdl):
             outputs = jit_inference_fn(self.module.rngs, array_dict)
 
             us.append(outputs["u"])
             zs.append(outputs["z"])
+            zb.append(outputs["z_base"])
 
         u = np.array(jax.device_get(jnp.concatenate(us, axis=0)))
         z = np.array(jax.device_get(jnp.concatenate(zs, axis=0)))
-        return z if give_z else u
+        z_b = np.array(jax.device_get(jnp.concatenate(zb, axis=0)))
+
+        if give_z:
+            to_return = z
+        elif give_zb:
+            to_return = z_b
+        else:
+            to_return = u
+        
+        # return z if give_z else u
+        return to_return
 
     def compute_local_statistics(
         self,

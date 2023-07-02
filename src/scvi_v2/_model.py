@@ -698,7 +698,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         adata=None,
         flavor: Literal["ball", "ap", "MoG"] = "ball",
         subsample_size: int = 5000,
-        quantile_threshold: float = 0.0,
+        quantile_threshold: float = 0.05,
         admissibility_threshold: float = 0.0,
         minibatch_size: int = 256,
     ) -> xr.Dataset:
@@ -809,9 +809,10 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         use_vmap: bool = True,
         normalize_design_matrix: bool = True,
         offset_design_matrix: bool = True,
+        mc_samples: int = 100,
         store_lfc: bool = False,
         store_baseline: bool = False,
-        eps_lfc: float = 1e-4,
+        eps_lfc: float = 1e-6,
         filter_donors: bool = False,
         **filter_donors_kwargs,
     ) -> xr.Dataset:
@@ -841,6 +842,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             Whether to normalize the design matrix.
         offset_design_matrix
             Whether to offset the design matrix.
+        mc_samples
+            How many MC samples should be taken for computing betas.
         store_lfc
             Whether to store the log-fold changes in the module.
             Storing log-fold changes is memory-intensive and may require to specify
@@ -856,8 +859,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         """
         adata = self.adata if adata is None else adata
         self._check_if_trained(warn=False)
-        # Hack to ensure new AnnDatas have indices.
-        if "_indices" not in adata.obs:
+        # Hack to ensure new AnnDatas have indices and indices have correct dimensions.
+        if adata is not None:
             adata.obs["_indices"] = np.arange(adata.n_obs).astype(int)
 
         adata = self._validate_anndata(adata)
@@ -903,7 +906,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             Amat = jnp.einsum("nab,bc,ncd->nad", inv_, Xmat.T, admissible_donors_dmat)
             return Amat, prefactor
 
-        @partial(jax.jit, static_argnames=["use_mean", "Xmat"])
+        @partial(jax.jit, static_argnames=["use_mean", "mc_samples"])
         def mapped_inference_fn(
             stacked_rngs,
             x,
@@ -915,6 +918,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             prefactor,
             n_donors_per_cell,
             use_mean,
+            mc_samples,
             stacked_rngs_de=None,
         ):
             def inference_fn(
@@ -929,6 +933,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                     sample_index=sample_index,
                     cf_sample=cf_sample,
                     use_mean=use_mean,
+                    mc_samples=mc_samples,
                 )["eps"]
 
             if use_vmap:
@@ -943,20 +948,20 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                     return inference_fn(rngs, cf_sample)
 
                 eps_ = jax.lax.transpose(jax.lax.map(per_sample_inference_fn, (stacked_rngs, cf_sample)), (1, 0, 2))
-            eps_ = eps_[:, donor_mask]
-            eps = (eps_ - eps_.mean(axis=1, keepdims=True)) / (1e-6 + eps_.std(axis=1, keepdims=True))  # over samples
+            eps_ = eps_[:, :, donor_mask]
+            eps = (eps_ - eps_.mean(axis=2, keepdims=True)) / (1e-6 + eps_.std(axis=2, keepdims=True))  # over samples
 
             # MLE for betas
-            betas = jnp.einsum("nks,nsd->nkd", Amat, eps)
+            betas = jnp.einsum("nks,ansd->ankd", Amat, eps)
 
             # Statistical tests
-            betas_norm = jnp.einsum("nkd,nkl->nld", betas, prefactor)
-            ts = (betas_norm**2).sum(axis=-1)
+            betas_norm = jnp.einsum("ankd,nkl->anld", betas, prefactor)
+            ts = (betas_norm**2).mean(axis=0).sum(axis=-1)
             pvals = 1 - jax.scipy.stats.chi2.cdf(ts, df=n_donors_per_cell[:, None])
 
             # Optional: compute log-fold changes
-            betas_ = betas.transpose((1, 0, 2))  # (n_metadata, n_cells, n_latent)
-            betas_ = betas_ * eps_.std(axis=1) + eps_.mean(axis=1)
+            betas_ = betas.transpose((0, 2, 1, 3))  # (n_metadata, n_cells, n_latent)
+            betas_ = betas_ * eps_.std(axis=2, keepdims=True).transpose((0, 2, 1, 3)) + eps_.mean(axis=2, keepdims=True).transpose((0, 2, 1, 3))
             if store_lfc:
 
                 def h_inference_fn(rngs, extra_eps):
@@ -970,32 +975,43 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                         batch_index=batch_index,
                         cf_sample=None,
                         continuous_covs=continuous_covs,
-                        mc_samples=100,
+                        mc_samples=1, # mc_samples also taken for eps. vmap over mc_samples
                     )
-
-                x_1 = jax.vmap(h_inference_fn, in_axes=(0), out_axes=0)(
-                    rngs=stacked_rngs_de,
-                    extra_eps=betas_,
+                
+                x_1 = jax.vmap(h_inference_fn, in_axes=0, out_axes=(0))(
+                    rngs=stacked_rngs_de[0],
+                    extra_eps=betas_.reshape((-1,)+betas_.shape[2:]),
                 )
-                betas_null = jnp.zeros_like(betas_) + eps_.mean(axis=1)
-                x_0 = jax.vmap(h_inference_fn, in_axes=(0), out_axes=0)(
-                    rngs=stacked_rngs_de,
-                    extra_eps=betas_null,
+                x_1 = x_1.reshape((-1, mc_samples) + x_1.shape[2:])
+                betas_null = jnp.zeros_like(betas_) + eps_.mean(axis=2, keepdims=True).transpose((0, 2, 1, 3))
+                x_0 = jax.vmap(h_inference_fn, in_axes=0, out_axes=(0))(
+                    rngs=stacked_rngs_de[1],
+                    extra_eps=betas_null.reshape((-1,)+betas_.shape[2:]),
                 )
+                x_0 = x_0.reshape((-1, mc_samples) + x_0.shape[2:])
 
-                lfcs = (jnp.log(x_1 + eps_lfc) - jnp.log(x_0 + eps_lfc)).mean(1)
+                lfcs = jnp.log2(x_1 + eps_lfc) - jnp.log2(x_0 + eps_lfc)
+                concat_x = jnp.concatenate([x_0, x_1], axis=1)
+                rank_x = jax.scipy.stats.rankdata(concat_x, method='average', axis=1)
+                def u_statistic(rank_x):
+                    return jnp.sum(rank_x, axis=1) - (mc_samples * (mc_samples + 1) / 2)
+                
+                u_x = jnp.minimum(u_statistic(rank_x[:, :mc_samples, :, :]), u_statistic(rank_x[:, mc_samples:, :, :]))
+                zscore = (u_x - mc_samples**2 / 2) / jnp.sqrt(mc_samples**2 * (2 * mc_samples +  1) / 12)
 
             else:
                 lfcs = None
+                zscore = 0
             if store_baseline:
                 baseline_expression = x_1.mean(1)
             else:
                 baseline_expression = None
             return {
-                "beta": betas,
+                "beta": betas.mean(0),
                 "effect_size": ts,
                 "pvalue": pvals,
-                "lfc": lfcs,
+                "lfc": lfcs.mean(1),
+                "zscore": zscore,
                 "baseline_expression": baseline_expression,
             }
 
@@ -1003,6 +1019,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         effect_size = []
         pvalue = []
         lfc = []
+        zscore = []
         baseline_expression = []
         for array_dict in tqdm(scdl):
             indices = array_dict[REGISTRY_KEYS.INDICES_KEY].astype(int).flatten()
@@ -1015,8 +1032,11 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             if continuous_covs is not None:
                 continuous_covs = jnp.array(continuous_covs)
             stacked_rngs = self._generate_stacked_rngs(cf_sample.shape[0])
-            stacked_rngs_de = self._generate_stacked_rngs(Xmat.shape[1])
-
+            stacked_rngs_de = [
+                self._generate_stacked_rngs(n_sets=mc_samples*Xmat.shape[1]),
+                self._generate_stacked_rngs(n_sets=mc_samples*Xmat.shape[1])
+            ]
+            
             admissible_donors_mat = jnp.array(admissible_donors[indices])  # (n_cells, n_donors)
             n_donors_per_cell = admissible_donors_mat.sum(axis=1)
             admissible_donors_dmat = jax.vmap(jnp.diag)(admissible_donors_mat).astype(
@@ -1039,12 +1059,14 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 n_donors_per_cell=n_donors_per_cell,
                 use_mean=False,
                 stacked_rngs_de=stacked_rngs_de,
+                mc_samples=mc_samples
             )  # (n_cells, n_donors, n_latent)
             beta.append(np.array(res["beta"]))
             effect_size.append(np.array(res["effect_size"]))
             pvalue.append(np.array(res["pvalue"]))
             if store_lfc:
                 lfc.append(np.array(res["lfc"]))
+                zscore.append(np.array(res["zscore"]))
                 baseline_expression.append(np.array(res["baseline_expression"]))
         beta = np.concatenate(beta, axis=0)
         effect_size = np.concatenate(effect_size, axis=0)
@@ -1082,6 +1104,11 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 ["covariate", "cell_name", "gene"],
                 lfc,
             )
+            zscore = np.concatenate(zscore, axis=1)
+            data_vars["zscore"] = (
+                ["covariate", "cell_name", "gene"],
+                zscore,
+            )
         if store_baseline:
             baseline_expression = np.concatenate(baseline_expression, axis=1)
             data_vars["baseline_expression"] = (
@@ -1115,7 +1142,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         Xmat = Xmat[donor_mask]
 
         if normalize_design_matrix:
-            Xmat = (Xmat - Xmat.mean(axis=0)) / (1e-6 + Xmat.std(axis=0))
+            Xmat = (Xmat - Xmat.min(axis=0)) / (1e-6 + Xmat.max(axis=0) - Xmat.min(axis=0))
         if offset_design_matrix:
             Xmat = np.concatenate([np.ones((Xmat.shape[0], 1)), Xmat], axis=1)
             Xmat_names = np.concatenate([np.array(["offset"]), Xmat_names])

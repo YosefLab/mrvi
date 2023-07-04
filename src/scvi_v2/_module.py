@@ -417,7 +417,7 @@ class MrVAE(JaxBaseModuleClass):
                 u_prior_mixture_k = self.u_prior_mixture_k
             u_dim = self.n_latent_u if self.n_latent_u is not None else self.n_latent
             self.u_prior_logits = self.param("u_prior_logits", nn.initializers.zeros, (u_prior_mixture_k,))
-            self.u_prior_means = self.param("u_prior_means", nn.initializers.zeros, (u_dim, u_prior_mixture_k))
+            self.u_prior_means = self.param("u_prior_means", jax.random.normal, (u_dim, u_prior_mixture_k))
             self.u_prior_scales = self.param("u_prior_scales", nn.initializers.zeros, (u_dim, u_prior_mixture_k))
 
     @property
@@ -589,4 +589,4 @@ class MrVAE(JaxBaseModuleClass):
             "label_index": jnp.zeros([x.shape[0], 1]),
         }
         generative_outputs = self.generative(**generative_inputs)
-        return generative_outputs["px"].mean
+        return generative_outputs["h"]

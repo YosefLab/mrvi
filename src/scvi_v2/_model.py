@@ -799,6 +799,120 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             "is_admissible": (["cell_name", "sample"], log_ratios > admissibility_threshold),
         }
         return xr.Dataset(data_vars, coords=coords)
+    
+    def perform_multivariate_abundance(
+        self,
+        adata=None,
+        donor_keys: List[Tuple] = None,
+        batch_size: int = 256,
+        normalize_design_matrix: bool = True,
+        offset_design_matrix: bool = True,
+        precomputed_abundance: Optional[np.array] = None
+    ) -> xr.Dataset:
+        """Utility function to perform cell-specific multivariate abundance analysis.
+
+        For every cell, we first compute all sample abundance odds, defined as
+        Then, we fit a linear model in each cell of the form abundance_d = X_d * beta_d + iid gaussian noise
+
+        Parameters
+        ----------
+        adata
+            AnnData object to use for computing the local sample representation.
+            If None, the analysis is performed on all cells in the dataset.
+        donor_keys
+            List of donor metadata to consider for the multivariate analysis.
+            These keys should be present in `adata.obs`.
+        batch_size
+            Batch size to use for computing the local sample representation.
+        normalize_design_matrix
+            Whether to normalize the design matrix.
+        offset_design_matrix
+            Whether to offset the design matrix.
+        precomputed_abundance
+            Precomputed abundance and passed as a numpy array
+        """
+        if precomputed_abundance is None:
+            res = self.get_outlier_cell_sample_pairs(
+                adata=lung,
+                flavor="ap",
+                subsample_size=5000,
+                minibatch_size=batch_size,
+            )['log_ratios']
+        else:
+            res = precomputed_abundance
+        
+        donor_mask = np.array(
+            np.isin(self.sample_order, list(res.coords['sample'].values)))
+        
+        Xmat, Xmat_names = self._construct_design_matrix(
+            donor_keys=donor_keys,
+            donor_mask=donor_mask,
+            normalize_design_matrix=normalize_design_matrix,
+            offset_design_matrix=offset_design_matrix,
+        )
+        
+        @partial(jax.jit, backend="cpu")
+        def process_design_matrix(
+            Xmat,
+        ):
+            prefactor = jax.scipy.linalg.sqrtm(Xmat.T @ Xmat)
+            return jnp.real(prefactor)
+        
+        prefactor = process_design_matrix(Xmat)
+        Amat = np.linalg.pinv(Xmat.T @ Xmat) @ Xmat.T
+        beta = []
+        effect_size = []
+        pvalue = []
+        
+        n_splits = adata.n_obs // batch_size
+        
+        for log_probs_ in np.array_split(res.values, n_splits):
+            log_probs_ = jnp.array(log_probs_)
+            log_probs = (log_probs_ - log_probs_.mean(axis=1, keepdims=True)) / (1e-6 + log_probs_.std(axis=1, keepdims=True))
+            
+            # MLE for btas
+            betas = jnp.einsum("ks,ds->dk", Amat, log_probs)
+
+            # Statistical tests
+            betas_norm = jnp.einsum("dk,kl->dl", betas, prefactor)
+            ts = (betas_norm**2)
+            pvals = 1 - jax.scipy.stats.chi2.cdf(ts, df=log_probs.shape[1])
+            
+            betas = (betas * log_probs_.std(axis=1, keepdims=True) + log_probs_.mean(axis=1, keepdims=True))
+            
+            beta.append(betas)
+            effect_size.append(ts)
+            pvalue.append(pvals)
+            
+        beta = np.concatenate(beta, axis=0)
+        effect_size = np.concatenate(effect_size, axis=0)
+        pvalue = np.concatenate(pvalue, axis=0)
+        pvalue_shape = pvalue.shape
+        padj = multipletests(pvalue.flatten(), method="fdr_bh")[1].reshape(pvalue_shape)
+
+        coords = {
+            "cell_name": adata.obs_names,
+            "covariate": Xmat_names,
+        }
+        data_vars = {
+            "beta": (
+                ["cell_name", "covariate"],
+                beta,
+            ),
+            "effect_size": (
+                ["cell_name", "covariate"],
+                effect_size,
+            ),
+            "pvalue": (
+                ["cell_name", "covariate"],
+                pvalue,
+            ),
+            "padj": (
+                ["cell_name", "covariate"],
+                padj,
+            ),
+        }
+        return xr.Dataset(data_vars, coords=coords)
 
     def perform_multivariate_analysis(
         self,
@@ -812,7 +926,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         mc_samples: int = 100,
         store_lfc: bool = False,
         store_baseline: bool = False,
-        eps_lfc: float = 1e-6,
+        eps_lfc: float = 1e-3,
         filter_donors: bool = False,
         **filter_donors_kwargs,
     ) -> xr.Dataset:
@@ -1001,7 +1115,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
             else:
                 lfcs = None
-                zscore = 0
+                zscore = None
             if store_baseline:
                 baseline_expression = x_1.mean(1)
             else:

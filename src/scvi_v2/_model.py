@@ -799,7 +799,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             "is_admissible": (["cell_name", "sample"], log_ratios > admissibility_threshold),
         }
         return xr.Dataset(data_vars, coords=coords)
-    
+
     def perform_multivariate_abundance(
         self,
         adata=None,
@@ -807,7 +807,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         batch_size: int = 256,
         normalize_design_matrix: bool = True,
         offset_design_matrix: bool = True,
-        precomputed_abundance: Optional[np.array] = None
+        precomputed_abundance: Optional[np.array] = None,
     ) -> xr.Dataset:
         """Utility function to perform cell-specific multivariate abundance analysis.
 
@@ -837,53 +837,54 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 flavor="ap",
                 subsample_size=5000,
                 minibatch_size=batch_size,
-            )['log_ratios']
+            )["log_ratios"]
         else:
             res = precomputed_abundance
-        
-        donor_mask = np.array(
-            np.isin(self.sample_order, list(res.coords['sample'].values)))
-        
+
+        donor_mask = np.array(np.isin(self.sample_order, list(res.coords["sample"].values)))
+
         Xmat, Xmat_names = self._construct_design_matrix(
             donor_keys=donor_keys,
             donor_mask=donor_mask,
             normalize_design_matrix=normalize_design_matrix,
             offset_design_matrix=offset_design_matrix,
         )
-        
+
         @partial(jax.jit, backend="cpu")
         def process_design_matrix(
             Xmat,
         ):
             prefactor = jax.scipy.linalg.sqrtm(Xmat.T @ Xmat)
             return jnp.real(prefactor)
-        
+
         prefactor = process_design_matrix(Xmat)
         Amat = np.linalg.pinv(Xmat.T @ Xmat) @ Xmat.T
         beta = []
         effect_size = []
         pvalue = []
-        
+
         n_splits = adata.n_obs // batch_size
-        
+
         for log_probs_ in np.array_split(res.values, n_splits):
             log_probs_ = jnp.array(log_probs_)
-            log_probs = (log_probs_ - log_probs_.mean(axis=1, keepdims=True)) / (1e-6 + log_probs_.std(axis=1, keepdims=True))
-            
+            log_probs = (log_probs_ - log_probs_.mean(axis=1, keepdims=True)) / (
+                1e-6 + log_probs_.std(axis=1, keepdims=True)
+            )
+
             # MLE for btas
             betas = jnp.einsum("ks,ds->dk", Amat, log_probs)
 
             # Statistical tests
             betas_norm = jnp.einsum("dk,kl->dl", betas, prefactor)
-            ts = (betas_norm**2)
+            ts = betas_norm**2
             pvals = 1 - jax.scipy.stats.chi2.cdf(ts, df=log_probs.shape[1])
-            
-            betas = (betas * log_probs_.std(axis=1, keepdims=True) + log_probs_.mean(axis=1, keepdims=True))
-            
+
+            betas = betas * log_probs_.std(axis=1, keepdims=True) + log_probs_.mean(axis=1, keepdims=True)
+
             beta.append(betas)
             effect_size.append(ts)
             pvalue.append(pvals)
-            
+
         beta = np.concatenate(beta, axis=0)
         effect_size = np.concatenate(effect_size, axis=0)
         pvalue = np.concatenate(pvalue, axis=0)
@@ -1061,7 +1062,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                     rngs, cf_sample = pair
                     return inference_fn(rngs, cf_sample)
 
-                 # eps_ has shape (mc_samples, n_cells, n_donors, n_latent)
+                # eps_ has shape (mc_samples, n_cells, n_donors, n_latent)
                 eps_ = jax.lax.transpose(jax.lax.map(per_sample_inference_fn, (stacked_rngs, cf_sample)), (1, 0, 2))
             eps_ = eps_[:, :, donor_mask]
             eps = (eps_ - eps_.mean(axis=2, keepdims=True)) / (1e-6 + eps_.std(axis=2, keepdims=True))  # over donors
@@ -1080,9 +1081,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             eps_std = eps_reshaped.std(axis=1, keepdims=True)  # average over samples
             eps_mean = eps_reshaped.mean(axis=1, keepdims=True)  # average over samples
             betas_ = betas_ * eps_std + eps_mean
-            
-            
-            betas_ = betas_ * eps_.std(axis=2, keepdims=True).transpose((0, 2, 1, 3)) + eps_.mean(axis=2, keepdims=True).transpose((0, 2, 1, 3))
+
             if store_lfc:
 
                 def h_inference_fn(rngs, extra_eps):
@@ -1096,29 +1095,29 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                         batch_index=batch_index,
                         cf_sample=None,
                         continuous_covs=continuous_covs,
-                        mc_samples=1, # mc_samples also taken for eps. vmap over mc_samples
+                        mc_samples=None,  # mc_samples also taken for eps. vmap over mc_samples
                     )
-                
-                x_1 = jax.vmap(h_inference_fn, in_axes=0, out_axes=(0))(
+
+                h_fn = jax.jit(jax.vmap(jax.vmap(h_inference_fn, in_axes=1, out_axes=0), in_axes=0, out_axes=1))
+                x_1 = h_fn(
                     rngs=stacked_rngs_de[0],
-                    extra_eps=betas_.reshape((-1,)+betas_.shape[2:]),
-                )
-                x_1 = x_1.reshape((-1, mc_samples) + x_1.shape[2:])
+                    extra_eps=betas_,
+                )  # (n_metadata, mc_samples, n_cells, n_genes)
                 betas_null = jnp.zeros_like(betas_) + eps_.mean(axis=2, keepdims=True).transpose((0, 2, 1, 3))
-                x_0 = jax.vmap(h_inference_fn, in_axes=0, out_axes=(0))(
+                x_0 = h_fn(
                     rngs=stacked_rngs_de[1],
-                    extra_eps=betas_null.reshape((-1,)+betas_.shape[2:]),
+                    extra_eps=betas_null,
                 )
-                x_0 = x_0.reshape((-1, mc_samples) + x_0.shape[2:])
 
                 lfcs = jnp.log2(x_1 + eps_lfc) - jnp.log2(x_0 + eps_lfc)
                 concat_x = jnp.concatenate([x_0, x_1], axis=1)
-                rank_x = jax.scipy.stats.rankdata(concat_x, method='average', axis=1)
+                rank_x = jax.scipy.stats.rankdata(concat_x, method="average", axis=1)
+
                 def u_statistic(rank_x):
                     return jnp.sum(rank_x, axis=1) - (mc_samples * (mc_samples + 1) / 2)
-                
+
                 u_x = jnp.minimum(u_statistic(rank_x[:, :mc_samples, :, :]), u_statistic(rank_x[:, mc_samples:, :, :]))
-                zscore = (u_x - mc_samples**2 / 2) / jnp.sqrt(mc_samples**2 * (2 * mc_samples +  1) / 12)
+                zscore = (u_x - mc_samples**2 / 2) / jnp.sqrt(mc_samples**2 * (2 * mc_samples + 1) / 12)
 
             else:
                 lfcs = None
@@ -1154,10 +1153,17 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 continuous_covs = jnp.array(continuous_covs)
             stacked_rngs = self._generate_stacked_rngs(cf_sample.shape[0])
             stacked_rngs_de = [
-                self._generate_stacked_rngs(n_sets=mc_samples*Xmat.shape[1]),
-                self._generate_stacked_rngs(n_sets=mc_samples*Xmat.shape[1])
+                self._generate_stacked_rngs(n_sets=mc_samples * Xmat.shape[1]),
+                self._generate_stacked_rngs(n_sets=mc_samples * Xmat.shape[1]),
             ]
-            
+            stacked_rngs_de = [
+                {
+                    key: random_key.reshape((mc_samples, Xmat.shape[1]) + random_key.shape[1:])
+                    for (key, random_key) in dico.items()
+                }
+                for dico in stacked_rngs_de
+            ]
+
             admissible_donors_mat = jnp.array(admissible_donors[indices])  # (n_cells, n_donors)
             n_donors_per_cell = admissible_donors_mat.sum(axis=1)
             admissible_donors_dmat = jax.vmap(jnp.diag)(admissible_donors_mat).astype(
@@ -1180,7 +1186,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 n_donors_per_cell=n_donors_per_cell,
                 use_mean=False,
                 stacked_rngs_de=stacked_rngs_de,
-                mc_samples=mc_samples
+                mc_samples=mc_samples,
             )  # (n_cells, n_donors, n_latent)
             beta.append(np.array(res["beta"]))
             effect_size.append(np.array(res["effect_size"]))
@@ -1229,6 +1235,296 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             data_vars["zscore"] = (
                 ["covariate", "cell_name", "gene"],
                 zscore,
+            )
+        if store_baseline:
+            baseline_expression = np.concatenate(baseline_expression, axis=1)
+            data_vars["baseline_expression"] = (
+                ["covariate", "cell_name", "gene"],
+                baseline_expression,
+            )
+        return xr.Dataset(data_vars, coords=coords)
+
+    def perform_multivariate_analysis_OLD(
+        self,
+        adata: Optional[AnnData] = None,
+        donor_keys: List[Tuple] = None,
+        donor_subset: Optional[List[str]] = None,
+        batch_size: int = 256,
+        use_vmap: bool = True,
+        normalize_design_matrix: bool = True,
+        offset_design_matrix: bool = True,
+        store_lfc: bool = False,
+        store_baseline: bool = False,
+        eps_lfc: float = 1e-4,
+        filter_donors: bool = False,
+        **filter_donors_kwargs,
+    ) -> xr.Dataset:
+        """Utility function to perform cell-specific multivariate analysis.
+
+        For every cell, we first compute all counterfactual cell-state shifts, defined as
+        e_d = z_d - u, where z_d is the latent representation of the cell for donor d and u is the donor-unaware latent representation.
+        Then, we fit a linear model in each cell of the form
+        e_d = X_d * beta_d + iid gaussian noise.
+
+        Parameters
+        ----------
+        adata
+            AnnData object to use for computing the local sample representation.
+            If None, the analysis is performed on all cells in the dataset.
+        donor_keys
+            List of donor metadata to consider for the multivariate analysis.
+            These keys should be present in `adata.obs`.
+        donor_subset
+            Optional list of donors to consider for the multivariate analysis.
+            If None, all donors are considered.
+        batch_size
+            Batch size to use for computing the local sample representation.
+        use_vmap
+            Whether to use vmap for computing the local sample representation.
+        normalize_design_matrix
+            Whether to normalize the design matrix.
+        offset_design_matrix
+            Whether to offset the design matrix.
+        store_lfc
+            Whether to store the log-fold changes in the module.
+            Storing log-fold changes is memory-intensive and may require to specify
+            a smaller set of cells to analyze, e.g., by specifying `adata`.
+        store_baseline
+            Whether to store the expression in the module if logfoldchanges are computed.
+        eps_lfc
+            Epsilon to add to the log-fold changes to avoid detecting genes with low expression.
+        filter_donors
+            Whether to filter out-of-distribution donors prior to performing the analysis.
+        filter_donors_kwargs
+            Keyword arguments to pass to `get_outlier_cell_sample_pairs`.
+        """
+        adata = self.adata if adata is None else adata
+        self._check_if_trained(warn=False)
+        # Hack to ensure new AnnDatas have indices.
+        if "_indices" not in adata.obs:
+            adata.obs["_indices"] = np.arange(adata.n_obs).astype(int)
+
+        adata = self._validate_anndata(adata)
+        scdl = self._make_data_loader(adata=adata, indices=None, batch_size=batch_size, iter_ndarray=True)
+        n_sample = self.summary_stats.n_sample
+        vars_in = {"params": self.module.params, **self.module.state}
+
+        donor_mask = (
+            np.isin(self.sample_order, donor_subset) if donor_subset is not None else np.ones(n_sample, dtype=bool)
+        )
+        donor_mask = np.array(donor_mask)
+        donor_order = self.sample_order[donor_mask]
+        n_samples_kept = donor_mask.sum()
+
+        if filter_donors:
+            admissible_donors = self.get_outlier_cell_sample_pairs(adata=adata, **filter_donors_kwargs)[
+                "is_admissible"
+            ].loc[{"sample": donor_order}]
+            assert (admissible_donors.sample == donor_order).all()
+            admissible_donors = admissible_donors.values
+        else:
+            admissible_donors = np.ones((adata.n_obs, n_samples_kept), dtype=bool)
+
+        Xmat, Xmat_names = self._construct_design_matrix(
+            donor_keys=donor_keys,
+            donor_mask=donor_mask,
+            normalize_design_matrix=normalize_design_matrix,
+            offset_design_matrix=offset_design_matrix,
+        )
+        Xmat = jnp.array(Xmat)
+
+        @partial(jax.jit, backend="cpu")
+        def process_design_matrix(
+            admissible_donors_dmat,
+            Xmat,
+        ):
+            # TODO: make sure to write math down
+            # X^T X with masking
+            xtmx = jnp.einsum("ak,nkl,lm->nam", Xmat.T, admissible_donors_dmat, Xmat)
+
+            prefactor = jnp.real(jax.vmap(jax.scipy.linalg.sqrtm)(xtmx))
+            inv_ = jax.vmap(jnp.linalg.pinv)(xtmx)
+            Amat = jnp.einsum("nab,bc,ncd->nad", inv_, Xmat.T, admissible_donors_dmat)
+            return Amat, prefactor
+
+        @partial(jax.jit, static_argnames=["use_mean", "Xmat"])
+        def mapped_inference_fn(
+            stacked_rngs,
+            x,
+            sample_index,
+            batch_index,
+            continuous_covs,
+            cf_sample,
+            Amat,
+            prefactor,
+            n_donors_per_cell,
+            use_mean,
+            stacked_rngs_de=None,
+        ):
+            def inference_fn(
+                rngs,
+                cf_sample,
+            ):
+                return self.module.apply(
+                    vars_in,
+                    rngs=rngs,
+                    method=self.module.inference,
+                    x=x,
+                    sample_index=sample_index,
+                    cf_sample=cf_sample,
+                    use_mean=use_mean,
+                )["eps"]
+
+            if use_vmap:
+                eps_ = jax.vmap(inference_fn, in_axes=(0, 0), out_axes=-2)(
+                    stacked_rngs,
+                    cf_sample,
+                )
+            else:
+
+                def per_sample_inference_fn(pair):
+                    rngs, cf_sample = pair
+                    return inference_fn(rngs, cf_sample)
+
+                eps_ = jax.lax.transpose(jax.lax.map(per_sample_inference_fn, (stacked_rngs, cf_sample)), (1, 0, 2))
+            eps_ = eps_[:, donor_mask]
+            eps = (eps_ - eps_.mean(axis=1, keepdims=True)) / (1e-6 + eps_.std(axis=1, keepdims=True))  # over samples
+
+            # MLE for betas
+            betas = jnp.einsum("nks,nsd->nkd", Amat, eps)
+
+            # Statistical tests
+            betas_norm = jnp.einsum("nkd,nkl->nld", betas, prefactor)
+            ts = (betas_norm**2).sum(axis=-1)
+            pvals = 1 - jax.scipy.stats.chi2.cdf(ts, df=n_donors_per_cell[:, None])
+
+            # Optional: compute log-fold changes
+            betas_ = betas.transpose((1, 0, 2))  # (n_metadata, n_cells, n_latent)
+            betas_ = betas_ * eps_.std(axis=1) + eps_.mean(axis=1)
+            if store_lfc:
+
+                def h_inference_fn(rngs, extra_eps):
+                    return self.module.apply(
+                        vars_in,
+                        rngs=rngs,
+                        method=self.module.compute_h_from_x_eps,
+                        x=x,
+                        extra_eps=extra_eps,
+                        sample_index=sample_index,
+                        batch_index=batch_index,
+                        cf_sample=None,
+                        continuous_covs=continuous_covs,
+                        mc_samples=100,
+                    )
+
+                x_1 = jax.vmap(h_inference_fn, in_axes=(0), out_axes=0)(
+                    rngs=stacked_rngs_de,
+                    extra_eps=betas_,
+                )
+                betas_null = jnp.zeros_like(betas_) + eps_.mean(axis=1)
+                x_0 = jax.vmap(h_inference_fn, in_axes=(0), out_axes=0)(
+                    rngs=stacked_rngs_de,
+                    extra_eps=betas_null,
+                )
+
+                lfcs = (jnp.log(x_1 + eps_lfc) - jnp.log(x_0 + eps_lfc)).mean(1)
+
+            else:
+                lfcs = None
+            if store_baseline:
+                baseline_expression = x_1.mean(1)
+            else:
+                baseline_expression = None
+            return {
+                "beta": betas,
+                "effect_size": ts,
+                "pvalue": pvals,
+                "lfc": lfcs,
+                "baseline_expression": baseline_expression,
+            }
+
+        beta = []
+        effect_size = []
+        pvalue = []
+        lfc = []
+        baseline_expression = []
+        for array_dict in tqdm(scdl):
+            indices = array_dict[REGISTRY_KEYS.INDICES_KEY].astype(int).flatten()
+            n_cells = array_dict[REGISTRY_KEYS.X_KEY].shape[0]
+            cf_sample = np.broadcast_to(np.arange(n_sample)[:, None, None], (n_sample, n_cells, 1))
+            inf_inputs = self.module._get_inference_input(
+                array_dict,
+            )
+            continuous_covs = inf_inputs.get(REGISTRY_KEYS.CONT_COVS_KEY, None)
+            if continuous_covs is not None:
+                continuous_covs = jnp.array(continuous_covs)
+            stacked_rngs = self._generate_stacked_rngs(cf_sample.shape[0])
+            stacked_rngs_de = self._generate_stacked_rngs(Xmat.shape[1])
+
+            admissible_donors_mat = jnp.array(admissible_donors[indices])  # (n_cells, n_donors)
+            n_donors_per_cell = admissible_donors_mat.sum(axis=1)
+            admissible_donors_dmat = jax.vmap(jnp.diag)(admissible_donors_mat).astype(
+                float
+            )  # (n_cells, n_donors, n_donors)
+            # element nij is 1 if donor i is admissible and i=j for cell n
+            Amat, prefactor = process_design_matrix(admissible_donors_dmat, Xmat)
+            Amat = jax.device_put(Amat, self.device)
+            prefactor = jax.device_put(prefactor, self.device)
+
+            res = mapped_inference_fn(
+                stacked_rngs=stacked_rngs,
+                x=jnp.array(inf_inputs["x"]),
+                sample_index=jnp.array(inf_inputs["sample_index"]),
+                batch_index=jnp.array(array_dict[REGISTRY_KEYS.BATCH_KEY]),
+                continuous_covs=continuous_covs,
+                cf_sample=jnp.array(cf_sample),
+                Amat=Amat,
+                prefactor=prefactor,
+                n_donors_per_cell=n_donors_per_cell,
+                use_mean=False,
+                stacked_rngs_de=stacked_rngs_de,
+            )  # (n_cells, n_donors, n_latent)
+            beta.append(np.array(res["beta"]))
+            effect_size.append(np.array(res["effect_size"]))
+            pvalue.append(np.array(res["pvalue"]))
+            if store_lfc:
+                lfc.append(np.array(res["lfc"]))
+                baseline_expression.append(np.array(res["baseline_expression"]))
+        beta = np.concatenate(beta, axis=0)
+        effect_size = np.concatenate(effect_size, axis=0)
+        pvalue = np.concatenate(pvalue, axis=0)
+        pvalue_shape = pvalue.shape
+        padj = multipletests(pvalue.flatten(), method="fdr_bh")[1].reshape(pvalue_shape)
+
+        coords = {
+            "cell_name": adata.obs_names,
+            "covariate": Xmat_names,
+            "latent_dim": np.arange(beta.shape[2]),
+            "gene": adata.var_names,
+        }
+        data_vars = {
+            "beta": (
+                ["cell_name", "covariate", "latent_dim"],
+                beta,
+            ),
+            "effect_size": (
+                ["cell_name", "covariate"],
+                effect_size,
+            ),
+            "pvalue": (
+                ["cell_name", "covariate"],
+                pvalue,
+            ),
+            "padj": (
+                ["cell_name", "covariate"],
+                padj,
+            ),
+        }
+        if store_lfc:
+            lfc = np.concatenate(lfc, axis=1)
+            data_vars["lfc"] = (
+                ["covariate", "cell_name", "gene"],
+                lfc,
             )
         if store_baseline:
             baseline_expression = np.concatenate(baseline_expression, axis=1)

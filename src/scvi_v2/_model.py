@@ -1002,6 +1002,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             admissible_donors = admissible_donors.values
         else:
             admissible_donors = np.ones((adata.n_obs, n_samples_kept), dtype=bool)
+        n_admissible_donors = admissible_donors.sum(1)
 
         Xmat, Xmat_names = self._construct_design_matrix(
             donor_keys=donor_keys,
@@ -1071,7 +1072,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
                 # eps_ has shape (mc_samples, n_cells, n_donors, n_latent)
                 eps_ = jax.lax.transpose(jax.lax.map(per_sample_inference_fn, (stacked_rngs, cf_sample)), (1, 0, 2))
-            eps_ = eps_[:, :, donor_mask]
             eps = (eps_ - eps_.mean(axis=2, keepdims=True)) / (1e-6 + eps_.std(axis=2, keepdims=True))  # over donors
 
             # MLE for betas
@@ -1151,7 +1151,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         for array_dict in tqdm(scdl):
             indices = array_dict[REGISTRY_KEYS.INDICES_KEY].astype(int).flatten()
             n_cells = array_dict[REGISTRY_KEYS.X_KEY].shape[0]
-            cf_sample = np.broadcast_to(np.arange(n_sample)[:, None, None], (n_sample, n_cells, 1))
+            cf_sample = np.broadcast_to((np.where(donor_mask)[0])[:, None, None], (n_samples_kept, n_cells, 1))
             inf_inputs = self.module._get_inference_input(
                 array_dict,
             )
@@ -1234,6 +1234,11 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 padj,
             ),
         }
+        if filter_donors:
+            data_vars["n_donor"] = (
+                ["cell_name"],
+                n_admissible_donors,
+            )
         if store_lfc:
             if store_lfc==True:
                 coords_lfc = ["covariate", "cell_name", "gene"]

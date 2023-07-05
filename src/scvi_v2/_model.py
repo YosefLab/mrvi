@@ -460,7 +460,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             A_s = self.module.apply(vars_in, rngs=rngs, method=get_A_s, u=u, sample_covariate=sample_covariate)
             return A_s
 
-        if self.can_compute_normalized_dists and norm=='l2':
+        if self.can_compute_normalized_dists:
             jit_inference_fn = self.module.get_jit_inference_fn()
             qu = jit_inference_fn(self.module.rngs, batch)["qu"]
             qu_vars_diag = jax.vmap(jnp.diag)(qu.variance)
@@ -1061,9 +1061,10 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                     rngs, cf_sample = pair
                     return inference_fn(rngs, cf_sample)
 
+                 # eps_ has shape (mc_samples, n_cells, n_donors, n_latent)
                 eps_ = jax.lax.transpose(jax.lax.map(per_sample_inference_fn, (stacked_rngs, cf_sample)), (1, 0, 2))
             eps_ = eps_[:, :, donor_mask]
-            eps = (eps_ - eps_.mean(axis=2, keepdims=True)) / (1e-6 + eps_.std(axis=2, keepdims=True))  # over samples
+            eps = (eps_ - eps_.mean(axis=2, keepdims=True)) / (1e-6 + eps_.std(axis=2, keepdims=True))  # over donors
 
             # MLE for betas
             betas = jnp.einsum("nks,ansd->ankd", Amat, eps)
@@ -1074,7 +1075,13 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             pvals = 1 - jax.scipy.stats.chi2.cdf(ts, df=n_donors_per_cell[:, None])
 
             # Optional: compute log-fold changes
-            betas_ = betas.transpose((0, 2, 1, 3))  # (n_metadata, n_cells, n_latent)
+            betas_ = betas.transpose((0, 2, 1, 3))  # (mc_samples, n_metadata, n_cells, n_latent)
+            eps_reshaped = eps_.transpose((0, 2, 1, 3))  # (mc_samples, n_metadata, n_cells, n_latent)
+            eps_std = eps_reshaped.std(axis=1, keepdims=True)  # average over samples
+            eps_mean = eps_reshaped.mean(axis=1, keepdims=True)  # average over samples
+            betas_ = betas_ * eps_std + eps_mean
+            
+            
             betas_ = betas_ * eps_.std(axis=2, keepdims=True).transpose((0, 2, 1, 3)) + eps_.mean(axis=2, keepdims=True).transpose((0, 2, 1, 3))
             if store_lfc:
 

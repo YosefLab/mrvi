@@ -227,13 +227,14 @@ def permutation_test(
 
 
 def extract_gene_and_cell_clusters(
-    myadata,
-    mylfcs,
-    extend_nhops=2,
-    score_threshold=0.5,
-    score_quantile=None,
-    u_repkey="X_u",
-    plot=True,
+    myadata: sc.AnnData,
+    mylfcs: xr.DataArray,
+    extend_nhops: int=2,
+    score_threshold: float=0.5,
+    score_quantile: float=None,
+    u_repkey: str="X_u",
+    plot: bool=True,
+    neighbors_kwargs: dict=None,
 ):
     """
     Extract gene and cell clusters from the LFCs.
@@ -278,10 +279,16 @@ def extract_gene_and_cell_clusters(
     # estimate gene clusters
     gene_include_rule = np.logical_and(myadata.X.mean(0) > 0.01, lfc_ad.X.std(0) >= 0.1)
     lfc_ad_transpose = lfc_ad[:, gene_include_rule].copy().T
-    sc.pp.neighbors(lfc_ad_transpose, n_neighbors=15, use_rep="X", metric="cosine")
-    sc.tl.umap(lfc_ad_transpose, min_dist=0.1)
+
+    if neighbors_kwargs is None:
+        neighbors_kwargs = {
+            "metric": "cosine",
+            "n_neighbors": 15,
+        }
+    sc.pp.neighbors(lfc_ad_transpose, use_rep="X", **neighbors_kwargs)
     sc.tl.leiden(lfc_ad_transpose, resolution=0.4, key_added="gene_leiden")
     if plot:
+        sc.tl.umap(lfc_ad_transpose, min_dist=0.1)
         sc.pl.umap(lfc_ad_transpose, color="gene_leiden")
 
     # assign gene clusters

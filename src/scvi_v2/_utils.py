@@ -6,6 +6,7 @@ import jax.numpy as jnp
 import numpy as np
 import pandas as pd
 import scanpy as sc
+import xarray as xr
 from pydeseq2 import DeseqDataSet
 
 from ._types import MrVIReduction, _ComputeLocalStatisticsRequirements
@@ -229,13 +230,14 @@ def permutation_test(
 def extract_gene_and_cell_clusters(
     myadata: sc.AnnData,
     mylfcs: xr.DataArray,
-    extend_nhops: int=2,
-    score_threshold: float=0.5,
-    score_quantile: float=None,
-    u_repkey: str="X_u",
-    plot: bool=True,
-    neighbors_kwargs: dict=None,
+    extend_nhops: int = 2,
+    score_threshold: float = 0.5,
+    score_quantile: float = None,
+    u_repkey: str = "X_u",
+    plot: bool = True,
+    neighbors_kwargs: dict = None,
 ):
+
     """
     Extract gene and cell clusters from the LFCs.
 

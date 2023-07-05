@@ -4,6 +4,9 @@ from typing import Callable, List, Union
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pandas as pd
+import scanpy as sc
+from pydeseq2 import DeseqDataSet
 
 from ._types import MrVIReduction, _ComputeLocalStatisticsRequirements
 
@@ -221,3 +224,166 @@ def permutation_test(
         raise ValueError("alternative must be 'greater' or 'less'")
     pval = (1.0 + cdt.sum()) / (1.0 + n_mc_samples)
     return pval
+
+
+def extract_gene_and_cell_clusters(
+    myadata,
+    mylfcs,
+    extend_nhops=2,
+    score_threshold=0.5,
+    score_quantile=None,
+    u_repkey="X_u",
+    plot=True,
+):
+    """
+    Extract gene and cell clusters from the LFCs.
+
+    This function clusters genes based on a cell by gene matrix of LFCs, to identify
+    modules of interacting genes.
+    It then identifies cell sets that have upregulated genes for each gene cluster.
+
+    This function builds three quantities:
+    1. gene clusters: genes that are close to each other in the LFC space, stored in
+    `myadata.var['gene_clusters']`
+    2. cell sets: Sets of cells that have upregulated genes for a given gene cluster,
+    3. extended cell sets: Sets of cells, and their immediate neighbors in the u space, that have upregulated genes for a given gene cluster.
+
+    Parameters
+    ----------
+    myadata
+        AnnData object.
+    mylfcs
+        LFCs, in a DataArray format, corresponding to a cell by gene matrix.
+    extend_nhops
+        Number of hops to extend the gene clusters, used to construct extended cell sets.
+        In particular, starting from an initial cell set, we add all k-nearest neighbors `extend_nhops` times.
+    score_threshold
+        Threshold for the cell score to construct cell sets.
+        It corresponds to the percentage of genes in the gene cluster that are upregulated.
+    score_quantile
+        Quantile of the cell score to construct cell sets, based on quantiles of the cell score distribution instead of a fixed threshold.
+        Replaces `score_threshold` if specified.
+    u_repkey
+        Key in `myadata.obsm` that contains the u embeddings. Used to construct extended cell sets.
+    plot
+        Whether to plot the results.
+    """
+
+    lfc_ad = sc.AnnData(
+        X=mylfcs.values,
+        obs=myadata.obs,
+        var=myadata.var,
+    )
+
+    # estimate gene clusters
+    gene_include_rule = np.logical_and(myadata.X.mean(0) > 0.01, lfc_ad.X.std(0) >= 0.1)
+    lfc_ad_transpose = lfc_ad[:, gene_include_rule].copy().T
+    sc.pp.neighbors(lfc_ad_transpose, n_neighbors=15, use_rep="X", metric="cosine")
+    sc.tl.umap(lfc_ad_transpose, min_dist=0.1)
+    sc.tl.leiden(lfc_ad_transpose, resolution=0.4, key_added="gene_leiden")
+    if plot:
+        sc.pl.umap(lfc_ad_transpose, color="gene_leiden")
+
+    # assign gene clusters
+    myadata.var.loc[:, "gene_cluster"] = "NA"
+    myadata.var.loc[lfc_ad_transpose.obs.index, "gene_cluster"] = lfc_ad_transpose.obs["gene_leiden"].astype(str).values
+
+    # compute cell scores
+    cell_score_keys = []
+    for g_cluster in myadata.var.loc[:, "gene_cluster"].unique():
+        if g_cluster == "NA":
+            continue
+        sub_ad = lfc_ad[:, myadata.var["gene_cluster"] == g_cluster].X
+        signs_ = np.sum(np.sign(sub_ad), 1) / sub_ad.shape[-1]
+        score_key = f"score_gene_cluster_{g_cluster}"
+
+        myadata.obs.loc[:, score_key] = signs_.toarray()
+        cell_score_keys.append(score_key)
+    if plot:
+        sc.pp.neighbors(myadata, use_rep=u_repkey)
+        sc.tl.umap(myadata)
+        sc.pl.umap(myadata, color=cell_score_keys)
+
+    # construct cell clusters from cell scores
+    keys_to_plot = []
+    for g_cluster in myadata.var.loc[:, "gene_cluster"].unique():
+        if g_cluster == "NA":
+            continue
+        score_key = f"score_gene_cluster_{g_cluster}"
+        cell_cluster_key = f"cell_cluster_{g_cluster}"
+        cell_extended_cluster_key = f"cell_extended_cluster_{g_cluster}"
+
+        scores = myadata.obs.loc[:, score_key]
+
+        if score_quantile is not None:
+            score_threshold = np.quantile(scores, score_quantile)
+        is_in_cluster = scores >= score_threshold
+        myadata.obs.loc[:, cell_cluster_key] = is_in_cluster
+        keys_to_plot.append(cell_cluster_key)
+
+        is_in_extended_cluster = is_in_cluster.copy()
+        for _ in range(extend_nhops):
+            neighbors = myadata.obsp["connectivities"][is_in_cluster, :].toarray()
+            _is_in_extended_cluster = np.any(neighbors, 0)
+            is_in_extended_cluster = is_in_extended_cluster | _is_in_extended_cluster
+        myadata.obs.loc[:, cell_extended_cluster_key] = is_in_extended_cluster
+        keys_to_plot.append(cell_extended_cluster_key)
+
+        myadata.obs.loc[:, cell_cluster_key] = myadata.obs.loc[:, cell_cluster_key].astype(str)
+        myadata.obs.loc[:, cell_extended_cluster_key] = myadata.obs.loc[:, cell_extended_cluster_key].astype(str)
+    if plot:
+        sc.pl.umap(myadata, color=keys_to_plot)
+
+
+def compute_cell_clusters(
+    myadata,
+    extend_nhops=2,
+    score_threshold=0.5,
+    score_quantile=None,
+    plot=True,
+):
+    keys_to_plot = []
+    for g_cluster in myadata.var.loc[:, "gene_cluster"].unique():
+        if g_cluster == "NA":
+            continue
+        score_key = f"score_gene_cluster_{g_cluster}"
+        cell_cluster_key = f"cell_cluster_{g_cluster}"
+        cell_extended_cluster_key = f"cell_extended_cluster_{g_cluster}"
+
+        scores = myadata.obs.loc[:, score_key]
+
+        if score_quantile is not None:
+            score_threshold = np.quantile(scores, score_quantile)
+        is_in_cluster = scores >= score_threshold
+        myadata.obs.loc[:, cell_cluster_key] = is_in_cluster
+        keys_to_plot.append(cell_cluster_key)
+
+        is_in_extended_cluster = is_in_cluster.copy()
+        for _ in range(extend_nhops):
+            neighbors = myadata.obsp["connectivities"][is_in_cluster, :].toarray()
+            _is_in_extended_cluster = np.any(neighbors, 0)
+            is_in_extended_cluster = is_in_extended_cluster | _is_in_extended_cluster
+        myadata.obs.loc[:, cell_extended_cluster_key] = is_in_extended_cluster
+        keys_to_plot.append(cell_extended_cluster_key)
+
+        myadata.obs.loc[:, cell_cluster_key] = myadata.obs.loc[:, cell_cluster_key].astype(str)
+        myadata.obs.loc[:, cell_extended_cluster_key] = myadata.obs.loc[:, cell_extended_cluster_key].astype(str)
+    if plot:
+        sc.pl.umap(myadata, color=keys_to_plot)
+
+
+def fit_deseq2(
+    adata,
+    design_factors,
+):
+    counts_df = pd.DataFrame(adata.X.toarray(), index=adata.obs_names, columns=adata.var_names)
+    design_df = adata.obs.loc[:, design_factors].copy()
+    dds = DeseqDataSet(
+        counts=counts_df,
+        clinical=design_df,
+        design_factors=design_factors,
+        refit_cooks=True,
+        n_cpus=24,
+    )
+    dds.deseq2()
+    return dds

@@ -831,13 +831,16 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         precomputed_abundance
             Precomputed abundance and passed as a numpy array
         """
+        adata = self.adata if adata is None else adata
+        adata = self._validate_anndata(adata)
+        
         if precomputed_abundance is None:
             res = self.get_outlier_cell_sample_pairs(
-                adata=lung,
+                adata=adata,
                 flavor="ap",
                 subsample_size=5000,
                 minibatch_size=batch_size,
-            )["log_ratios"]
+            )["log_probs"]
         else:
             res = precomputed_abundance
 
@@ -963,6 +966,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             Whether to store the log-fold changes in the module.
             Storing log-fold changes is memory-intensive and may require to specify
             a smaller set of cells to analyze, e.g., by specifying `adata`.
+            If supplying a list it will only use those covariate for computing lfc.
         store_baseline
             Whether to store the expression in the module if logfoldchanges are computed.
         eps_lfc
@@ -1006,6 +1010,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             offset_design_matrix=offset_design_matrix,
         )
         Xmat = jnp.array(Xmat)
+        names_lfc = Xmat_names if store_lfc==True else store_lfc if store_lfc else []
+        indices_lfc = tuple(np.where(np.isin(Xmat_names, names_lfc))[0])
 
         @partial(jax.jit, backend="cpu")
         def process_design_matrix(
@@ -1021,7 +1027,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             Amat = jnp.einsum("nab,bc,ncd->nad", inv_, Xmat.T, admissible_donors_dmat)
             return Amat, prefactor
 
-        @partial(jax.jit, static_argnames=["use_mean", "mc_samples"])
+        @partial(jax.jit, static_argnames=["use_mean", "mc_samples", "indices_lfc"])
         def mapped_inference_fn(
             stacked_rngs,
             x,
@@ -1034,6 +1040,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             n_donors_per_cell,
             use_mean,
             mc_samples,
+            indices_lfc,
             stacked_rngs_de=None,
         ):
             def inference_fn(
@@ -1081,8 +1088,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             eps_std = eps_reshaped.std(axis=1, keepdims=True)  # average over samples
             eps_mean = eps_reshaped.mean(axis=1, keepdims=True)  # average over samples
             betas_ = betas_ * eps_std + eps_mean
-
-            if store_lfc:
+            if indices_lfc:
+                betas_ = betas_[:, indices_lfc, :, :]
 
                 def h_inference_fn(rngs, extra_eps):
                     return self.module.apply(
@@ -1153,12 +1160,12 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 continuous_covs = jnp.array(continuous_covs)
             stacked_rngs = self._generate_stacked_rngs(cf_sample.shape[0])
             stacked_rngs_de = [
-                self._generate_stacked_rngs(n_sets=mc_samples * Xmat.shape[1]),
-                self._generate_stacked_rngs(n_sets=mc_samples * Xmat.shape[1]),
+                self._generate_stacked_rngs(n_sets=mc_samples * len(indices_lfc)),
+                self._generate_stacked_rngs(n_sets=mc_samples * len(indices_lfc)),
             ]
             stacked_rngs_de = [
                 {
-                    key: random_key.reshape((mc_samples, Xmat.shape[1]) + random_key.shape[1:])
+                    key: random_key.reshape((mc_samples, len(indices_lfc)) + random_key.shape[1:])
                     for (key, random_key) in dico.items()
                 }
                 for dico in stacked_rngs_de
@@ -1187,6 +1194,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 use_mean=False,
                 stacked_rngs_de=stacked_rngs_de,
                 mc_samples=mc_samples,
+                indices_lfc=indices_lfc,
             )  # (n_cells, n_donors, n_latent)
             beta.append(np.array(res["beta"]))
             effect_size.append(np.array(res["effect_size"]))
@@ -1194,6 +1202,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             if store_lfc:
                 lfc.append(np.array(res["lfc"]))
                 zscore.append(np.array(res["zscore"]))
+            if store_baseline:
                 baseline_expression.append(np.array(res["baseline_expression"]))
         beta = np.concatenate(beta, axis=0)
         effect_size = np.concatenate(effect_size, axis=0)
@@ -1226,14 +1235,19 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             ),
         }
         if store_lfc:
+            if store_lfc==True:
+                coords_lfc = ["covariate", "cell_name", "gene"]
+            else:
+                coords_lfc = ["covariate_sub", "cell_name", "gene"]
+                coords["covariate_sub"] = names_lfc
             lfc = np.concatenate(lfc, axis=1)
             data_vars["lfc"] = (
-                ["covariate", "cell_name", "gene"],
+                coords_lfc,
                 lfc,
             )
             zscore = np.concatenate(zscore, axis=1)
             data_vars["zscore"] = (
-                ["covariate", "cell_name", "gene"],
+                coords_lfc,
                 zscore,
             )
         if store_baseline:

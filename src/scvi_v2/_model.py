@@ -943,6 +943,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         store_baseline: bool = False,
         eps_lfc: float = 1e-3,
         filter_donors: bool = False,
+        lambd: float = 0.0,
         **filter_donors_kwargs,
     ) -> xr.Dataset:
         """Utility function to perform cell-specific multivariate analysis.
@@ -989,6 +990,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             Whether to filter out-of-distribution donors prior to performing the analysis.
         filter_donors_kwargs
             Keyword arguments to pass to `get_outlier_cell_sample_pairs`.
+        lambd
+            Regularization parameter for the linear model.
         """
         adata = self.adata if adata is None else adata
         self._check_if_trained(warn=False)
@@ -1025,6 +1028,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             offset_design_matrix=offset_design_matrix,
         )
         Xmat = jnp.array(Xmat)
+        n_covariates = Xmat.shape[1]
         if store_lfc:
             covariates_require_lfc = (
                 np.isin(Xmat_dim_to_key, store_lfc_metadata_subset)
@@ -1046,6 +1050,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             # TODO: make sure to write math down
             # X^T X with masking
             xtmx = jnp.einsum("ak,nkl,lm->nam", Xmat.T, admissible_donors_dmat, Xmat)
+            xtmx += lambd * jnp.eye(n_covariates)
 
             prefactor = jnp.real(jax.vmap(jax.scipy.linalg.sqrtm)(xtmx))
             inv_ = jax.vmap(jnp.linalg.pinv)(xtmx)

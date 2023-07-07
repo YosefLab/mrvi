@@ -856,7 +856,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
         donor_mask = np.array(np.isin(self.sample_order, list(res.coords["sample"].values)))
 
-        Xmat, Xmat_names = self._construct_design_matrix(
+        Xmat, Xmat_names, _ = self._construct_design_matrix(
             donor_keys=donor_keys,
             donor_mask=donor_mask,
             normalize_design_matrix=normalize_design_matrix,
@@ -939,6 +939,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         offset_design_matrix: bool = True,
         mc_samples: int = 100,
         store_lfc: bool = False,
+        store_lfc_metadata_subset: Optional[List[str]] = None,
         store_baseline: bool = False,
         eps_lfc: float = 1e-3,
         filter_donors: bool = False,
@@ -976,7 +977,10 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             Whether to store the log-fold changes in the module.
             Storing log-fold changes is memory-intensive and may require to specify
             a smaller set of cells to analyze, e.g., by specifying `adata`.
-            If supplying a list it will only use those covariate for computing lfc.
+        store_lfc_metadata_subset
+            Specifies a subset of metadata for which log-fold changes are computed.
+            These keys must be a subset of `donor_keys`.
+            Only applies when `store_lfc=True`.
         store_baseline
             Whether to store the expression in the module if logfoldchanges are computed.
         eps_lfc
@@ -1014,15 +1018,25 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             admissible_donors = np.ones((adata.n_obs, n_samples_kept), dtype=bool)
         n_admissible_donors = admissible_donors.sum(1)
 
-        Xmat, Xmat_names = self._construct_design_matrix(
+        Xmat, Xmat_names, Xmat_dim_to_key = self._construct_design_matrix(
             donor_keys=donor_keys,
             donor_mask=donor_mask,
             normalize_design_matrix=normalize_design_matrix,
             offset_design_matrix=offset_design_matrix,
         )
         Xmat = jnp.array(Xmat)
-        names_lfc = Xmat_names if store_lfc == True else store_lfc if store_lfc else []
-        indices_lfc = tuple(np.where(np.isin(Xmat_names, names_lfc))[0])
+        if store_lfc:
+            covariates_require_lfc = (
+                np.isin(Xmat_dim_to_key, store_lfc_metadata_subset)
+                if store_lfc_metadata_subset is not None
+                else np.ones(len(Xmat_names), dtype=bool)
+            )
+            lfc_covariate_names = Xmat_names[covariates_require_lfc]
+        else:
+            covariates_require_lfc = np.zeros(len(Xmat_names), dtype=bool)
+            lfc_covariate_names = None
+        n_covariates_require_lfc = covariates_require_lfc.sum()
+        covariates_require_lfc = jnp.array(covariates_require_lfc)
 
         @partial(jax.jit, backend="cpu")
         def process_design_matrix(
@@ -1038,7 +1052,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             Amat = jnp.einsum("nab,bc,ncd->nad", inv_, Xmat.T, admissible_donors_dmat)
             return Amat, prefactor
 
-        @partial(jax.jit, static_argnames=["use_mean", "mc_samples", "indices_lfc"])
+        @partial(jax.jit, static_argnames=["use_mean", "mc_samples"])
         def mapped_inference_fn(
             stacked_rngs,
             x,
@@ -1051,7 +1065,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             n_donors_per_cell,
             use_mean,
             mc_samples,
-            indices_lfc,
             stacked_rngs_de=None,
         ):
             def inference_fn(
@@ -1098,8 +1111,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             eps_std = eps_reshaped.std(axis=1, keepdims=True)  # average over samples
             eps_mean = eps_reshaped.mean(axis=1, keepdims=True)  # average over samples
             betas_ = betas_ * eps_std + eps_mean
-            if indices_lfc:
-                betas_ = betas_[:, indices_lfc, :, :]
+            if store_lfc:
+                betas_ = betas_[:, covariates_require_lfc, :, :]
 
                 def h_inference_fn(rngs, extra_eps):
                     return self.module.apply(
@@ -1136,8 +1149,9 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 u_x = jnp.minimum(u_statistic(rank_x[:, :mc_samples, :, :]), u_statistic(rank_x[:, mc_samples:, :, :]))
                 zscore = (u_x - mc_samples**2 / 2) / jnp.sqrt(mc_samples**2 * (2 * mc_samples + 1) / 12)
 
+                mean_lfcs = lfcs.mean(1)
             else:
-                lfcs = None
+                mean_lfcs = None
                 zscore = None
             if store_baseline:
                 baseline_expression = x_1.mean(1)
@@ -1147,7 +1161,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 "beta": betas.mean(0),
                 "effect_size": ts,
                 "pvalue": pvals,
-                "lfc": lfcs.mean(1),
+                "lfc": mean_lfcs,
                 "zscore": zscore,
                 "baseline_expression": baseline_expression,
             }
@@ -1170,11 +1184,14 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 continuous_covs = jnp.array(continuous_covs)
             stacked_rngs = self._generate_stacked_rngs(cf_sample.shape[0])
 
-            set_shape = (mc_samples, len(indices_lfc))
-            stacked_rngs_de = [
-                self._generate_stacked_rngs(n_sets=set_shape),
-                self._generate_stacked_rngs(n_sets=set_shape),
-            ]
+            if store_lfc:
+                set_shape = (mc_samples, n_covariates_require_lfc)
+                stacked_rngs_de = [
+                    self._generate_stacked_rngs(n_sets=set_shape),
+                    self._generate_stacked_rngs(n_sets=set_shape),
+                ]
+            else:
+                stacked_rngs_de = None
 
             admissible_donors_mat = jnp.array(admissible_donors[indices])  # (n_cells, n_donors)
             n_donors_per_cell = admissible_donors_mat.sum(axis=1)
@@ -1199,7 +1216,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 use_mean=False,
                 stacked_rngs_de=stacked_rngs_de,
                 mc_samples=mc_samples,
-                indices_lfc=indices_lfc,
+                # covariates_require_lfc=covariates_require_lfc,
             )  # (n_cells, n_donors, n_latent)
             beta.append(np.array(res["beta"]))
             effect_size.append(np.array(res["effect_size"]))
@@ -1245,11 +1262,11 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 n_admissible_donors,
             )
         if store_lfc:
-            if store_lfc == True:
+            if store_lfc_metadata_subset is None:
                 coords_lfc = ["covariate", "cell_name", "gene"]
             else:
                 coords_lfc = ["covariate_sub", "cell_name", "gene"]
-                coords["covariate_sub"] = names_lfc
+                coords["covariate_sub"] = lfc_covariate_names
             lfc = np.concatenate(lfc, axis=1)
             data_vars["lfc"] = (
                 coords_lfc,
@@ -1275,8 +1292,18 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         normalize_design_matrix,
         offset_design_matrix,
     ):
+        """
+        Starting from a list of donor keys, construct a design matrix of donors and covariates.
+
+        Categorical covariates are one-hot encoded.
+        This method returns a tuple of:
+        1. The design matrix
+        2. A name for each column in the design matrix
+        3. The original donor key for each column in the design matrix
+        """
         Xmat = []
         Xmat_names = []
+        Xmat_dim_to_key = []
         for donor_key in tqdm(donor_keys):
             cov = self.donor_info[donor_key]
             if (cov.dtype == str) or (cov.dtype == "category"):
@@ -1286,10 +1313,14 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             else:
                 cov_names = np.array([donor_key])
                 cov = cov.values[:, None]
+
+            n_covs = cov.shape[1]
             Xmat.append(cov)
             Xmat_names.append(cov_names)
+            Xmat_dim_to_key.append([donor_key] * n_covs)
         Xmat_names = np.concatenate(Xmat_names)
         Xmat = np.concatenate(Xmat, axis=1).astype(np.float32)
+        Xmat_dim_to_key = np.concatenate(Xmat_dim_to_key)
         Xmat = Xmat[donor_mask]
 
         if normalize_design_matrix:
@@ -1297,7 +1328,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         if offset_design_matrix:
             Xmat = np.concatenate([np.ones((Xmat.shape[0], 1)), Xmat], axis=1)
             Xmat_names = np.concatenate([np.array(["offset"]), Xmat_names])
-        return Xmat, Xmat_names
+            Xmat_dim_to_key = np.concatenate([np.array(["offset"]), Xmat_dim_to_key])
+        return Xmat, Xmat_names, Xmat_dim_to_key
 
     def compute_cell_scores(
         self,

@@ -833,7 +833,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         """
         adata = self.adata if adata is None else adata
         adata = self._validate_anndata(adata)
-        
+
         if precomputed_abundance is None:
             res = self.get_outlier_cell_sample_pairs(
                 adata=adata,
@@ -1011,7 +1011,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             offset_design_matrix=offset_design_matrix,
         )
         Xmat = jnp.array(Xmat)
-        names_lfc = Xmat_names if store_lfc==True else store_lfc if store_lfc else []
+        names_lfc = Xmat_names if store_lfc == True else store_lfc if store_lfc else []
         indices_lfc = tuple(np.where(np.isin(Xmat_names, names_lfc))[0])
 
         @partial(jax.jit, backend="cpu")
@@ -1240,7 +1240,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 n_admissible_donors,
             )
         if store_lfc:
-            if store_lfc==True:
+            if store_lfc == True:
                 coords_lfc = ["covariate", "cell_name", "gene"]
             else:
                 coords_lfc = ["covariate_sub", "cell_name", "gene"]

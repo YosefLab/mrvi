@@ -94,7 +94,6 @@ class _DecoderZXAttention(nn.Module):
         continuous_covariates: Optional[NdArray],
         training: Optional[bool] = None,
     ) -> NegativeBinomial:
-
         has_mc_samples = z.ndim == 3
         z_stop = z if not self.stop_gradients else jax.lax.stop_gradient(z)
         z_ = nn.LayerNorm(name="u_ln")(z_stop)
@@ -411,7 +410,7 @@ class MrVAE(JaxBaseModuleClass):
             self.pz_scale = self.z_u_prior_scale
 
         if self.u_prior_mixture:
-            if self.n_labels>1:
+            if self.n_labels > 1:
                 u_prior_mixture_k = self.n_labels
             else:
                 u_prior_mixture_k = self.u_prior_mixture_k
@@ -474,7 +473,13 @@ class MrVAE(JaxBaseModuleClass):
         batch_index = tensors[REGISTRY_KEYS.BATCH_KEY]
         label_index = tensors[REGISTRY_KEYS.LABELS_KEY]
         continuous_covs = tensors.get(REGISTRY_KEYS.CONT_COVS_KEY, None)
-        return {"z": z, "library": library, "batch_index": batch_index, "label_index": label_index, "continuous_covs": continuous_covs}
+        return {
+            "z": z,
+            "library": library,
+            "batch_index": batch_index,
+            "label_index": label_index,
+            "continuous_covs": continuous_covs,
+        }
 
     def generative(self, z, library, batch_index, label_index, continuous_covs):
         """Generative model."""
@@ -487,7 +492,7 @@ class MrVAE(JaxBaseModuleClass):
         if self.u_prior_mixture:
             one_hot_labels = jax.nn.one_hot(label_index, self.n_labels)
             # kind of arbitrary factor, I found it well balanced but might require adjustment.
-            cats = dist.Categorical(logits=10*one_hot_labels+self.u_prior_logits)
+            cats = dist.Categorical(logits=10 * one_hot_labels + self.u_prior_logits)
             normal_dists = dist.Normal(self.u_prior_means, jnp.exp(self.u_prior_scales))
             pu = dist.MixtureSameFamily(cats, normal_dists)
         else:

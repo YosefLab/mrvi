@@ -116,13 +116,23 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         # TODO(jhong): remove this once we have a better way to handle device.
         pass
 
-    def _generate_stacked_rngs(self, n_sets: int) -> Dict[str, jax.random.PRNGKey]:
-        rngs_list = [self.module.rngs for _ in range(n_sets)]
+    def _generate_stacked_rngs(self, n_sets: Union[int, tuple]) -> Dict[str, jax.random.PRNGKey]:
+        return_1d = isinstance(n_sets, int)
+        if return_1d:
+            n_sets_1d = n_sets
+        else:
+            n_sets_1d = np.prod(n_sets)
+        rngs_list = [self.module.rngs for _ in range(n_sets_1d)]
         # Combine list of RNG dicts into a single list. This is necessary for vmap/map.
-        return {
+        rngs = {
             required_rng: jnp.concatenate([rngs_dict[required_rng][None] for rngs_dict in rngs_list], axis=0)
             for required_rng in self.module.required_rngs
         }
+        if not return_1d:
+            # Reshaping the random keys to the desired shape in
+            # the case of multiple sets.
+            rngs = {key: random_key.reshape(n_sets + random_key.shape[1:]) for (key, random_key) in rngs.items()}
+        return rngs
 
     @classmethod
     def setup_anndata(  # noqa: #D102
@@ -1159,16 +1169,11 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             if continuous_covs is not None:
                 continuous_covs = jnp.array(continuous_covs)
             stacked_rngs = self._generate_stacked_rngs(cf_sample.shape[0])
+
+            set_shape = (mc_samples, len(indices_lfc))
             stacked_rngs_de = [
-                self._generate_stacked_rngs(n_sets=mc_samples * len(indices_lfc)),
-                self._generate_stacked_rngs(n_sets=mc_samples * len(indices_lfc)),
-            ]
-            stacked_rngs_de = [
-                {
-                    key: random_key.reshape((mc_samples, len(indices_lfc)) + random_key.shape[1:])
-                    for (key, random_key) in dico.items()
-                }
-                for dico in stacked_rngs_de
+                self._generate_stacked_rngs(n_sets=set_shape),
+                self._generate_stacked_rngs(n_sets=set_shape),
             ]
 
             admissible_donors_mat = jnp.array(admissible_donors[indices])  # (n_cells, n_donors)

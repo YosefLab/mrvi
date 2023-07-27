@@ -1039,7 +1039,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         else:
             covariates_require_lfc = np.zeros(len(Xmat_names), dtype=bool)
             lfc_covariate_names = None
-        n_covariates_require_lfc = covariates_require_lfc.sum()
         covariates_require_lfc = jnp.array(covariates_require_lfc)
 
         @partial(jax.jit, backend="cpu")
@@ -1070,7 +1069,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             n_donors_per_cell,
             use_mean,
             mc_samples,
-            stacked_rngs_de=None,
+            rngs_de=None,
         ):
             def inference_fn(
                 rngs,
@@ -1119,10 +1118,10 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             if store_lfc:
                 betas_ = betas_[:, covariates_require_lfc, :, :]
 
-                def h_inference_fn(rngs, extra_eps):
+                def h_inference_fn(extra_eps):
                     return self.module.apply(
                         vars_in,
-                        rngs=rngs,
+                        rngs=rngs_de,
                         method=self.module.compute_h_from_x_eps,
                         x=x,
                         extra_eps=extra_eps,
@@ -1134,15 +1133,9 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                     )
 
                 h_fn = jax.jit(jax.vmap(jax.vmap(h_inference_fn, in_axes=1, out_axes=0), in_axes=0, out_axes=1))
-                x_1 = h_fn(
-                    rngs=stacked_rngs_de[0],
-                    extra_eps=betas_,
-                )  # (n_metadata, mc_samples, n_cells, n_genes)
+                x_1 = h_fn(extra_eps=betas_)  # (n_metadata, mc_samples, n_cells, n_genes)
                 betas_null = jnp.zeros_like(betas_) + eps_.mean(axis=2, keepdims=True).transpose((0, 2, 1, 3))
-                x_0 = h_fn(
-                    rngs=stacked_rngs_de[1],
-                    extra_eps=betas_null,
-                )
+                x_0 = h_fn(extra_eps=betas_null)
 
                 lfcs = jnp.log2(x_1 + eps_lfc) - jnp.log2(x_0 + eps_lfc)
                 concat_x = jnp.concatenate([x_0, x_1], axis=1)
@@ -1189,15 +1182,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 continuous_covs = jnp.array(continuous_covs)
             stacked_rngs = self._generate_stacked_rngs(cf_sample.shape[0])
 
-            if store_lfc:
-                set_shape = (mc_samples, n_covariates_require_lfc)
-                stacked_rngs_de = [
-                    self._generate_stacked_rngs(n_sets=set_shape),
-                    self._generate_stacked_rngs(n_sets=set_shape),
-                ]
-            else:
-                stacked_rngs_de = None
-
+            rngs_de = self.module.rngs if store_lfc else None
             admissible_donors_mat = jnp.array(admissible_donors[indices])  # (n_cells, n_donors)
             n_donors_per_cell = admissible_donors_mat.sum(axis=1)
             admissible_donors_dmat = jax.vmap(jnp.diag)(admissible_donors_mat).astype(
@@ -1219,7 +1204,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 prefactor=prefactor,
                 n_donors_per_cell=n_donors_per_cell,
                 use_mean=False,
-                stacked_rngs_de=stacked_rngs_de,
+                rngs_de=rngs_de,
                 mc_samples=mc_samples,
                 # covariates_require_lfc=covariates_require_lfc,
             )  # (n_cells, n_donors, n_latent)

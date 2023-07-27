@@ -944,6 +944,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         eps_lfc: float = 1e-3,
         filter_donors: bool = False,
         lambd: float = 0.0,
+        delta: float = 0.5,
         **filter_donors_kwargs,
     ) -> xr.Dataset:
         """Utility function to perform cell-specific multivariate analysis.
@@ -1061,7 +1062,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             stacked_rngs,
             x,
             sample_index,
-            batch_index,
             continuous_covs,
             cf_sample,
             Amat,
@@ -1118,7 +1118,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             if store_lfc:
                 betas_ = betas_[:, covariates_require_lfc, :, :]
 
-                def h_inference_fn(extra_eps):
+                def h_inference_fn(extra_eps, batch_index_cf):
                     return self.module.apply(
                         vars_in,
                         rngs=rngs_de,
@@ -1126,31 +1126,32 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                         x=x,
                         extra_eps=extra_eps,
                         sample_index=sample_index,
-                        batch_index=batch_index,
+                        batch_index=batch_index_cf,
                         cf_sample=None,
                         continuous_covs=continuous_covs,
                         mc_samples=None,  # mc_samples also taken for eps. vmap over mc_samples
                     )
 
-                h_fn = jax.jit(jax.vmap(jax.vmap(h_inference_fn, in_axes=1, out_axes=0), in_axes=0, out_axes=1))
-                x_1 = h_fn(extra_eps=betas_)  # (n_metadata, mc_samples, n_cells, n_genes)
+                batch_index_ = jnp.arange(self.summary_stats.n_batch)[:, None]
+                batch_index_ = jnp.repeat(batch_index_, repeats=n_cells, axis=1)[..., None]  # (n_batch, n_cells, 1)
+
+                f_ = jax.vmap(h_inference_fn, in_axes=(0, None), out_axes=0)  # fn over covariates
+                f_ = jax.vmap(f_, in_axes=(1, None), out_axes=1)  # fn over MC samples
+                f_ = jax.vmap(f_, in_axes=(None, 0), out_axes=0)  # fn over batches
+                h_fn = jax.jit(f_)  # final expected shape (n_batch, mc_samples, n_covariates, n_cells, n_genes)
+                x_1 = h_fn(betas_, batch_index_)  # (n_metadata, mc_samples, n_cells, n_genes)
                 betas_null = jnp.zeros_like(betas_) + eps_.mean(axis=2, keepdims=True).transpose((0, 2, 1, 3))
-                x_0 = h_fn(extra_eps=betas_null)
+                x_0 = h_fn(betas_null, batch_index_)
 
                 lfcs = jnp.log2(x_1 + eps_lfc) - jnp.log2(x_0 + eps_lfc)
-                concat_x = jnp.concatenate([x_0, x_1], axis=1)
-                rank_x = jax.scipy.stats.rankdata(concat_x, method="average", axis=1)
-
-                def u_statistic(rank_x):
-                    return jnp.sum(rank_x, axis=1) - (mc_samples * (mc_samples + 1) / 2)
-
-                u_x = jnp.minimum(u_statistic(rank_x[:, :mc_samples, :, :]), u_statistic(rank_x[:, mc_samples:, :, :]))
-                zscore = (u_x - mc_samples**2 / 2) / jnp.sqrt(mc_samples**2 * (2 * mc_samples + 1) / 12)
-
-                mean_lfcs = lfcs.mean(1)
+                batch_specific_lfc = lfcs.mean(1)
+                lfc_mean = batch_specific_lfc.mean(0)
+                lfc_std = batch_specific_lfc.std(0)
+                pde = (jnp.abs(lfcs) >= delta).mean(1).mean(0)
             else:
-                mean_lfcs = None
-                zscore = None
+                lfc_mean = None
+                lfc_std = None
+                pde = None
             if store_baseline:
                 baseline_expression = x_1.mean(1)
             else:
@@ -1159,8 +1160,9 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 "beta": betas.mean(0),
                 "effect_size": ts,
                 "pvalue": pvals,
-                "lfc": mean_lfcs,
-                "zscore": zscore,
+                "lfc_mean": lfc_mean,
+                "lfc_std": lfc_std,
+                "pde": pde,
                 "baseline_expression": baseline_expression,
             }
 
@@ -1168,7 +1170,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         effect_size = []
         pvalue = []
         lfc = []
-        zscore = []
+        lfc_std = []
+        pde = []
         baseline_expression = []
         for array_dict in tqdm(scdl):
             indices = array_dict[REGISTRY_KEYS.INDICES_KEY].astype(int).flatten()
@@ -1197,7 +1200,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 stacked_rngs=stacked_rngs,
                 x=jnp.array(inf_inputs["x"]),
                 sample_index=jnp.array(inf_inputs["sample_index"]),
-                batch_index=jnp.array(array_dict[REGISTRY_KEYS.BATCH_KEY]),
                 continuous_covs=continuous_covs,
                 cf_sample=jnp.array(cf_sample),
                 Amat=Amat,
@@ -1212,8 +1214,9 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             effect_size.append(np.array(res["effect_size"]))
             pvalue.append(np.array(res["pvalue"]))
             if store_lfc:
-                lfc.append(np.array(res["lfc"]))
-                zscore.append(np.array(res["zscore"]))
+                lfc.append(np.array(res["lfc_mean"]))
+                lfc_std.append(np.array(res["lfc_std"]))
+                pde.append(np.array(res["pde"]))
             if store_baseline:
                 baseline_expression.append(np.array(res["baseline_expression"]))
         beta = np.concatenate(beta, axis=0)
@@ -1258,15 +1261,11 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 coords_lfc = ["covariate_sub", "cell_name", "gene"]
                 coords["covariate_sub"] = lfc_covariate_names
             lfc = np.concatenate(lfc, axis=1)
-            data_vars["lfc"] = (
-                coords_lfc,
-                lfc,
-            )
-            zscore = np.concatenate(zscore, axis=1)
-            data_vars["zscore"] = (
-                coords_lfc,
-                zscore,
-            )
+            lfc_std = np.concatenate(lfc_std, axis=1)
+            pde = np.concatenate(pde, axis=1)
+            data_vars["lfc"] = (coords_lfc, lfc)
+            data_vars["lfc_std"] = (coords_lfc, lfc_std)
+            data_vars["pde"] = (coords_lfc, pde)
         if store_baseline:
             baseline_expression = np.concatenate(baseline_expression, axis=1)
             data_vars["baseline_expression"] = (

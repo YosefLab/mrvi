@@ -38,6 +38,14 @@ def test_mrvi():
     model.perform_multivariate_analysis(donor_keys=donor_keys, store_lfc=True, filter_donors=True)
     model.get_local_sample_distances(normalize_distances=True)
 
+    adata.obs.loc[:, "batch_placeholder"] = "1"
+    MrVI.setup_anndata(adata, sample_key="sample", batch_key="batch_placeholder")
+    model = MrVI(adata)
+    model.train(1, check_val_every_n_epoch=1, train_size=0.5)
+    model.perform_multivariate_analysis(donor_keys=donor_keys, store_lfc=True)
+    model.perform_multivariate_analysis(donor_keys=donor_keys, store_lfc=True, lambd=1e-1)
+    model.perform_multivariate_analysis(donor_keys=donor_keys, store_lfc=True, filter_donors=True)
+
     MrVI.setup_anndata(adata, sample_key="sample_str", batch_key="batch", continuous_covariate_keys=["cont_cov"])
     model = MrVI(
         adata,
@@ -457,6 +465,14 @@ def test_de():
         use_vmap=True,
     )
 
+    model = MrVI(
+        adata,
+        n_latent=10,
+        z_u_prior=False,
+        u_prior_mixture=True,
+        u_prior_mixture_k=20,
+    )
+    model.train(1, check_val_every_n_epoch=1, train_size=0.5)
     de_results = model.differential_expression(
         adata_label1,
         samples_a=[0, 1],

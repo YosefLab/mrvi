@@ -17,11 +17,41 @@ def test_mrvi():
     adata.obs["meta2"] = meta2[adata.obs["sample"].values]
     MrVI.setup_anndata(adata, sample_key="sample", batch_key="batch")
     adata.obs["cont_cov"] = np.random.normal(0, 1, size=adata.shape[0])
-    MrVI.setup_anndata(adata, sample_key="sample", batch_key="batch", continuous_covariate_keys=["cont_cov"])
     n_latent = 10
 
     adata.obs["meta1_cat"] = "CAT_" + adata.obs["meta1"].astype(str)
     adata.obs["meta1_cat"] = adata.obs["meta1_cat"].astype("category")
+
+    adata.obs.loc[:, "disjoint_batch"] = (adata.obs.loc[:, "sample"] <= 6).replace({True: "batch_0", False: "batch_1"})
+    MrVI.setup_anndata(adata, sample_key="sample", batch_key="disjoint_batch")
+    model = MrVI(
+        adata,
+        px_nn_flavor="attention",
+        qz_nn_flavor="attention",
+    )
+    model.train(2, check_val_every_n_epoch=1, train_size=0.5)
+    donor_keys = ["meta1_cat", "meta2", "cont_cov"]
+    model.perform_multivariate_analysis(donor_keys=donor_keys, store_lfc=True, add_batch_specific_offsets=True)
+    model.perform_multivariate_analysis(
+        donor_keys=donor_keys, store_lfc=True, lambd=1e-1, add_batch_specific_offsets=True
+    )
+    model.perform_multivariate_analysis(
+        donor_keys=donor_keys, store_lfc=True, filter_donors=True, add_batch_specific_offsets=True
+    )
+    model.get_local_sample_distances(normalize_distances=True)
+
+    MrVI.setup_anndata(adata, sample_key="sample", batch_key="batch")
+    model = MrVI(
+        adata,
+        px_nn_flavor="attention",
+        qz_nn_flavor="attention",
+    )
+    model.train(2, check_val_every_n_epoch=1, train_size=0.5)
+    donor_keys = ["meta1_cat", "meta2", "cont_cov"]
+    model.perform_multivariate_analysis(donor_keys=donor_keys, store_lfc=True, add_batch_specific_offsets=False)
+    model.get_local_sample_distances(normalize_distances=True)
+
+    MrVI.setup_anndata(adata, sample_key="sample", batch_key="batch", continuous_covariate_keys=["cont_cov"])
     model = MrVI(
         adata,
         px_nn_flavor="attention",
@@ -32,11 +62,15 @@ def test_mrvi():
     model.get_outlier_cell_sample_pairs(flavor="ball", subsample_size=50)
     model.get_outlier_cell_sample_pairs(flavor="MoG", subsample_size=50)
     model.get_outlier_cell_sample_pairs(flavor="ap", subsample_size=50)
-    donor_keys = ["meta1_cat", "meta2", "cont_cov"]
+    model.perform_multivariate_analysis(donor_keys=donor_keys, store_lfc=True, add_batch_specific_offsets=False)
+
+    adata.obs.loc[:, "batch_placeholder"] = "1"
+    MrVI.setup_anndata(adata, sample_key="sample", batch_key="batch_placeholder")
+    model = MrVI(adata)
+    model.train(1, check_val_every_n_epoch=1, train_size=0.5)
     model.perform_multivariate_analysis(donor_keys=donor_keys, store_lfc=True)
     model.perform_multivariate_analysis(donor_keys=donor_keys, store_lfc=True, lambd=1e-1)
     model.perform_multivariate_analysis(donor_keys=donor_keys, store_lfc=True, filter_donors=True)
-    model.get_local_sample_distances(normalize_distances=True)
 
     MrVI.setup_anndata(adata, sample_key="sample_str", batch_key="batch", continuous_covariate_keys=["cont_cov"])
     model = MrVI(
@@ -420,50 +454,6 @@ def test_mrvi_nonlinear():
     model.get_local_sample_distances(use_mean=True)
     model.get_local_sample_distances(use_mean=False)
     model.get_local_sample_distances(normalize_distances=True)
-
-
-def test_de():
-    adata = synthetic_iid()
-    adata.obs["sample"] = np.random.choice(15, size=adata.shape[0])
-    MrVI.setup_anndata(adata, sample_key="sample", batch_key="batch")
-
-    n_latent = 10
-    model = MrVI(
-        adata,
-        n_latent=n_latent,
-    )
-    model.train(1, check_val_every_n_epoch=1, train_size=0.5)
-    model.is_trained_ = True
-    model.history
-    assert model.get_latent_representation().shape == (adata.shape[0], n_latent)
-
-    adata_label1 = adata[adata.obs["labels"] == "label_0"].copy()
-    mc_samples_for_permutation = 1000
-    de_dists = model.differential_expression(
-        adata_label1,
-        samples_a=[0, 1],
-        samples_b=[2, 3],
-        return_dist=True,
-        mc_samples_for_permutation=mc_samples_for_permutation,
-    )
-    n_genes = adata_label1.n_vars
-    assert de_dists.shape == (mc_samples_for_permutation, n_genes)
-
-    model.differential_expression(
-        adata_label1,
-        samples_a=[0, 1],
-        samples_b=[0, 1],
-        return_dist=False,
-        use_vmap=True,
-    )
-
-    de_results = model.differential_expression(
-        adata_label1,
-        samples_a=[0, 1],
-        samples_b=[0, 1],
-        return_dist=False,
-    )
-    assert de_results.shape == (n_genes, 3)
 
 
 def test_compute_local_statistics():

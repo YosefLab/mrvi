@@ -991,8 +991,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             if store_lfc:
                 betas_ = betas.transpose((0, 2, 1, 3))
                 eps_mean_ = eps_mean.transpose((0, 2, 1, 3))
-                eps_std_ = eps_std.transpose((0, 2, 1, 3))
-                betas_sub_ = (betas_[:, covariates_require_lfc, :, :] * eps_std_) + eps_mean_
+                betas_covariates = betas_[:, covariates_require_lfc, :, :]
 
                 def h_inference_fn(extra_eps, batch_index_cf, batch_offset_eps):
                     extra_eps += batch_offset_eps
@@ -1012,15 +1011,15 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
                 batch_index_ = jnp.arange(self.summary_stats.n_batch)[:, None]
                 batch_index_ = jnp.repeat(batch_index_, repeats=n_cells, axis=1)[..., None]  # (n_batch, n_cells, 1)
-                betas_null = jnp.zeros_like(betas_sub_) + eps_mean_
+                betas_null = jnp.zeros_like(betas_covariates)
 
                 if add_batch_specific_offsets:
                     batch_weights = jnp.einsum("nd,db->nb", admissible_donors_mat, Xmat[:, offset_indices]).mean(0)
-                    betas_offset_ = eps_std_ * betas_[:, offset_indices, :, :]
+                    betas_offset_ = betas_[:, offset_indices, :, :] + eps_mean_
                 else:
                     batch_weights = (1.0 / self.summary_stats.n_batch) * jnp.ones(self.summary_stats.n_batch)
-                    mc_samples, _, n_cells_, n_latent = betas_sub_.shape
-                    betas_offset_ = jnp.zeros((mc_samples, self.summary_stats.n_batch, n_cells_, n_latent))
+                    mc_samples, _, n_cells_, n_latent = betas_covariates.shape
+                    betas_offset_ = jnp.zeros((mc_samples, self.summary_stats.n_batch, n_cells_, n_latent)) + eps_mean_
                 # batch_offset shape (mc_samples, n_batch, n_cells, n_latent)
 
                 f_ = jax.vmap(h_inference_fn, in_axes=(0, None, 0), out_axes=0)  # fn over MC samples
@@ -1030,13 +1029,13 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                     f_
                 )  # final expected shapes for x_1, x_0 (n_batch, mc_samples, n_covariates, n_cells, n_genes)
 
-                x_1 = h_fn(betas_sub_, batch_index_, betas_offset_)
+                x_1 = h_fn(betas_covariates, batch_index_, betas_offset_)
                 x_0 = h_fn(betas_null, batch_index_, betas_offset_)
 
                 lfcs = jnp.log2(x_1 + eps_lfc) - jnp.log2(x_0 + eps_lfc)
                 lfc_mean = jnp.average(lfcs.mean(1), weights=batch_weights, axis=0)
                 lfc_std = jnp.average(lfcs.std(1), weights=batch_weights, axis=0)
-                pde = jnp.average((jnp.abs(lfcs) >= delta).mean(1), weights=batch_weights, axis=0)
+                pde = (jnp.abs(lfcs) >= delta).mean(1).mean(0)
             else:
                 lfc_mean = None
                 lfc_std = None

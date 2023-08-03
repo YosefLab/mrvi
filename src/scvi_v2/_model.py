@@ -1034,7 +1034,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
                 lfcs = jnp.log2(x_1 + eps_lfc) - jnp.log2(x_0 + eps_lfc)
                 lfc_mean = jnp.average(lfcs.mean(1), weights=batch_weights, axis=0)
-                lfc_std = jnp.average(lfcs.std(1), weights=batch_weights, axis=0)
+                lfc_std = jnp.sqrt(jnp.average(lfcs.var(1), weights=batch_weights, axis=0))
                 pde = (jnp.abs(lfcs) >= delta).mean(1).mean(0)
             else:
                 lfc_mean = None

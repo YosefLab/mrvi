@@ -17,11 +17,41 @@ def test_mrvi():
     adata.obs["meta2"] = meta2[adata.obs["sample"].values]
     MrVI.setup_anndata(adata, sample_key="sample", batch_key="batch")
     adata.obs["cont_cov"] = np.random.normal(0, 1, size=adata.shape[0])
-    MrVI.setup_anndata(adata, sample_key="sample", batch_key="batch", continuous_covariate_keys=["cont_cov"])
     n_latent = 10
 
     adata.obs["meta1_cat"] = "CAT_" + adata.obs["meta1"].astype(str)
     adata.obs["meta1_cat"] = adata.obs["meta1_cat"].astype("category")
+
+    adata.obs.loc[:, "disjoint_batch"] = (adata.obs.loc[:, "sample"] <= 6).replace({True: "batch_0", False: "batch_1"})
+    MrVI.setup_anndata(adata, sample_key="sample", batch_key="disjoint_batch")
+    model = MrVI(
+        adata,
+        px_nn_flavor="attention",
+        qz_nn_flavor="attention",
+    )
+    model.train(2, check_val_every_n_epoch=1, train_size=0.5)
+    donor_keys = ["meta1_cat", "meta2", "cont_cov"]
+    model.perform_multivariate_analysis(donor_keys=donor_keys, store_lfc=True, add_batch_specific_offsets=True)
+    model.perform_multivariate_analysis(
+        donor_keys=donor_keys, store_lfc=True, lambd=1e-1, add_batch_specific_offsets=True
+    )
+    model.perform_multivariate_analysis(
+        donor_keys=donor_keys, store_lfc=True, filter_donors=True, add_batch_specific_offsets=True
+    )
+    model.get_local_sample_distances(normalize_distances=True)
+
+    MrVI.setup_anndata(adata, sample_key="sample", batch_key="batch")
+    model = MrVI(
+        adata,
+        px_nn_flavor="attention",
+        qz_nn_flavor="attention",
+    )
+    model.train(2, check_val_every_n_epoch=1, train_size=0.5)
+    donor_keys = ["meta1_cat", "meta2", "cont_cov"]
+    model.perform_multivariate_analysis(donor_keys=donor_keys, store_lfc=True, add_batch_specific_offsets=False)
+    model.get_local_sample_distances(normalize_distances=True)
+
+    MrVI.setup_anndata(adata, sample_key="sample", batch_key="batch", continuous_covariate_keys=["cont_cov"])
     model = MrVI(
         adata,
         px_nn_flavor="attention",
@@ -32,11 +62,7 @@ def test_mrvi():
     model.get_outlier_cell_sample_pairs(flavor="ball", subsample_size=50)
     model.get_outlier_cell_sample_pairs(flavor="MoG", subsample_size=50)
     model.get_outlier_cell_sample_pairs(flavor="ap", subsample_size=50)
-    donor_keys = ["meta1_cat", "meta2", "cont_cov"]
-    model.perform_multivariate_analysis(donor_keys=donor_keys, store_lfc=True)
-    model.perform_multivariate_analysis(donor_keys=donor_keys, store_lfc=True, lambd=1e-1)
-    model.perform_multivariate_analysis(donor_keys=donor_keys, store_lfc=True, filter_donors=True)
-    model.get_local_sample_distances(normalize_distances=True)
+    model.perform_multivariate_analysis(donor_keys=donor_keys, store_lfc=True, add_batch_specific_offsets=False)
 
     adata.obs.loc[:, "batch_placeholder"] = "1"
     MrVI.setup_anndata(adata, sample_key="sample", batch_key="batch_placeholder")

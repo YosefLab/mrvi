@@ -84,6 +84,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
         n_sample = self.summary_stats.n_sample
         n_batch = self.summary_stats.n_batch
+        n_labels = self.summary_stats.n_labels
         n_continuous_cov = self.summary_stats.get("n_extra_continuous_covs", 0)
 
         obs_df = adata.obs.copy()
@@ -100,6 +101,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             n_input=self.summary_stats.n_vars,
             n_sample=n_sample,
             n_batch=n_batch,
+            n_labels=n_labels,
             n_continuous_cov=n_continuous_cov,
             n_obs_per_sample=self.n_obs_per_sample,
             **model_kwargs,
@@ -114,13 +116,23 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         # TODO(jhong): remove this once we have a better way to handle device.
         pass
 
-    def _generate_stacked_rngs(self, n_sets: int) -> Dict[str, jax.random.PRNGKey]:
-        rngs_list = [self.module.rngs for _ in range(n_sets)]
+    def _generate_stacked_rngs(self, n_sets: Union[int, tuple]) -> Dict[str, jax.random.PRNGKey]:
+        return_1d = isinstance(n_sets, int)
+        if return_1d:
+            n_sets_1d = n_sets
+        else:
+            n_sets_1d = np.prod(n_sets)
+        rngs_list = [self.module.rngs for _ in range(n_sets_1d)]
         # Combine list of RNG dicts into a single list. This is necessary for vmap/map.
-        return {
+        rngs = {
             required_rng: jnp.concatenate([rngs_dict[required_rng][None] for rngs_dict in rngs_list], axis=0)
             for required_rng in self.module.required_rngs
         }
+        if not return_1d:
+            # Reshaping the random keys to the desired shape in
+            # the case of multiple sets.
+            rngs = {key: random_key.reshape(n_sets + random_key.shape[1:]) for (key, random_key) in rngs.items()}
+        return rngs
 
     @classmethod
     def setup_anndata(  # noqa: #D102
@@ -129,6 +141,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         layer: Optional[str] = None,
         sample_key: Optional[str] = None,
         batch_key: Optional[str] = None,
+        labels_key: Optional[str] = None,
         continuous_covariate_keys: Optional[List[str]] = None,
         **kwargs,
     ):
@@ -139,6 +152,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             LayerField(REGISTRY_KEYS.X_KEY, layer, is_count_data=True),
             CategoricalObsField(MRVI_REGISTRY_KEYS.SAMPLE_KEY, sample_key),
             CategoricalObsField(REGISTRY_KEYS.BATCH_KEY, batch_key),
+            CategoricalObsField(REGISTRY_KEYS.LABELS_KEY, labels_key),
             NumericalJointObsField(REGISTRY_KEYS.CONT_COVS_KEY, continuous_covariate_keys),
             NumericalObsField(REGISTRY_KEYS.INDICES_KEY, "_indices"),
         ]
@@ -694,7 +708,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         adata=None,
         flavor: Literal["ball", "ap", "MoG"] = "ball",
         subsample_size: int = 5000,
-        quantile_threshold: float = 0.0,
+        quantile_threshold: float = 0.05,
         admissibility_threshold: float = 0.0,
         minibatch_size: int = 256,
     ) -> xr.Dataset:
@@ -804,11 +818,15 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         batch_size: int = 256,
         use_vmap: bool = True,
         normalize_design_matrix: bool = True,
-        offset_design_matrix: bool = True,
+        add_batch_specific_offsets: bool = False,
+        mc_samples: int = 100,
         store_lfc: bool = False,
+        store_lfc_metadata_subset: Optional[List[str]] = None,
         store_baseline: bool = False,
-        eps_lfc: float = 1e-4,
+        eps_lfc: float = 1e-3,
         filter_donors: bool = False,
+        lambd: float = 0.0,
+        delta: float = 0.3,
         **filter_donors_kwargs,
     ) -> xr.Dataset:
         """Utility function to perform cell-specific multivariate analysis.
@@ -835,12 +853,19 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             Whether to use vmap for computing the local sample representation.
         normalize_design_matrix
             Whether to normalize the design matrix.
-        offset_design_matrix
-            Whether to offset the design matrix.
+        add_batch_specific_offsets
+            Whether to offset the design matrix by adding batch-specific offsets to the design matrix.
+            Setting this option to True is recommended when considering multi-site datasets.
+        mc_samples
+            How many MC samples should be taken for computing betas.
         store_lfc
             Whether to store the log-fold changes in the module.
             Storing log-fold changes is memory-intensive and may require to specify
             a smaller set of cells to analyze, e.g., by specifying `adata`.
+        store_lfc_metadata_subset
+            Specifies a subset of metadata for which log-fold changes are computed.
+            These keys must be a subset of `donor_keys`.
+            Only applies when `store_lfc=True`.
         store_baseline
             Whether to store the expression in the module if logfoldchanges are computed.
         eps_lfc
@@ -849,11 +874,15 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             Whether to filter out-of-distribution donors prior to performing the analysis.
         filter_donors_kwargs
             Keyword arguments to pass to `get_outlier_cell_sample_pairs`.
+        lambd
+            Regularization parameter for the linear model.
+        delta
+            LFC threshold used to compute posterior DE probabilities.
         """
         adata = self.adata if adata is None else adata
         self._check_if_trained(warn=False)
-        # Hack to ensure new AnnDatas have indices.
-        if "_indices" not in adata.obs:
+        # Hack to ensure new AnnDatas have indices and indices have correct dimensions.
+        if adata is not None:
             adata.obs["_indices"] = np.arange(adata.n_obs).astype(int)
 
         adata = self._validate_anndata(adata)
@@ -876,42 +905,46 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             admissible_donors = admissible_donors.values
         else:
             admissible_donors = np.ones((adata.n_obs, n_samples_kept), dtype=bool)
+        n_admissible_donors = admissible_donors.sum(1)
 
-        Xmat, Xmat_names = self._construct_design_matrix(
+        Xmat, Xmat_names, covariates_require_lfc, offset_indices = self._construct_design_matrix(
             donor_keys=donor_keys,
             donor_mask=donor_mask,
             normalize_design_matrix=normalize_design_matrix,
-            offset_design_matrix=offset_design_matrix,
+            add_batch_specific_offsets=add_batch_specific_offsets,
+            store_lfc=store_lfc,
+            store_lfc_metadata_subset=store_lfc_metadata_subset,
         )
-        Xmat = jnp.array(Xmat)
+        add_batch_specific_offsets = offset_indices is not None
+        n_covariates = Xmat.shape[1]
 
         @partial(jax.jit, backend="cpu")
         def process_design_matrix(
             admissible_donors_dmat,
             Xmat,
         ):
-            # TODO: make sure to write math down
-            # X^T X with masking
             xtmx = jnp.einsum("ak,nkl,lm->nam", Xmat.T, admissible_donors_dmat, Xmat)
+            xtmx += lambd * jnp.eye(n_covariates)
 
             prefactor = jnp.real(jax.vmap(jax.scipy.linalg.sqrtm)(xtmx))
             inv_ = jax.vmap(jnp.linalg.pinv)(xtmx)
             Amat = jnp.einsum("nab,bc,ncd->nad", inv_, Xmat.T, admissible_donors_dmat)
             return Amat, prefactor
 
-        @partial(jax.jit, static_argnames=["use_mean", "Xmat"])
+        # @partial(jax.jit, static_argnames=["use_mean", "mc_samples"])
         def mapped_inference_fn(
             stacked_rngs,
             x,
             sample_index,
-            batch_index,
             continuous_covs,
             cf_sample,
             Amat,
             prefactor,
             n_donors_per_cell,
+            admissible_donors_mat,
             use_mean,
-            stacked_rngs_de=None,
+            mc_samples,
+            rngs_de=None,
         ):
             def inference_fn(
                 rngs,
@@ -925,6 +958,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                     sample_index=sample_index,
                     cf_sample=cf_sample,
                     use_mean=use_mean,
+                    mc_samples=mc_samples,
                 )["eps"]
 
             if use_vmap:
@@ -938,60 +972,85 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                     rngs, cf_sample = pair
                     return inference_fn(rngs, cf_sample)
 
-                eps_ = jax.lax.transpose(jax.lax.map(per_sample_inference_fn, (stacked_rngs, cf_sample)), (1, 0, 2))
-            eps_ = eps_[:, donor_mask]
-            eps = (eps_ - eps_.mean(axis=1, keepdims=True)) / (1e-6 + eps_.std(axis=1, keepdims=True))  # over samples
+                # eps_ has shape (mc_samples, n_cells, n_donors, n_latent)
+                eps_ = jax.lax.transpose(jax.lax.map(per_sample_inference_fn, (stacked_rngs, cf_sample)), (1, 2, 0, 3))
+            eps_std = eps_.std(axis=2, keepdims=True)
+            eps_mean = eps_.mean(axis=2, keepdims=True)
 
+            eps = (eps_ - eps_mean) / (1e-6 + eps_std)  # over donors
             # MLE for betas
-            betas = jnp.einsum("nks,nsd->nkd", Amat, eps)
+            betas = jnp.einsum("nks,ansd->ankd", Amat, eps)
 
             # Statistical tests
-            betas_norm = jnp.einsum("nkd,nkl->nld", betas, prefactor)
-            ts = (betas_norm**2).sum(axis=-1)
+            betas_norm = jnp.einsum("ankd,nkl->anld", betas, prefactor)
+            ts = (betas_norm**2).mean(axis=0).sum(axis=-1)
             pvals = 1 - jax.scipy.stats.chi2.cdf(ts, df=n_donors_per_cell[:, None])
 
-            # Optional: compute log-fold changes
-            betas_ = betas.transpose((1, 0, 2))  # (n_metadata, n_cells, n_latent)
-            betas_ = betas_ * eps_.std(axis=1) + eps_.mean(axis=1)
-            if store_lfc:
+            betas = betas * eps_std
 
-                def h_inference_fn(rngs, extra_eps):
+            if store_lfc:
+                betas_ = betas.transpose((0, 2, 1, 3))
+                eps_mean_ = eps_mean.transpose((0, 2, 1, 3))
+                betas_covariates = betas_[:, covariates_require_lfc, :, :]
+
+                def h_inference_fn(extra_eps, batch_index_cf, batch_offset_eps):
+                    extra_eps += batch_offset_eps
+
                     return self.module.apply(
                         vars_in,
-                        rngs=rngs,
+                        rngs=rngs_de,
                         method=self.module.compute_h_from_x_eps,
                         x=x,
                         extra_eps=extra_eps,
                         sample_index=sample_index,
-                        batch_index=batch_index,
+                        batch_index=batch_index_cf,
                         cf_sample=None,
                         continuous_covs=continuous_covs,
-                        mc_samples=100,
+                        mc_samples=None,  # mc_samples also taken for eps. vmap over mc_samples
                     )
 
-                x_1 = jax.vmap(h_inference_fn, in_axes=(0), out_axes=0)(
-                    rngs=stacked_rngs_de,
-                    extra_eps=betas_,
-                )
-                betas_null = jnp.zeros_like(betas_) + eps_.mean(axis=1)
-                x_0 = jax.vmap(h_inference_fn, in_axes=(0), out_axes=0)(
-                    rngs=stacked_rngs_de,
-                    extra_eps=betas_null,
-                )
+                batch_index_ = jnp.arange(self.summary_stats.n_batch)[:, None]
+                batch_index_ = jnp.repeat(batch_index_, repeats=n_cells, axis=1)[..., None]  # (n_batch, n_cells, 1)
+                betas_null = jnp.zeros_like(betas_covariates)
 
-                lfcs = (jnp.log(x_1 + eps_lfc) - jnp.log(x_0 + eps_lfc)).mean(1)
+                if add_batch_specific_offsets:
+                    batch_weights = jnp.einsum("nd,db->nb", admissible_donors_mat, Xmat[:, offset_indices]).mean(0)
+                    betas_offset_ = betas_[:, offset_indices, :, :] + eps_mean_
+                else:
+                    batch_weights = (1.0 / self.summary_stats.n_batch) * jnp.ones(self.summary_stats.n_batch)
+                    mc_samples, _, n_cells_, n_latent = betas_covariates.shape
+                    betas_offset_ = jnp.zeros((mc_samples, self.summary_stats.n_batch, n_cells_, n_latent)) + eps_mean_
+                # batch_offset shape (mc_samples, n_batch, n_cells, n_latent)
 
+                f_ = jax.vmap(h_inference_fn, in_axes=(0, None, 0), out_axes=0)  # fn over MC samples
+                f_ = jax.vmap(f_, in_axes=(1, None, None), out_axes=1)  # fn over covariates
+                f_ = jax.vmap(f_, in_axes=(None, 0, 1), out_axes=0)  # fn over batches
+                h_fn = jax.jit(
+                    f_
+                )  # final expected shapes for x_1, x_0 (n_batch, mc_samples, n_covariates, n_cells, n_genes)
+
+                x_1 = h_fn(betas_covariates, batch_index_, betas_offset_)
+                x_0 = h_fn(betas_null, batch_index_, betas_offset_)
+
+                lfcs = jnp.log2(x_1 + eps_lfc) - jnp.log2(x_0 + eps_lfc)
+                lfc_mean = jnp.average(lfcs.mean(1), weights=batch_weights, axis=0)
+                lfc_std = jnp.sqrt(jnp.average(lfcs.var(1), weights=batch_weights, axis=0))
+                pde = (jnp.abs(lfcs) >= delta).mean(1).mean(0)
             else:
-                lfcs = None
+                lfc_mean = None
+                lfc_std = None
+                pde = None
             if store_baseline:
                 baseline_expression = x_1.mean(1)
             else:
                 baseline_expression = None
             return {
-                "beta": betas,
+                "beta": betas.mean(0),
                 "effect_size": ts,
                 "pvalue": pvals,
-                "lfc": lfcs,
+                "lfc_mean": lfc_mean,
+                "lfc_std": lfc_std,
+                "pde": pde,
                 "baseline_expression": baseline_expression,
             }
 
@@ -999,11 +1058,13 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         effect_size = []
         pvalue = []
         lfc = []
+        lfc_std = []
+        pde = []
         baseline_expression = []
         for array_dict in tqdm(scdl):
             indices = array_dict[REGISTRY_KEYS.INDICES_KEY].astype(int).flatten()
             n_cells = array_dict[REGISTRY_KEYS.X_KEY].shape[0]
-            cf_sample = np.broadcast_to(np.arange(n_sample)[:, None, None], (n_sample, n_cells, 1))
+            cf_sample = np.broadcast_to((np.where(donor_mask)[0])[:, None, None], (n_samples_kept, n_cells, 1))
             inf_inputs = self.module._get_inference_input(
                 array_dict,
             )
@@ -1011,8 +1072,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             if continuous_covs is not None:
                 continuous_covs = jnp.array(continuous_covs)
             stacked_rngs = self._generate_stacked_rngs(cf_sample.shape[0])
-            stacked_rngs_de = self._generate_stacked_rngs(Xmat.shape[1])
 
+            rngs_de = self.module.rngs if store_lfc else None
             admissible_donors_mat = jnp.array(admissible_donors[indices])  # (n_cells, n_donors)
             n_donors_per_cell = admissible_donors_mat.sum(axis=1)
             admissible_donors_dmat = jax.vmap(jnp.diag)(admissible_donors_mat).astype(
@@ -1027,20 +1088,24 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 stacked_rngs=stacked_rngs,
                 x=jnp.array(inf_inputs["x"]),
                 sample_index=jnp.array(inf_inputs["sample_index"]),
-                batch_index=jnp.array(array_dict[REGISTRY_KEYS.BATCH_KEY]),
                 continuous_covs=continuous_covs,
                 cf_sample=jnp.array(cf_sample),
                 Amat=Amat,
                 prefactor=prefactor,
                 n_donors_per_cell=n_donors_per_cell,
+                admissible_donors_mat=admissible_donors_mat,
                 use_mean=False,
-                stacked_rngs_de=stacked_rngs_de,
-            )  # (n_cells, n_donors, n_latent)
+                rngs_de=rngs_de,
+                mc_samples=mc_samples,
+            )
             beta.append(np.array(res["beta"]))
             effect_size.append(np.array(res["effect_size"]))
             pvalue.append(np.array(res["pvalue"]))
             if store_lfc:
-                lfc.append(np.array(res["lfc"]))
+                lfc.append(np.array(res["lfc_mean"]))
+                lfc_std.append(np.array(res["lfc_std"]))
+                pde.append(np.array(res["pde"]))
+            if store_baseline:
                 baseline_expression.append(np.array(res["baseline_expression"]))
         beta = np.concatenate(beta, axis=0)
         effect_size = np.concatenate(effect_size, axis=0)
@@ -1072,12 +1137,23 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 padj,
             ),
         }
-        if store_lfc:
-            lfc = np.concatenate(lfc, axis=1)
-            data_vars["lfc"] = (
-                ["covariate", "cell_name", "gene"],
-                lfc,
+        if filter_donors:
+            data_vars["n_donor"] = (
+                ["cell_name"],
+                n_admissible_donors,
             )
+        if store_lfc:
+            if store_lfc_metadata_subset is None:
+                coords_lfc = ["covariate", "cell_name", "gene"]
+            else:
+                coords_lfc = ["covariate_sub", "cell_name", "gene"]
+                coords["covariate_sub"] = Xmat_names[covariates_require_lfc]
+            lfc = np.concatenate(lfc, axis=1)
+            lfc_std = np.concatenate(lfc_std, axis=1)
+            pde = np.concatenate(pde, axis=1)
+            data_vars["lfc"] = (coords_lfc, lfc)
+            data_vars["lfc_std"] = (coords_lfc, lfc_std)
+            data_vars["pde"] = (coords_lfc, pde)
         if store_baseline:
             baseline_expression = np.concatenate(baseline_expression, axis=1)
             data_vars["baseline_expression"] = (
@@ -1088,13 +1164,46 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
     def _construct_design_matrix(
         self,
-        donor_keys,
-        donor_mask,
-        normalize_design_matrix,
-        offset_design_matrix,
+        donor_keys: List[str],
+        donor_mask: np.ndarray,
+        normalize_design_matrix: bool,
+        add_batch_specific_offsets: bool,
+        store_lfc: bool,
+        store_lfc_metadata_subset: Optional[List[str]] = None,
     ):
+        """
+        Starting from a list of donor keys, construct a design matrix of donors and covariates.
+
+        Categorical covariates are one-hot encoded.
+        This method returns a tuple of:
+        1. The design matrix
+        2. A name for each column in the design matrix
+        3. The original donor key for each column in the design matrix
+
+        Parameters
+        ----------
+        donor_keys:
+            List of donor metadata to use as covariates.
+        donor_mask:
+            Mask of admissible donors. Must have the same length as the number of donors in the dataset.
+        normalize_design_matrix:
+            Whether the design matrix should be 0-1 normalized. This is useful to ensure that the
+            beta coefficients are comparable across covariates.
+        add_batch_specific_offsets:
+            Whether the design matrix should be offset. If True, the matrix includes batch-specific
+            offsets. This ensures that we can learn perturbation effects that do not depend on batch effects.
+
+        Returns
+        -------
+        A tuple consisting of:
+        1. The design matrix
+        2. Names for each column in the design matrix
+        3. A mask precising which coefficients from the design matrix require to compute LFCs.
+        4. A mask precising which coefficients from the design matrix correspond to offsets.
+        """
         Xmat = []
         Xmat_names = []
+        Xmat_dim_to_key = []
         for donor_key in tqdm(donor_keys):
             cov = self.donor_info[donor_key]
             if (cov.dtype == str) or (cov.dtype == "category"):
@@ -1104,18 +1213,54 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             else:
                 cov_names = np.array([donor_key])
                 cov = cov.values[:, None]
+            n_covs = cov.shape[1]
             Xmat.append(cov)
             Xmat_names.append(cov_names)
+            Xmat_dim_to_key.append([donor_key] * n_covs)
         Xmat_names = np.concatenate(Xmat_names)
         Xmat = np.concatenate(Xmat, axis=1).astype(np.float32)
+        Xmat_dim_to_key = np.concatenate(Xmat_dim_to_key)
         Xmat = Xmat[donor_mask]
 
         if normalize_design_matrix:
-            Xmat = (Xmat - Xmat.mean(axis=0)) / (1e-6 + Xmat.std(axis=0))
-        if offset_design_matrix:
-            Xmat = np.concatenate([np.ones((Xmat.shape[0], 1)), Xmat], axis=1)
-            Xmat_names = np.concatenate([np.array(["offset"]), Xmat_names])
-        return Xmat, Xmat_names
+            Xmat = (Xmat - Xmat.min(axis=0)) / (1e-6 + Xmat.max(axis=0) - Xmat.min(axis=0))
+        if add_batch_specific_offsets:
+            cov = self.donor_info["_scvi_batch"]
+            if cov.nunique() == self.summary_stats.n_batch:
+                cov = np.eye(self.summary_stats.n_batch)[self.donor_info["_scvi_batch"].values]
+                cov_names = ["offset_batch_" + str(i) for i in range(self.summary_stats.n_batch)]
+                Xmat = np.concatenate([cov[donor_mask], Xmat], axis=1)
+                Xmat_names = np.concatenate([np.array(cov_names), Xmat_names])
+                Xmat_dim_to_key = np.concatenate([np.array(cov_names), Xmat_dim_to_key])
+
+                # Retrieve indices of offset covariates in the right order
+                offset_indices = pd.Series(np.arange(len(Xmat_names)), index=Xmat_names).loc[cov_names].values
+                offset_indices = jnp.array(offset_indices)
+            else:
+                warnings.warn(
+                    """
+                        Number of batches in donor_info does not match number of batches in summary_stats.
+                        `add_batch_specific_offsets=True` assumes that samples are not shared across batches.
+                        Setting `add_batch_specific_offsets=False`...
+                    """,
+                    stacklevel=2,
+                )
+                offset_indices = None
+        else:
+            offset_indices = None
+
+        Xmat = jnp.array(Xmat)
+        if store_lfc:
+            covariates_require_lfc = (
+                np.isin(Xmat_dim_to_key, store_lfc_metadata_subset)
+                if store_lfc_metadata_subset is not None
+                else np.ones(len(Xmat_names), dtype=bool)
+            )
+        else:
+            covariates_require_lfc = np.zeros(len(Xmat_names), dtype=bool)
+        covariates_require_lfc = jnp.array(covariates_require_lfc)
+
+        return Xmat, Xmat_names, covariates_require_lfc, offset_indices
 
     def compute_cell_scores(
         self,
@@ -1183,187 +1328,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
     def original_donor_key(self):
         """Original donor key used for training the model."""
         return self.adata_manager.registry["setup_args"]["sample_key"]
-
-    def differential_expression(
-        self,
-        adata: AnnData,
-        samples_a: List[str],
-        samples_b: List[str],
-        delta: float = 0.5,
-        return_dist: bool = False,
-        batch_size: int = 128,
-        mc_samples_total: int = 10000,
-        max_mc_samples_per_pass: int = 50,
-        mc_samples_for_permutation: int = 30000,
-        use_vmap: bool = False,
-        eps: float = 1e-4,
-    ):
-        """Computes differential expression between two sets of samples.
-
-        Background on the computation can be found here:
-        https://www.overleaf.com/project/63c08ee8d7475a4c8478b1a3.
-        To correct for batch effects, the current approach consists in
-        computing batch-specific LFCs, and then averaging them.
-        Right now, other covariates are not considered.
-
-        Parameters
-        ----------
-        adata
-            AnnData object to use.
-        samples_a
-            Set of samples to characterize the first sample subpopulation.
-            Should be a subset of values associated to the sample key.
-        samples_b
-            Set of samples to characterize the second sample subpopulation.
-            Should be a subset of values associated to the sample key.
-        delta
-            LFC threshold to use for differential expression.
-        return_dist
-            Whether to return the distribution of LFCs.
-            If False, returns a summarized result, contained in a DataFrame.
-        batch_size
-            Batch size to use for inference.
-        mc_samples_total
-            Number of Monte Carlo samples to sample normalized gene expressions, per group of samples.
-        max_mc_samples_per_pass
-            Maximum number of Monte Carlo samples to sample normalized gene expressions at once.
-            Lowering this value can help with memory issues.
-        mc_samples_for_permutation
-            Number of Monte Carlo samples to use to compute the LFC distribution from normalized expression levels.
-        use_vmap
-            Determines which parallelization strategy to use. If True, uses `jax.vmap`, otherwise uses `jax.lax.map`.
-            The former is faster, but requires more memory.
-        eps
-            Pseudo-count to add to the normalized expression levels.
-        """
-        mc_samples_per_obs = np.maximum((mc_samples_total // adata.n_obs), 1)
-        if mc_samples_per_obs >= max_mc_samples_per_pass:
-            n_passes_per_obs = np.maximum((mc_samples_per_obs // max_mc_samples_per_pass), 1)
-            mc_samples_per_obs = max_mc_samples_per_pass
-        else:
-            n_passes_per_obs = 1
-
-        self._check_if_trained(warn=False)
-        adata = self._validate_anndata(adata)
-        scdl = self._make_data_loader(adata=adata, batch_size=batch_size, iter_ndarray=True)
-
-        donor_mapper = self.donor_info.reset_index().set_index(self.original_donor_key)
-        try:
-            samples_idx_a_ = np.array(donor_mapper.loc[samples_a, "_scvi_sample"])
-            samples_idx_b_ = np.array(donor_mapper.loc[samples_b, "_scvi_sample"])
-        except KeyError:
-            raise KeyError(
-                "Some samples cannot be found."
-                "Please make sure that the provided samples can be found in {}.".format(self.original_donor_key)
-            )
-
-        vars_in = {"params": self.module.params, **self.module.state}
-        rngs = self.module.rngs
-
-        def _get_all_inputs(
-            inputs,
-        ):
-            x = jnp.array(inputs[REGISTRY_KEYS.X_KEY])
-            sample_index = jnp.array(inputs[MRVI_REGISTRY_KEYS.SAMPLE_KEY])
-            batch_index = jnp.array(inputs[REGISTRY_KEYS.BATCH_KEY])
-            continuous_covs = inputs.get(REGISTRY_KEYS.CONT_COVS_KEY, None)
-            if continuous_covs is not None:
-                continuous_covs = jnp.array(continuous_covs)
-            return {
-                "x": x,
-                "sample_index": sample_index,
-                "batch_index": batch_index,
-                "continuous_covs": continuous_covs,
-            }
-
-        def h_inference_fn(x, sample_index, batch_index, cf_sample, continuous_covs):
-            return self.module.apply(
-                vars_in,
-                rngs=rngs,
-                method=self.module.compute_h_from_x,
-                x=x,
-                sample_index=sample_index,
-                batch_index=batch_index,
-                cf_sample=cf_sample,
-                continuous_covs=continuous_covs,
-                mc_samples=mc_samples_per_obs,
-            )
-
-        @jax.jit
-        def get_hs(inputs, cf_sample):
-            _h_inference_fn = lambda cf_sample: h_inference_fn(
-                inputs["x"],
-                inputs["sample_index"],
-                inputs["batch_index"],
-                cf_sample,
-                inputs["continuous_covs"],
-            )
-            if use_vmap:
-                hs = jax.vmap(h_inference_fn, in_axes=(None, None, None, 0, None), out_axes=0)(
-                    inputs["x"],
-                    inputs["sample_index"],
-                    inputs["batch_index"],
-                    cf_sample,
-                    inputs["continuous_covs"],
-                )
-            else:
-                hs = jax.lax.map(_h_inference_fn, cf_sample)
-
-            # convert to pseudocounts
-            hs = jnp.log(hs + eps)
-            return hs
-
-        ha_samples = []
-        hb_samples = []
-
-        for array_dict in tqdm(scdl):
-            n_cells = array_dict[REGISTRY_KEYS.X_KEY].shape[0]
-            inputs = _get_all_inputs(
-                array_dict,
-            )
-            cf_sample_a = np.broadcast_to(samples_idx_a_[:, None, None], (samples_idx_a_.shape[0], n_cells, 1))
-            cf_sample_b = np.broadcast_to(samples_idx_b_[:, None, None], (samples_idx_b_.shape[0], n_cells, 1))
-            for _ in range(n_passes_per_obs):
-                _ha = get_hs(inputs, cf_sample_a)
-                _hb = get_hs(inputs, cf_sample_b)
-
-                # shapes (n_samples_x, max_mc_samples_per_pass, n_cells, n_vars)
-                ha_samples.append(
-                    np.asarray(jax.device_put(_ha.reshape((samples_idx_a_.shape[0], -1, self.summary_stats.n_vars))))
-                )
-                hb_samples.append(
-                    np.asarray(jax.device_put(_hb.reshape((samples_idx_b_.shape[0], -1, self.summary_stats.n_vars))))
-                )
-        ha_samples = np.concatenate(ha_samples, axis=1)
-        hb_samples = np.concatenate(hb_samples, axis=1)
-
-        # Giving equal weight to each sample ==> exchangeability assumption
-        ha_samples = ha_samples.reshape((-1, self.summary_stats.n_vars))
-        hb_samples = hb_samples.reshape((-1, self.summary_stats.n_vars))
-
-        # compute LFCs
-        rdm_idx_a = np.random.choice(ha_samples.shape[0], size=mc_samples_for_permutation, replace=True)
-        rdm_idx_b = np.random.choice(hb_samples.shape[0], size=mc_samples_for_permutation, replace=True)
-        lfc_dist = ha_samples[rdm_idx_a, :] - hb_samples[rdm_idx_b, :]
-        if return_dist:
-            return lfc_dist
-        else:
-            de_probs = np.mean(np.abs(lfc_dist) > delta, axis=0)
-            lfc_means = np.mean(lfc_dist, axis=0)
-            lfc_medians = np.median(lfc_dist, axis=0)
-            results = (
-                pd.DataFrame(
-                    {
-                        "de_prob": de_probs,
-                        "lfc_mean": lfc_means,
-                        "lfc_median": lfc_medians,
-                        "gene_name": self.adata.var_names,
-                    }
-                )
-                .set_index("gene_name")
-                .sort_values("de_prob", ascending=False)
-            )
-            return results
 
     def explore_stratifications(
         self,

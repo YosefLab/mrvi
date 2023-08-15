@@ -156,6 +156,14 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             NumericalJointObsField(REGISTRY_KEYS.CONT_COVS_KEY, continuous_covariate_keys),
             NumericalObsField(REGISTRY_KEYS.INDICES_KEY, "_indices"),
         ]
+        if labels_key is None:
+            # Hack to load old models pre labels field.
+            # TODO: remove. not necessary for official release
+            sr = kwargs.get("source_registry", None)
+            if sr is not None:
+                sr["field_registries"][REGISTRY_KEYS.LABELS_KEY] = {
+                    "state_registry": {"categorical_mapping": np.array([0])}
+                }
         adata_manager = AnnDataManager(fields=anndata_fields, setup_method_args=setup_method_args)
         adata_manager.register_fields(adata, **kwargs)
         cls.register_manager(adata_manager)
@@ -1114,10 +1122,10 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         padj = multipletests(pvalue.flatten(), method="fdr_bh")[1].reshape(pvalue_shape)
 
         coords = {
-            "cell_name": adata.obs_names,
-            "covariate": Xmat_names,
-            "latent_dim": np.arange(beta.shape[2]),
-            "gene": adata.var_names,
+            "cell_name": (("cell_name"), adata.obs_names),
+            "covariate": (("covariate"), Xmat_names),
+            "latent_dim": (("latent_dim"), np.arange(beta.shape[2])),
+            "gene": (("gene"), adata.var_names),
         }
         data_vars = {
             "beta": (
@@ -1147,7 +1155,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 coords_lfc = ["covariate", "cell_name", "gene"]
             else:
                 coords_lfc = ["covariate_sub", "cell_name", "gene"]
-                coords["covariate_sub"] = Xmat_names[covariates_require_lfc]
+                coords["covariate_sub"] = (("covariate_sub"), Xmat_names[covariates_require_lfc])
             lfc = np.concatenate(lfc, axis=1)
             lfc_std = np.concatenate(lfc_std, axis=1)
             pde = np.concatenate(pde, axis=1)

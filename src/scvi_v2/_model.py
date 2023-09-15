@@ -834,7 +834,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         eps_lfc: float = 1e-3,
         filter_donors: bool = False,
         lambd: float = 0.0,
-        delta: float = 0.3,
+        delta: Optional[float] = 0.3,
         **filter_donors_kwargs,
     ) -> xr.Dataset:
         """Utility function to perform cell-specific multivariate analysis.
@@ -886,6 +886,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             Regularization parameter for the linear model.
         delta
             LFC threshold used to compute posterior DE probabilities.
+            If None does not compute them to save memory consumption.
         """
         adata = self.adata if adata is None else adata
         self._check_if_trained(warn=False)
@@ -1042,8 +1043,12 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
                 lfcs = jnp.log2(x_1 + eps_lfc) - jnp.log2(x_0 + eps_lfc)
                 lfc_mean = jnp.average(lfcs.mean(1), weights=batch_weights, axis=0)
-                lfc_std = jnp.sqrt(jnp.average(lfcs.var(1), weights=batch_weights, axis=0))
-                pde = (jnp.abs(lfcs) >= delta).mean(1).mean(0)
+                if delta is not None:
+                    lfc_std = jnp.sqrt(jnp.average(lfcs.var(1), weights=batch_weights, axis=0))
+                    pde = (jnp.abs(lfcs) >= delta).mean(1).mean(0)
+                else:
+                    lfc_std = None
+                    pde = None
             else:
                 lfc_mean = None
                 lfc_std = None
@@ -1111,8 +1116,9 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             pvalue.append(np.array(res["pvalue"]))
             if store_lfc:
                 lfc.append(np.array(res["lfc_mean"]))
-                lfc_std.append(np.array(res["lfc_std"]))
-                pde.append(np.array(res["pde"]))
+                if delta is not None:
+                    lfc_std.append(np.array(res["lfc_std"]))
+                    pde.append(np.array(res["pde"]))
             if store_baseline:
                 baseline_expression.append(np.array(res["baseline_expression"]))
         beta = np.concatenate(beta, axis=0)
@@ -1157,11 +1163,13 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 coords_lfc = ["covariate_sub", "cell_name", "gene"]
                 coords["covariate_sub"] = (("covariate_sub"), Xmat_names[covariates_require_lfc])
             lfc = np.concatenate(lfc, axis=1)
-            lfc_std = np.concatenate(lfc_std, axis=1)
-            pde = np.concatenate(pde, axis=1)
             data_vars["lfc"] = (coords_lfc, lfc)
-            data_vars["lfc_std"] = (coords_lfc, lfc_std)
-            data_vars["pde"] = (coords_lfc, pde)
+            if delta is not None:
+                lfc_std = np.concatenate(lfc_std, axis=1)
+                pde = np.concatenate(pde, axis=1)
+                data_vars["lfc_std"] = (coords_lfc, lfc_std)
+                data_vars["pde"] = (coords_lfc, pde)
+
         if store_baseline:
             baseline_expression = np.concatenate(baseline_expression, axis=1)
             data_vars["baseline_expression"] = (

@@ -1223,6 +1223,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         for donor_key in tqdm(donor_keys):
             cov = self.donor_info[donor_key]
             if (cov.dtype == str) or (cov.dtype == "category"):
+                cov = cov.cat.remove_unused_categories()
                 cov = pd.get_dummies(cov, drop_first=True)
                 cov_names = donor_key + np.array(cov.columns)
                 cov = cov.values
@@ -1270,7 +1271,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             covariates_require_lfc = (
                 np.isin(Xmat_dim_to_key, store_lfc_metadata_subset)
                 if store_lfc_metadata_subset is not None
-                else np.ones(len(Xmat_names), dtype=bool)
+                else np.isin(Xmat_dim_to_key, donor_keys)
             )
         else:
             covariates_require_lfc = np.zeros(len(Xmat_names), dtype=bool)

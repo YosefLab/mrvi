@@ -1157,7 +1157,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 n_admissible_donors,
             )
         if store_lfc:
-            if store_lfc_metadata_subset is None:
+            if store_lfc_metadata_subset is None and not add_batch_specific_offsets:
                 coords_lfc = ["covariate", "cell_name", "gene"]
             else:
                 coords_lfc = ["covariate_sub", "cell_name", "gene"]
@@ -1220,12 +1220,14 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         Xmat = []
         Xmat_names = []
         Xmat_dim_to_key = []
+        donor_info = self.donor_info.iloc[donor_mask]
         for donor_key in tqdm(donor_keys):
-            cov = self.donor_info[donor_key]
+            cov = donor_info[donor_key]
             if (cov.dtype == str) or (cov.dtype == "category"):
                 cov = cov.cat.remove_unused_categories()
                 cov = pd.get_dummies(cov, drop_first=True)
                 cov_names = donor_key + np.array(cov.columns)
+                print(cov_names)
                 cov = cov.values
             else:
                 cov_names = np.array([donor_key])
@@ -1237,16 +1239,15 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         Xmat_names = np.concatenate(Xmat_names)
         Xmat = np.concatenate(Xmat, axis=1).astype(np.float32)
         Xmat_dim_to_key = np.concatenate(Xmat_dim_to_key)
-        Xmat = Xmat[donor_mask]
 
         if normalize_design_matrix:
             Xmat = (Xmat - Xmat.min(axis=0)) / (1e-6 + Xmat.max(axis=0) - Xmat.min(axis=0))
         if add_batch_specific_offsets:
-            cov = self.donor_info["_scvi_batch"]
+            cov = donor_info["_scvi_batch"]
             if cov.nunique() == self.summary_stats.n_batch:
-                cov = np.eye(self.summary_stats.n_batch)[self.donor_info["_scvi_batch"].values]
+                cov = np.eye(self.summary_stats.n_batch)[donor_info["_scvi_batch"].values]
                 cov_names = ["offset_batch_" + str(i) for i in range(self.summary_stats.n_batch)]
-                Xmat = np.concatenate([cov[donor_mask], Xmat], axis=1)
+                Xmat = np.concatenate([cov, Xmat], axis=1)
                 Xmat_names = np.concatenate([np.array(cov_names), Xmat_names])
                 Xmat_dim_to_key = np.concatenate([np.array(cov_names), Xmat_dim_to_key])
 

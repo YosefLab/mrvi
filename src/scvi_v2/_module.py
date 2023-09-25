@@ -308,6 +308,7 @@ class _EncoderXU(nn.Module):
     n_hidden: int
     n_layers: int = 1
     activation: Callable = nn.gelu
+    use_conditional: bool = True
     training: Optional[bool] = None
 
     @nn.compact
@@ -316,7 +317,12 @@ class _EncoderXU(nn.Module):
         x_feat = jnp.log1p(x)
         for _ in range(2):
             x_feat = Dense(self.n_hidden)(x_feat)
-            x_feat = ConditionalNormalization(self.n_hidden, self.n_sample)(x_feat, sample_covariate, training=training)
+            if self.use_conditional:
+                x_feat = ConditionalNormalization(self.n_hidden, self.n_sample)(
+                    x_feat, sample_covariate, training=training
+                )
+            else:
+                x_feat = nn.LayerNorm()(x_feat)
             x_feat = self.activation(x_feat)
         sample_effect = nn.Embed(self.n_sample, self.n_hidden, embedding_init=_normal_initializer)(
             sample_covariate.squeeze(-1).astype(int)

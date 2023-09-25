@@ -1,5 +1,7 @@
+from copy import deepcopy
 from tempfile import TemporaryDirectory
 
+import flax.linen as nn
 import numpy as np
 from scvi.data import synthetic_iid
 
@@ -507,3 +509,72 @@ def test_compute_local_statistics():
     assert outs2["test1"].shape == (adata2.shape[0], n_sample, n_latent)
     assert outs2["test2"].shape == (2, 10, n_sample, n_latent)
     assert outs2["test3"].shape == (2, n_sample, n_sample)
+
+
+def test_features():
+    adata = synthetic_iid()
+    adata.obs["sample"] = np.random.choice(15, size=adata.shape[0])
+    meta1 = np.random.randint(0, 2, size=15)
+    adata.obs["meta1"] = meta1[adata.obs["sample"].values]
+
+    meta2 = np.random.randn(15)
+    adata.obs["meta2"] = meta2[adata.obs["sample"].values]
+    MrVI.setup_anndata(adata, sample_key="sample", batch_key="batch")
+    adata.obs["cont_cov"] = np.random.normal(0, 1, size=adata.shape[0])
+    MrVI.setup_anndata(adata, sample_key="sample", batch_key="batch", continuous_covariate_keys=["cont_cov"])
+
+    base_config = {
+        "n_latent": 30,
+        "n_latent_u": 5,
+        "qz_nn_flavor": "attention",
+        "px_nn_flavor": "attention",
+        "qz_kwargs": {
+            "use_map": True,
+            "stop_gradients": False,
+            "stop_gradients_mlp": True,
+            "dropout_rate": 0.03,
+        },
+        "px_kwargs": {
+            "stop_gradients": False,
+            "stop_gradients_mlp": True,
+            "h_activation": nn.softmax,
+            "low_dim_batch": True,
+            "dropout_rate": 0.03,
+        },
+        "learn_z_u_prior_scale": False,
+        "z_u_prior": True,
+        "u_prior_mixture": True,
+        "u_prior_mixture_k": 20,
+    }
+    configs = [
+        {},
+        {
+            "qz_nn_flavor": "linear",
+            "px_nn_flavor": "linear",
+            "px_kwargs": {},
+            "qz_kwargs": {},
+        },
+        {
+            "qz_nn_flavor": "mlp",
+            "px_nn_flavor": "linear",
+            "px_kwargs": {},
+            "qz_kwargs": {},
+        },
+        {
+            "n_latent": 30,
+            "n_latent_u": 30,
+        },
+        {
+            "qu_kwargs": {
+                "use_conditional": False,
+            }
+        },
+        {
+            "u_prior_mixture": False,
+        },
+    ]
+    for config in configs:
+        model_kwargs = deepcopy(base_config)
+        model_kwargs.update(config)
+        model = MrVI(adata, **model_kwargs)
+        model.train(1, check_val_every_n_epoch=1, train_size=0.5)

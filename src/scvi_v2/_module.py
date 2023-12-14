@@ -19,8 +19,8 @@ from ._components import (
 from ._constants import MRVI_REGISTRY_KEYS
 from ._types import NdArray
 
-DEFAULT_PX_KWARGS = {"n_hidden": 32}
-DEFAULT_QZ_KWARGS = {}
+DEFAULT_PX_KWARGS = {"n_hidden": 32, "stop_gradients": False, "stop_gradients_mlp": True, "dropout_rate": 0.03}
+DEFAULT_QZ_KWARGS = {"use_map": True, "stop_gradients": False, "stop_gradients_mlp": True, "dropout_rate": 0.03}
 DEFAULT_QU_KWARGS = {}
 
 # Lower stddev leads to better initial loss values
@@ -334,20 +334,20 @@ class MrVAE(JaxBaseModuleClass):
     n_batch: int
     n_labels: int
     n_continuous_cov: int
-    n_latent: int = 20
-    n_latent_u: Optional[int] = None
+    n_latent: int = 30
+    n_latent_u: int = 10
     encoder_n_hidden: int = 128
     encoder_n_layers: int = 2
     z_u_prior: bool = True
     z_u_prior_scale: float = 0.0
     u_prior_scale: float = 0.0
-    u_prior_mixture: bool = False
-    u_prior_mixture_k: int = 10
+    u_prior_mixture: bool = True
+    u_prior_mixture_k: int = 20
     learn_z_u_prior_scale: bool = False
     laplace_scale: float = None
     scale_observations: bool = False
-    px_nn_flavor: str = "linear"
-    qz_nn_flavor: str = "linear"
+    px_nn_flavor: str = "attention"
+    qz_nn_flavor: str = "attention"
     px_kwargs: Optional[dict] = None
     qz_kwargs: Optional[dict] = None
     qu_kwargs: Optional[dict] = None
@@ -365,7 +365,7 @@ class MrVAE(JaxBaseModuleClass):
         if self.qu_kwargs is not None:
             qu_kwargs.update(self.qu_kwargs)
 
-        is_isomorphic_uz = self.n_latent_u is None or self.n_latent == self.n_latent_u
+        is_isomorphic_uz = self.n_latent == self.n_latent_u
         n_latent_u = None if is_isomorphic_uz else self.n_latent_u
 
         # Generative model

@@ -20,10 +20,8 @@ urls.Documentation = "https://scvi-v2.readthedocs.io/"
 urls.Source = "https://github.com/YosefLab/scvi-v2"
 urls.Home-page = "https://github.com/YosefLab/scvi-v2"
 dependencies = [
-    "anndata",
-    "scvi-tools>=0.19.0",
+    "scvi-tools>=1.0.0",
     "seaborn>=0.12.1",
-    "xarray==2022.12.0",
     "statsmodels>=0.13.0",
 ]
 

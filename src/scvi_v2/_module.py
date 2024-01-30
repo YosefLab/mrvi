@@ -1,4 +1,4 @@
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Optional
 
 import flax.linen as nn
 import jax
@@ -19,8 +19,18 @@ from ._components import (
 from ._constants import MRVI_REGISTRY_KEYS
 from ._types import NdArray
 
-DEFAULT_PX_KWARGS = {"n_hidden": 32, "stop_gradients": False, "stop_gradients_mlp": True, "dropout_rate": 0.03}
-DEFAULT_QZ_KWARGS = {"use_map": True, "stop_gradients": False, "stop_gradients_mlp": True, "dropout_rate": 0.03}
+DEFAULT_PX_KWARGS = {
+    "n_hidden": 32,
+    "stop_gradients": False,
+    "stop_gradients_mlp": True,
+    "dropout_rate": 0.03,
+}
+DEFAULT_QZ_KWARGS = {
+    "use_map": True,
+    "stop_gradients": False,
+    "stop_gradients_mlp": True,
+    "dropout_rate": 0.03,
+}
 DEFAULT_QU_KWARGS = {}
 
 # Lower stddev leads to better initial loss values
@@ -46,24 +56,36 @@ class _DecoderZX(nn.Module):
         training: Optional[bool] = None,
     ) -> NegativeBinomial:
         h1 = Dense(self.n_out, use_bias=False, name="amat")(z)
-        z_drop = nn.Dropout(self.dropout_rate)(jax.lax.stop_gradient(z), deterministic=not training)
+        z_drop = nn.Dropout(self.dropout_rate)(
+            jax.lax.stop_gradient(z), deterministic=not training
+        )
         batch_covariate = batch_covariate.astype(int).flatten()
         # cells by n_out by n_latent (n_in)
-        A_b = nn.Embed(self.n_batch, self.n_out * self.n_in, embedding_init=_normal_initializer, name="A_b")(
-            batch_covariate
-        ).reshape(batch_covariate.shape[0], self.n_out, self.n_in)
+        A_b = nn.Embed(
+            self.n_batch,
+            self.n_out * self.n_in,
+            embedding_init=_normal_initializer,
+            name="A_b",
+        )(batch_covariate).reshape(batch_covariate.shape[0], self.n_out, self.n_in)
         if z_drop.ndim == 3:
             h2 = jnp.einsum("cgl,bcl->bcg", A_b, z_drop)
         else:
             h2 = jnp.einsum("cgl,cl->cg", A_b, z_drop)
-        h3 = nn.Embed(self.n_batch, self.n_out, embedding_init=_normal_initializer)(batch_covariate)
+        h3 = nn.Embed(self.n_batch, self.n_out, embedding_init=_normal_initializer)(
+            batch_covariate
+        )
         h = h1 + h2 + h3
         if continuous_covariates is not None:
-            h4 = Dense(self.n_out, use_bias=False, name="cont_covs_term")(continuous_covariates)
+            h4 = Dense(self.n_out, use_bias=False, name="cont_covs_term")(
+                continuous_covariates
+            )
             h += h4
         mu = self.activation(h)
         return NegativeBinomial(
-            mean=mu * size_factor, inverse_dispersion=jnp.exp(self.param("px_r", jax.random.normal, (self.n_out,)))
+            mean=mu * size_factor,
+            inverse_dispersion=jnp.exp(
+                self.param("px_r", jax.random.normal, (self.n_out,))
+            ),
         )
 
 
@@ -101,9 +123,9 @@ class _DecoderZXAttention(nn.Module):
         batch_covariate = batch_covariate.astype(int).flatten()
 
         if self.n_batch >= 2:
-            batch_embed = nn.Embed(self.n_batch, self.n_latent_sample, embedding_init=_normal_initializer)(
-                batch_covariate
-            )  # (batch, n_latent_sample)
+            batch_embed = nn.Embed(
+                self.n_batch, self.n_latent_sample, embedding_init=_normal_initializer
+            )(batch_covariate)  # (batch, n_latent_sample)
             batch_embed = nn.LayerNorm(name="batch_embed_ln")(batch_embed)
             if has_mc_samples:
                 batch_embed = jnp.tile(batch_embed, (z_.shape[0], 1, 1))
@@ -134,7 +156,10 @@ class _DecoderZXAttention(nn.Module):
             mu = nn.Dense(self.n_out)(z_)
         mu = self.h_activation(mu)
         return NegativeBinomial(
-            mean=mu * size_factor, inverse_dispersion=jnp.exp(self.param("px_r", jax.random.normal, (self.n_out,)))
+            mean=mu * size_factor,
+            inverse_dispersion=jnp.exp(
+                self.param("px_r", jax.random.normal, (self.n_out,))
+            ),
         )
 
 
@@ -158,7 +183,10 @@ class _EncoderUZ(nn.Module):
         if not self.use_nonlinear:
             if self.n_factorized_embed_dims is None:
                 self.A_s_enc = nn.Embed(
-                    self.n_sample, self.n_latent * n_latent_u, embedding_init=_normal_initializer, name="A_s_enc"
+                    self.n_sample,
+                    self.n_latent * n_latent_u,
+                    embedding_init=_normal_initializer,
+                    name="A_s_enc",
                 )
             else:
                 self.A_s_enc = FactorizedEmbedding(
@@ -169,10 +197,16 @@ class _EncoderUZ(nn.Module):
                     name="A_s_enc",
                 )
         else:
-            self.A_s_enc = MLP(self.n_latent * n_latent_u, name="A_s_enc", activation=self.activation)
-        self.h3_embed = nn.Embed(self.n_sample, self.n_latent, embedding_init=_normal_initializer)
+            self.A_s_enc = MLP(
+                self.n_latent * n_latent_u, name="A_s_enc", activation=self.activation
+            )
+        self.h3_embed = nn.Embed(
+            self.n_sample, self.n_latent, embedding_init=_normal_initializer
+        )
 
-    def __call__(self, u: NdArray, sample_covariate: NdArray, training: Optional[bool] = None) -> jnp.ndarray:
+    def __call__(
+        self, u: NdArray, sample_covariate: NdArray, training: Optional[bool] = None
+    ) -> jnp.ndarray:
         training = nn.merge_param("training", self.training, training)
         sample_covariate = sample_covariate.astype(int).flatten()
         n_latent_u = self.n_latent_u if self.n_latent_u is not None else self.n_latent
@@ -187,14 +221,18 @@ class _EncoderUZ(nn.Module):
                 h2 = jnp.einsum("cgl,cl->cg", A_s, u_drop)
         else:
             # A_s output by a non-linear function without an explicit intercept.
-            u_drop = self.dropout(u, deterministic=not training)  # No stop gradient for nonlinear.
+            u_drop = self.dropout(
+                u, deterministic=not training
+            )  # No stop gradient for nonlinear.
             sample_one_hot = jax.nn.one_hot(sample_covariate, self.n_sample)
             if u_drop.ndim == 3:
                 sample_one_hot = jnp.tile(sample_one_hot, (u_drop.shape[0], 1, 1))
             A_s_enc_inputs = jnp.concatenate([u_drop, sample_one_hot], axis=-1)
             A_s = self.A_s_enc(A_s_enc_inputs, training=training)
             if u_drop.ndim == 3:
-                A_s = A_s.reshape(u_drop.shape[0], sample_covariate.shape[0], self.n_latent, n_latent_u)
+                A_s = A_s.reshape(
+                    u_drop.shape[0], sample_covariate.shape[0], self.n_latent, n_latent_u
+                )
                 h2 = jnp.einsum("bcgl,bcl->bcg", A_s, u_drop)
             else:
                 A_s = A_s.reshape(sample_covariate.shape[0], self.n_latent, n_latent_u)
@@ -220,10 +258,12 @@ class _EncoderUZ2(nn.Module):
     activation: Callable = nn.gelu
 
     @nn.compact
-    def __call__(self, u: NdArray, sample_covariate: NdArray, training: Optional[bool] = None):
+    def __call__(
+        self, u: NdArray, sample_covariate: NdArray, training: Optional[bool] = None
+    ):
         training = nn.merge_param("training", self.training, training)
         sample_covariate = sample_covariate.astype(int).flatten()
-        self.n_latent_u if self.n_latent_u is not None else self.n_latent
+        self.n_latent_u if self.n_latent_u is not None else self.n_latent  # noqa: B018
         u_stop = u if not self.stop_gradients else jax.lax.stop_gradient(u)
 
         n_outs = 1 if self.use_map else 2
@@ -265,17 +305,19 @@ class _EncoderUZ2Attention(nn.Module):
     activation: Callable = nn.gelu
 
     @nn.compact
-    def __call__(self, u: NdArray, sample_covariate: NdArray, training: Optional[bool] = None):
+    def __call__(
+        self, u: NdArray, sample_covariate: NdArray, training: Optional[bool] = None
+    ):
         training = nn.merge_param("training", self.training, training)
         sample_covariate = sample_covariate.astype(int).flatten()
-        self.n_latent_u if self.n_latent_u is not None else self.n_latent
+        self.n_latent_u if self.n_latent_u is not None else self.n_latent  # noqa: B018
         has_mc_samples = u.ndim == 3
         u_stop = u if not self.stop_gradients else jax.lax.stop_gradient(u)
         u_ = nn.LayerNorm(name="u_ln")(u_stop)
 
-        sample_embed = nn.Embed(self.n_sample, self.n_latent_sample, embedding_init=_normal_initializer)(
-            sample_covariate
-        )  # (batch, n_latent_sample)
+        sample_embed = nn.Embed(
+            self.n_sample, self.n_latent_sample, embedding_init=_normal_initializer
+        )(sample_covariate)  # (batch, n_latent_sample)
         sample_embed = nn.LayerNorm(name="sample_embed_ln")(sample_embed)
         if has_mc_samples:
             sample_embed = jnp.tile(sample_embed, (u_.shape[0], 1, 1))
@@ -311,18 +353,24 @@ class _EncoderXU(nn.Module):
     training: Optional[bool] = None
 
     @nn.compact
-    def __call__(self, x: NdArray, sample_covariate: NdArray, training: Optional[bool] = None) -> dist.Normal:
+    def __call__(
+        self, x: NdArray, sample_covariate: NdArray, training: Optional[bool] = None
+    ) -> dist.Normal:
         training = nn.merge_param("training", self.training, training)
         x_feat = jnp.log1p(x)
         for _ in range(2):
             x_feat = Dense(self.n_hidden)(x_feat)
-            x_feat = ConditionalNormalization(self.n_hidden, self.n_sample)(x_feat, sample_covariate, training=training)
+            x_feat = ConditionalNormalization(self.n_hidden, self.n_sample)(
+                x_feat, sample_covariate, training=training
+            )
             x_feat = self.activation(x_feat)
-        sample_effect = nn.Embed(self.n_sample, self.n_hidden, embedding_init=_normal_initializer)(
-            sample_covariate.squeeze(-1).astype(int)
-        )
+        sample_effect = nn.Embed(
+            self.n_sample, self.n_hidden, embedding_init=_normal_initializer
+        )(sample_covariate.squeeze(-1).astype(int))
         inputs = x_feat + sample_effect
-        return NormalDistOutputNN(self.n_latent, self.n_hidden, self.n_layers)(inputs, training=training)
+        return NormalDistOutputNN(self.n_latent, self.n_hidden, self.n_layers)(
+            inputs, training=training
+        )
 
 
 @flax_configure
@@ -354,7 +402,7 @@ class MrVAE(JaxBaseModuleClass):
     training: bool = True
     n_obs_per_sample: Optional[jnp.ndarray] = None
 
-    def setup(self):  # noqa: D102
+    def setup(self):
         px_kwargs = DEFAULT_PX_KWARGS.copy()
         if self.px_kwargs is not None:
             px_kwargs.update(self.px_kwargs)
@@ -405,7 +453,9 @@ class MrVAE(JaxBaseModuleClass):
         )
 
         if self.learn_z_u_prior_scale:
-            self.pz_scale = self.param("pz_scale", nn.initializers.zeros, (self.n_latent,))
+            self.pz_scale = self.param(
+                "pz_scale", nn.initializers.zeros, (self.n_latent,)
+            )
         else:
             self.pz_scale = self.z_u_prior_scale
 
@@ -415,20 +465,28 @@ class MrVAE(JaxBaseModuleClass):
             else:
                 u_prior_mixture_k = self.u_prior_mixture_k
             u_dim = self.n_latent_u if self.n_latent_u is not None else self.n_latent
-            self.u_prior_logits = self.param("u_prior_logits", nn.initializers.zeros, (u_prior_mixture_k,))
-            self.u_prior_means = self.param("u_prior_means", jax.random.normal, (u_dim, u_prior_mixture_k))
-            self.u_prior_scales = self.param("u_prior_scales", nn.initializers.zeros, (u_dim, u_prior_mixture_k))
+            self.u_prior_logits = self.param(
+                "u_prior_logits", nn.initializers.zeros, (u_prior_mixture_k,)
+            )
+            self.u_prior_means = self.param(
+                "u_prior_means", jax.random.normal, (u_dim, u_prior_mixture_k)
+            )
+            self.u_prior_scales = self.param(
+                "u_prior_scales", nn.initializers.zeros, (u_dim, u_prior_mixture_k)
+            )
 
     @property
-    def required_rngs(self):  # noqa: D102
+    def required_rngs(self):
         return ("params", "u", "dropout", "eps")
 
-    def _get_inference_input(self, tensors: Dict[str, NdArray]) -> Dict[str, Any]:
+    def _get_inference_input(self, tensors: dict[str, NdArray]) -> dict[str, Any]:
         x = tensors[REGISTRY_KEYS.X_KEY]
         sample_index = tensors[MRVI_REGISTRY_KEYS.SAMPLE_KEY]
         return {"x": x, "sample_index": sample_index}
 
-    def inference(self, x, sample_index, mc_samples=None, cf_sample=None, use_mean=False):
+    def inference(
+        self, x, sample_index, mc_samples=None, cf_sample=None, use_mean=False
+    ):
         """Latent variable inference."""
         qu = self.qu(x, sample_index, training=self.training)
         if use_mean:
@@ -467,7 +525,9 @@ class MrVAE(JaxBaseModuleClass):
             "library": library,
         }
 
-    def _get_generative_input(self, tensors: Dict[str, NdArray], inference_outputs: Dict[str, Any]) -> Dict[str, Any]:
+    def _get_generative_input(
+        self, tensors: dict[str, NdArray], inference_outputs: dict[str, Any]
+    ) -> dict[str, Any]:
         z = inference_outputs["z"]
         library = inference_outputs["library"]
         batch_index = tensors[REGISTRY_KEYS.BATCH_KEY]
@@ -485,12 +545,20 @@ class MrVAE(JaxBaseModuleClass):
         """Generative model."""
         library_exp = jnp.exp(library)
         px = self.px(
-            z, batch_index, size_factor=library_exp, continuous_covariates=continuous_covs, training=self.training
+            z,
+            batch_index,
+            size_factor=library_exp,
+            continuous_covariates=continuous_covs,
+            training=self.training,
         )
         h = px.mean / library_exp
 
         if self.u_prior_mixture:
-            offset = 10.0 * jax.nn.one_hot(label_index, self.n_labels) if self.n_labels >= 2 else 0.0
+            offset = (
+                10.0 * jax.nn.one_hot(label_index, self.n_labels)
+                if self.n_labels >= 2
+                else 0.0
+            )
             cats = dist.Categorical(logits=self.u_prior_logits + offset)
             normal_dists = dist.Normal(self.u_prior_means, jnp.exp(self.u_prior_scales))
             pu = dist.MixtureSameFamily(cats, normal_dists)
@@ -500,21 +568,25 @@ class MrVAE(JaxBaseModuleClass):
 
     def loss(
         self,
-        tensors: Dict[str, NdArray],
-        inference_outputs: Dict[str, Any],
-        generative_outputs: Dict[str, Any],
+        tensors: dict[str, NdArray],
+        inference_outputs: dict[str, Any],
+        generative_outputs: dict[str, Any],
         kl_weight: float = 1.0,
     ) -> jnp.ndarray:
         """Compute the loss function value."""
-        reconstruction_loss = -generative_outputs["px"].log_prob(tensors[REGISTRY_KEYS.X_KEY]).sum(-1)
+        reconstruction_loss = (
+            -generative_outputs["px"].log_prob(tensors[REGISTRY_KEYS.X_KEY]).sum(-1)
+        )
 
         if self.u_prior_mixture:
-            kl_u = inference_outputs["qu"].log_prob(inference_outputs["u"]) - generative_outputs["pu"].log_prob(
+            kl_u = inference_outputs["qu"].log_prob(
                 inference_outputs["u"]
-            )
+            ) - generative_outputs["pu"].log_prob(inference_outputs["u"])
             kl_u = kl_u.sum(-1)
         else:
-            kl_u = dist.kl_divergence(inference_outputs["qu"], generative_outputs["pu"]).sum(-1)
+            kl_u = dist.kl_divergence(
+                inference_outputs["qu"], generative_outputs["pu"]
+            ).sum(-1)
         if self.qz_nn_flavor != "linear":
             inference_outputs["qeps"]
             eps = inference_outputs["z"] - inference_outputs["z_base"]
@@ -523,7 +595,9 @@ class MrVAE(JaxBaseModuleClass):
                 kl_z = -peps.log_prob(eps).sum(-1)
             else:
                 kl_z = (
-                    -dist.Normal(inference_outputs["z_base"], jnp.exp(self.z_u_prior_scale))
+                    -dist.Normal(
+                        inference_outputs["z_base"], jnp.exp(self.z_u_prior_scale)
+                    )
                     .log_prob(inference_outputs["z"])
                     .sum(-1)
                     if self.z_u_prior_scale is not None
@@ -565,10 +639,22 @@ class MrVAE(JaxBaseModuleClass):
             kl_local=(kl_u + kl_z),
         )
 
-    def compute_h_from_x(self, x, sample_index, batch_index, cf_sample=None, continuous_covs=None, mc_samples=10):
+    def compute_h_from_x(
+        self,
+        x,
+        sample_index,
+        batch_index,
+        cf_sample=None,
+        continuous_covs=None,
+        mc_samples=10,
+    ):
         """Compute normalized gene expression from observations"""
-        library = 7.0 * jnp.ones_like(sample_index)  # placeholder, has no effect on the value of h.
-        inference_outputs = self.inference(x, sample_index, mc_samples=mc_samples, cf_sample=cf_sample, use_mean=False)
+        library = 7.0 * jnp.ones_like(
+            sample_index
+        )  # placeholder, has no effect on the value of h.
+        inference_outputs = self.inference(
+            x, sample_index, mc_samples=mc_samples, cf_sample=cf_sample, use_mean=False
+        )
         generative_inputs = {
             "z": inference_outputs["z"],
             "library": library,
@@ -580,11 +666,22 @@ class MrVAE(JaxBaseModuleClass):
         return generative_outputs["h"]
 
     def compute_h_from_x_eps(
-        self, x, sample_index, batch_index, extra_eps, cf_sample=None, continuous_covs=None, mc_samples=10
+        self,
+        x,
+        sample_index,
+        batch_index,
+        extra_eps,
+        cf_sample=None,
+        continuous_covs=None,
+        mc_samples=10,
     ):
         """Compute normalized gene expression from observations using predefined eps"""
-        library = 7.0 * jnp.ones_like(sample_index)  # placeholder, has no effect on the value of h.
-        inference_outputs = self.inference(x, sample_index, mc_samples=mc_samples, cf_sample=cf_sample, use_mean=False)
+        library = 7.0 * jnp.ones_like(
+            sample_index
+        )  # placeholder, has no effect on the value of h.
+        inference_outputs = self.inference(
+            x, sample_index, mc_samples=mc_samples, cf_sample=cf_sample, use_mean=False
+        )
         generative_inputs = {
             "z": inference_outputs["z_base"] + extra_eps,
             "library": library,

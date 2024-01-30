@@ -9,7 +9,9 @@ from scipy.cluster import hierarchy as hc
 from scipy.spatial.distance import squareform
 
 
-def convert_pandas_to_colors(metadata: pd.DataFrame, cmap_name: str = "tab10", cmap_requires_int: bool = True):
+def convert_pandas_to_colors(
+    metadata: pd.DataFrame, cmap_name: str = "tab10", cmap_requires_int: bool = True
+):
     """Converts a pandas dataframe to hex colors."""
 
     def _get_colors_from_categorical(x):
@@ -30,9 +32,13 @@ def convert_pandas_to_colors(metadata: pd.DataFrame, cmap_name: str = "tab10", c
             if cmap_requires_int:
                 colors = _get_colors_from_categorical(cats.cat.codes)
             else:
-                colors = _get_colors_from_categorical(cats.cat.codes / len(cats.cat.categories))
+                colors = _get_colors_from_categorical(
+                    cats.cat.codes / len(cats.cat.categories)
+                )
         else:
-            scales = (metadata[col] - metadata[col].min()) / (metadata[col].max() - metadata[col].min())
+            scales = (metadata[col] - metadata[col].min()) / (
+                metadata[col].max() - metadata[col].min()
+            )
             colors = _get_colors_from_continuous(scales)
         colors_mapper[col] = colors
     return pd.DataFrame(colors_mapper, index=metadata.index)

@@ -1,5 +1,5 @@
 from functools import partial
-from typing import Callable, List, Union
+from typing import Callable, Union
 
 import jax
 import jax.numpy as jnp
@@ -9,7 +9,7 @@ from ._types import MrVIReduction, _ComputeLocalStatisticsRequirements
 
 
 def _parse_local_statistics_requirements(
-    reductions: List[MrVIReduction],
+    reductions: list[MrVIReduction],
 ) -> _ComputeLocalStatisticsRequirements:
     needs_mean_rep = False
     needs_sampled_rep = False
@@ -196,7 +196,9 @@ def permutation_test(
     use_vmap
         whether or not to use vmap to compute pvalues
     """
-    t_obs = compute_statistic(distances, node_colors, statistic=statistic, similarity_fn=similarity_fn)
+    t_obs = compute_statistic(
+        distances, node_colors, statistic=statistic, similarity_fn=similarity_fn
+    )
     t_perm = []
 
     key = jax.random.PRNGKey(random_seed)
@@ -208,7 +210,9 @@ def permutation_test(
         return compute_statistic(w, x_, statistic=statistic, similarity_fn=similarity_fn)
 
     if use_vmap:
-        t_perm = jax.vmap(permute_compute, in_axes=(None, None, 0), out_axes=0)(distances, node_colors, keys)
+        t_perm = jax.vmap(permute_compute, in_axes=(None, None, 0), out_axes=0)(
+            distances, node_colors, keys
+        )
     else:
         permute_compute_bound = lambda key: permute_compute(distances, node_colors, key)
         t_perm = jax.lax.map(permute_compute_bound, keys)

@@ -2,7 +2,6 @@ from tempfile import TemporaryDirectory
 
 import numpy as np
 from scvi.data import synthetic_iid
-
 from scvi_v2 import MrVI, MrVIReduction
 
 
@@ -22,7 +21,9 @@ def test_mrvi():
     adata.obs["meta1_cat"] = "CAT_" + adata.obs["meta1"].astype(str)
     adata.obs["meta1_cat"] = adata.obs["meta1_cat"].astype("category")
 
-    adata.obs.loc[:, "disjoint_batch"] = (adata.obs.loc[:, "sample"] <= 6).replace({True: "batch_0", False: "batch_1"})
+    adata.obs.loc[:, "disjoint_batch"] = (adata.obs.loc[:, "sample"] <= 6).replace(
+        {True: "batch_0", False: "batch_1"}
+    )
     MrVI.setup_anndata(adata, sample_key="sample", batch_key="disjoint_batch")
     model = MrVI(
         adata,
@@ -31,12 +32,20 @@ def test_mrvi():
     )
     model.train(2, check_val_every_n_epoch=1, train_size=0.5)
     donor_keys = ["meta1_cat", "meta2", "cont_cov"]
-    model.perform_multivariate_analysis(donor_keys=donor_keys, store_lfc=True, add_batch_specific_offsets=True)
     model.perform_multivariate_analysis(
-        donor_keys=donor_keys, store_lfc=True, lambd=1e-1, add_batch_specific_offsets=True
+        donor_keys=donor_keys, store_lfc=True, add_batch_specific_offsets=True
     )
     model.perform_multivariate_analysis(
-        donor_keys=donor_keys, store_lfc=True, filter_donors=True, add_batch_specific_offsets=True
+        donor_keys=donor_keys,
+        store_lfc=True,
+        lambd=1e-1,
+        add_batch_specific_offsets=True,
+    )
+    model.perform_multivariate_analysis(
+        donor_keys=donor_keys,
+        store_lfc=True,
+        filter_donors=True,
+        add_batch_specific_offsets=True,
     )
     model.get_local_sample_distances(normalize_distances=True)
 
@@ -48,10 +57,17 @@ def test_mrvi():
     )
     model.train(2, check_val_every_n_epoch=1, train_size=0.5)
     donor_keys = ["meta1_cat", "meta2", "cont_cov"]
-    model.perform_multivariate_analysis(donor_keys=donor_keys, store_lfc=True, add_batch_specific_offsets=False)
+    model.perform_multivariate_analysis(
+        donor_keys=donor_keys, store_lfc=True, add_batch_specific_offsets=False
+    )
     model.get_local_sample_distances(normalize_distances=True)
 
-    MrVI.setup_anndata(adata, sample_key="sample", batch_key="batch", continuous_covariate_keys=["cont_cov"])
+    MrVI.setup_anndata(
+        adata,
+        sample_key="sample",
+        batch_key="batch",
+        continuous_covariate_keys=["cont_cov"],
+    )
     model = MrVI(
         adata,
         px_nn_flavor="attention",
@@ -62,17 +78,28 @@ def test_mrvi():
     model.get_outlier_cell_sample_pairs(flavor="ball", subsample_size=50)
     model.get_outlier_cell_sample_pairs(flavor="MoG", subsample_size=50)
     model.get_outlier_cell_sample_pairs(flavor="ap", subsample_size=50)
-    model.perform_multivariate_analysis(donor_keys=donor_keys, store_lfc=True, add_batch_specific_offsets=False)
+    model.perform_multivariate_analysis(
+        donor_keys=donor_keys, store_lfc=True, add_batch_specific_offsets=False
+    )
 
     adata.obs.loc[:, "batch_placeholder"] = "1"
     MrVI.setup_anndata(adata, sample_key="sample", batch_key="batch_placeholder")
     model = MrVI(adata)
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)
     model.perform_multivariate_analysis(donor_keys=donor_keys, store_lfc=True)
-    model.perform_multivariate_analysis(donor_keys=donor_keys, store_lfc=True, lambd=1e-1)
-    model.perform_multivariate_analysis(donor_keys=donor_keys, store_lfc=True, filter_donors=True)
+    model.perform_multivariate_analysis(
+        donor_keys=donor_keys, store_lfc=True, lambd=1e-1
+    )
+    model.perform_multivariate_analysis(
+        donor_keys=donor_keys, store_lfc=True, filter_donors=True
+    )
 
-    MrVI.setup_anndata(adata, sample_key="sample_str", batch_key="batch", continuous_covariate_keys=["cont_cov"])
+    MrVI.setup_anndata(
+        adata,
+        sample_key="sample_str",
+        batch_key="batch",
+        continuous_covariate_keys=["cont_cov"],
+    )
     model = MrVI(
         adata,
         px_nn_flavor="attention",
@@ -84,7 +111,12 @@ def test_mrvi():
     donor_subset = [f"sample_{i}" for i in range(8)]
     model.perform_multivariate_analysis(donor_keys=donor_keys, donor_subset=donor_subset)
 
-    MrVI.setup_anndata(adata, sample_key="sample", batch_key="batch", continuous_covariate_keys=["cont_cov"])
+    MrVI.setup_anndata(
+        adata,
+        sample_key="sample",
+        batch_key="batch",
+        continuous_covariate_keys=["cont_cov"],
+    )
     model = MrVI(
         adata,
         n_latent=n_latent,
@@ -145,8 +177,16 @@ def test_mrvi():
         adata,
         n_latent=n_latent,
         scale_observations=True,
-        qz_kwargs={"use_map": False, "stop_gradients": False, "stop_gradients_mlp": True},
-        px_kwargs={"low_dim_batch": False, "stop_gradients": False, "stop_gradients_mlp": True},
+        qz_kwargs={
+            "use_map": False,
+            "stop_gradients": False,
+            "stop_gradients_mlp": True,
+        },
+        px_kwargs={
+            "low_dim_batch": False,
+            "stop_gradients": False,
+            "stop_gradients_mlp": True,
+        },
         px_nn_flavor="attention",
         qz_nn_flavor="attention",
         z_u_prior=False,
@@ -176,7 +216,7 @@ def test_mrvi():
     )
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)
     model.is_trained_ = True
-    model.history
+    _ = model.history
 
     assert model.get_latent_representation().shape == (adata.shape[0], n_latent)
     local_vmap = model.get_local_sample_representation()
@@ -202,17 +242,23 @@ def test_mrvi():
     assert np.allclose(local_map, local_vmap, atol=1e-6)
     assert np.allclose(local_dist_map, local_dist_vmap, atol=1e-6)
 
-    local_normalized_dists = model.get_local_sample_distances(normalize_distances=True)["cell"]
+    local_normalized_dists = model.get_local_sample_distances(normalize_distances=True)[
+        "cell"
+    ]
     assert local_normalized_dists.shape == (
         adata.shape[0],
         15,
         15,
     )
-    assert np.allclose(local_normalized_dists[0].values, local_normalized_dists[0].values.T, atol=1e-6)
+    assert np.allclose(
+        local_normalized_dists[0].values, local_normalized_dists[0].values.T, atol=1e-6
+    )
 
     # Test memory efficient groupby.
     model.get_local_sample_distances(keep_cell=False, groupby=["meta1", "meta2"])
-    grouped_dists_no_cell = model.get_local_sample_distances(keep_cell=False, groupby=["meta1", "meta2"])
+    grouped_dists_no_cell = model.get_local_sample_distances(
+        keep_cell=False, groupby=["meta1", "meta2"]
+    )
     grouped_dists_w_cell = model.get_local_sample_distances(groupby=["meta1", "meta2"])
     assert np.allclose(grouped_dists_no_cell.meta1, grouped_dists_w_cell.meta1)
     assert np.allclose(grouped_dists_no_cell.meta2, grouped_dists_w_cell.meta2)
@@ -240,7 +286,12 @@ def test_mrvi_shrink_u():
     adata.obs["meta2"] = meta2[adata.obs["sample"].values]
     MrVI.setup_anndata(adata, sample_key="sample", batch_key="batch")
     adata.obs["cont_cov"] = np.random.normal(0, 1, size=adata.shape[0])
-    MrVI.setup_anndata(adata, sample_key="sample", batch_key="batch", continuous_covariate_keys=["cont_cov"])
+    MrVI.setup_anndata(
+        adata,
+        sample_key="sample",
+        batch_key="batch",
+        continuous_covariate_keys=["cont_cov"],
+    )
     n_latent_u = 5
     n_latent = 10
 
@@ -305,7 +356,7 @@ def test_mrvi_shrink_u():
     )
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)
     model.is_trained_ = True
-    model.history
+    _ = model.history
 
     assert model.get_latent_representation().shape == (adata.shape[0], n_latent_u)
 
@@ -320,7 +371,12 @@ def test_mrvi_stratifications():
     adata.obs["meta2"] = meta2[adata.obs["sample"].values]
     MrVI.setup_anndata(adata, sample_key="sample", batch_key="batch")
     adata.obs["cont_cov"] = np.random.normal(0, 1, size=adata.shape[0])
-    MrVI.setup_anndata(adata, sample_key="sample", batch_key="batch", continuous_covariate_keys=["cont_cov"])
+    MrVI.setup_anndata(
+        adata,
+        sample_key="sample",
+        batch_key="batch",
+        continuous_covariate_keys=["cont_cov"],
+    )
     n_latent = 10
     model = MrVI(
         adata,
@@ -328,7 +384,7 @@ def test_mrvi_stratifications():
     )
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)
     model.is_trained_ = True
-    model.history
+    _ = model.history
 
     adata.obs.loc[:, "label_2"] = np.random.choice(2, size=adata.shape[0])
     dists = model.get_local_sample_distances(groupby=["labels", "label_2"])
@@ -354,8 +410,12 @@ def test_mrvi_stratifications():
     assert np.allclose(ct_dists[0].values, ct_dists[0].values.T, atol=1e-6)
 
     with TemporaryDirectory() as d:
-        model.explore_stratifications(dists["labels"], sample_metadata="meta1", figure_dir=d)
-    model.explore_stratifications(dists["labels"], sample_metadata="meta1", show_figures=True)
+        model.explore_stratifications(
+            dists["labels"], sample_metadata="meta1", figure_dir=d
+        )
+    model.explore_stratifications(
+        dists["labels"], sample_metadata="meta1", show_figures=True
+    )
     model.explore_stratifications(dists["labels"], cell_type_keys="label_0")
     model.explore_stratifications(dists["labels"], cell_type_keys=["label_0", "label_1"])
 
@@ -367,12 +427,18 @@ def test_mrvi_stratifications():
     assert len(pvals.data_vars) == 2
     assert pvals.data_vars["meta1_nn_pval"].shape == (adata.shape[0],)
     assert pvals.data_vars["meta2_geary_pval"].shape == (adata.shape[0],)
-    assert (pvals.data_vars["meta1_nn_pval"].values != pvals.data_vars["meta2_geary_pval"].values).all()
+    assert (
+        pvals.data_vars["meta1_nn_pval"].values
+        != pvals.data_vars["meta2_geary_pval"].values
+    ).all()
     es = model.compute_cell_scores(donor_keys=donor_keys, compute_pval=False)
     assert len(es.data_vars) == 2
     assert es.data_vars["meta1_nn_effect_size"].shape == (adata.shape[0],)
     assert es.data_vars["meta2_geary_effect_size"].shape == (adata.shape[0],)
-    assert (es.data_vars["meta1_nn_effect_size"].values != es.data_vars["meta2_geary_effect_size"].values).all()
+    assert (
+        es.data_vars["meta1_nn_effect_size"].values
+        != es.data_vars["meta2_geary_effect_size"].values
+    ).all()
 
 
 def test_mrvi_nonlinear():
@@ -385,7 +451,12 @@ def test_mrvi_nonlinear():
     adata.obs["meta2"] = meta2[adata.obs["sample"].values]
     MrVI.setup_anndata(adata, sample_key="sample", batch_key="batch")
     adata.obs["cont_cov"] = np.random.normal(0, 1, size=adata.shape[0])
-    MrVI.setup_anndata(adata, sample_key="sample", batch_key="batch", continuous_covariate_keys=["cont_cov"])
+    MrVI.setup_anndata(
+        adata,
+        sample_key="sample",
+        batch_key="batch",
+        continuous_covariate_keys=["cont_cov"],
+    )
 
     n_latent = 11
     model = MrVI(
@@ -395,7 +466,7 @@ def test_mrvi_nonlinear():
     )
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)
     model.is_trained_ = True
-    model.history
+    _ = model.history
     assert model.get_latent_representation().shape == (adata.shape[0], n_latent)
     local_vmap = model.get_local_sample_representation()
 
@@ -407,13 +478,17 @@ def test_mrvi_nonlinear():
         15,
     )
 
-    local_normalized_dists = model.get_local_sample_distances(normalize_distances=True)["cell"]
+    local_normalized_dists = model.get_local_sample_distances(normalize_distances=True)[
+        "cell"
+    ]
     assert local_normalized_dists.shape == (
         adata.shape[0],
         15,
         15,
     )
-    assert np.allclose(local_normalized_dists[0].values, local_normalized_dists[0].values.T, atol=1e-6)
+    assert np.allclose(
+        local_normalized_dists[0].values, local_normalized_dists[0].values.T, atol=1e-6
+    )
 
     model = MrVI(
         adata,
@@ -470,7 +545,7 @@ def test_compute_local_statistics():
     )
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)
     model.is_trained_ = True
-    model.history
+    _ = model.history
 
     reductions = [
         MrVIReduction(

@@ -1,12 +1,12 @@
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any, Literal, Union
 
 import jax.numpy as jnp
 import numpy as np
 import xarray as xr
 
-NdArray = np.ndarray | jnp.ndarray
+NdArray = Union[np.ndarray, jnp.ndarray]
 PRNGKey = Any
 Shape = tuple[int, ...]
 Dtype = Any

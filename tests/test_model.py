@@ -121,6 +121,7 @@ def test_mrvi():
         adata,
         n_latent=n_latent,
         laplace_scale=1.0,
+        qz_nn_flavor="linear",
         qz_kwargs={"n_factorized_embed_dims": 3},
     )
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)
@@ -130,6 +131,7 @@ def test_mrvi():
         adata,
         n_latent=n_latent,
         scale_observations=True,
+        qz_nn_flavor="linear",
         qz_kwargs={"n_factorized_embed_dims": 3},
     )
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)
@@ -300,6 +302,7 @@ def test_mrvi_shrink_u():
         n_latent=n_latent,
         n_latent_u=n_latent_u,
         laplace_scale=1.0,
+        qz_nn_flavor="linear",
         qz_kwargs={"n_factorized_embed_dims": 3},
     )
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)
@@ -310,6 +313,7 @@ def test_mrvi_shrink_u():
         n_latent=n_latent,
         n_latent_u=n_latent_u,
         laplace_scale=1.0,
+        qz_nn_flavor="linear",
         qz_kwargs={"n_factorized_embed_dims": 3},
     )
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)
@@ -320,6 +324,7 @@ def test_mrvi_shrink_u():
         n_latent=n_latent,
         n_latent_u=n_latent_u,
         scale_observations=True,
+        qz_nn_flavor="linear",
         qz_kwargs={"n_factorized_embed_dims": 3},
     )
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)
@@ -462,6 +467,7 @@ def test_mrvi_nonlinear():
     model = MrVI(
         adata,
         n_latent=n_latent,
+        qz_nn_flavor="linear",
         qz_kwargs={"use_nonlinear": True},
     )
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)

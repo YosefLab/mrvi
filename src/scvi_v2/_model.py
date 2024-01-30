@@ -200,8 +200,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
     def train(
         self,
         max_epochs: int | None = None,
-        accelerator: str | None = "auto",
-        devices: int | list[int] | str = "auto",
         train_size: float = 0.9,
         validation_size: float | None = None,
         batch_size: int = 128,
@@ -211,8 +209,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
     ):
         train_kwargs = dict(
             max_epochs=max_epochs,
-            accelerator=accelerator,
-            devices=devices,
             train_size=train_size,
             validation_size=validation_size,
             batch_size=batch_size,
@@ -532,7 +528,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
         def get_A_s(module, u, sample_covariate):
             sample_covariate = sample_covariate.astype(int).flatten()
-            if not module.qz.use_nonlinear:
+            if getattr(module.qz, "use_nonlinear", False):
                 A_s = module.qz.A_s_enc(sample_covariate)
             else:
                 # A_s output by a non-linear function without an explicit intercept

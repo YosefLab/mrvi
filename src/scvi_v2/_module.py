@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 import flax.linen as nn
 import jax
@@ -27,7 +27,12 @@ DEFAULT_PX_KWARGS = {
     "stop_gradients_mlp": True,
     "dropout_rate": 0.03,
 }
-DEFAULT_QZ_KWARGS = {
+DEFAULT_QZ_KWARGS = {}
+DEFAULT_QZ_MLP_KWARGS = {
+    "use_map": True,
+    "stop_gradients": False,
+}
+DEFAULT_QZ_ATTENTION_KWARGS = {
     "use_map": True,
     "stop_gradients": False,
     "stop_gradients_mlp": True,
@@ -230,7 +235,13 @@ class _EncoderUZ(nn.Module):
             if u_drop.ndim == 3:
                 sample_one_hot = jnp.tile(sample_one_hot, (u_drop.shape[0], 1, 1))
             A_s_enc_inputs = jnp.concatenate([u_drop, sample_one_hot], axis=-1)
-            A_s = self.A_s_enc(A_s_enc_inputs, training=training)
+
+            if isinstance(self.A_s_enc, MLP):
+                A_s = self.A_s_enc(A_s_enc_inputs, training=training)
+            else:
+                # nn.Embed does not support training kwarg
+                A_s = self.A_s_enc(A_s_enc_inputs)
+
             if u_drop.ndim == 3:
                 A_s = A_s.reshape(
                     u_drop.shape[0], sample_covariate.shape[0], self.n_latent, n_latent_u
@@ -397,7 +408,7 @@ class MrVAE(JaxBaseModuleClass):
     laplace_scale: float = None
     scale_observations: bool = False
     px_nn_flavor: str = "attention"
-    qz_nn_flavor: str = "attention"
+    qz_nn_flavor: Literal["linear", "mlp", "attention"] = "attention"
     px_kwargs: dict | None = None
     qz_kwargs: dict | None = None
     qu_kwargs: dict | None = None
@@ -408,9 +419,18 @@ class MrVAE(JaxBaseModuleClass):
         px_kwargs = DEFAULT_PX_KWARGS.copy()
         if self.px_kwargs is not None:
             px_kwargs.update(self.px_kwargs)
-        qz_kwargs = DEFAULT_QZ_KWARGS.copy()
+
+        if self.qz_nn_flavor == "linear":
+            qz_kwargs = DEFAULT_QZ_KWARGS.copy()
+        elif self.qz_nn_flavor == "mlp":
+            qz_kwargs = DEFAULT_QZ_MLP_KWARGS.copy()
+        elif self.qz_nn_flavor == "attention":
+            qz_kwargs = DEFAULT_QZ_ATTENTION_KWARGS.copy()
+        else:
+            raise ValueError(f"Unknown qz_nn_flavor: {self.qz_nn_flavor}")
         if self.qz_kwargs is not None:
             qz_kwargs.update(self.qz_kwargs)
+
         qu_kwargs = DEFAULT_QU_KWARGS.copy()
         if self.qu_kwargs is not None:
             qu_kwargs.update(self.qu_kwargs)

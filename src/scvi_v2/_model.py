@@ -30,6 +30,7 @@ from sklearn.mixture import GaussianMixture
 from statsmodels.stats.multitest import multipletests
 from tqdm import tqdm
 
+from ._components import MLP
 from ._constants import MRVI_REGISTRY_KEYS
 from ._module import MrVAE
 from ._tree_utils import (
@@ -529,12 +530,18 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         def get_A_s(module, u, sample_covariate):
             sample_covariate = sample_covariate.astype(int).flatten()
             if getattr(module.qz, "use_nonlinear", False):
-                A_s = module.qz.A_s_enc(sample_covariate)
+                A_s = module.qz.A_s_enc(sample_covariate, training=False)
             else:
                 # A_s output by a non-linear function without an explicit intercept
                 sample_one_hot = jax.nn.one_hot(sample_covariate, module.qz.n_sample)
                 A_s_dec_inputs = jnp.concatenate([u, sample_one_hot], axis=-1)
-                A_s = module.qz.A_s_enc(A_s_dec_inputs, training=False)
+
+                if isinstance(module.qz.A_s_enc, MLP):
+                    A_s = module.qz.A_s_enc(A_s_dec_inputs, training=False)
+                else:
+                    # nn.Embed does not support training kwarg
+                    A_s = module.qz.A_s_enc(A_s_dec_inputs)
+
             # cells by n_latent by n_latent
             return A_s.reshape(sample_covariate.shape[0], module.qz.n_latent, -1)
 

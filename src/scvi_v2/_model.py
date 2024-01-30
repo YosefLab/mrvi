@@ -1227,7 +1227,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 cov = cov.cat.remove_unused_categories()
                 cov = pd.get_dummies(cov, drop_first=True)
                 cov_names = donor_key + np.array(cov.columns)
-                print(cov_names)
                 cov = cov.values
             else:
                 cov_names = np.array([donor_key])

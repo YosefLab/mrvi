@@ -1,6 +1,6 @@
 from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Callable, Literal, Union
+from typing import Any, Callable, Literal, Optional, Union
 
 import jax.numpy as jnp
 import numpy as np
@@ -39,7 +39,7 @@ class MrVIReduction:
         "normalized_distances",
     ]
     fn: Callable[[xr.DataArray], xr.DataArray] = lambda x: xr.DataArray(x)
-    group_by: str | None = None
+    group_by: Optional[str] = None
 
 
 @dataclass(frozen=True)

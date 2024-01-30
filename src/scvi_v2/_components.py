@@ -1,5 +1,7 @@
+from __future__ import annotations
+
 import dataclasses
-from typing import Any, Callable, Literal, Optional
+from typing import Any, Literal
 
 import flax.linen as nn
 import jax
@@ -30,12 +32,12 @@ class ResnetBlock(nn.Module):
 
     n_out: int
     n_hidden: int = 128
-    internal_activation: Callable = nn.relu
-    output_activation: Callable = nn.relu
-    training: Optional[bool] = None
+    internal_activation: callable = nn.relu
+    output_activation: callable = nn.relu
+    training: bool | None = None
 
     @nn.compact
-    def __call__(self, inputs: NdArray, training: Optional[bool] = None) -> NdArray:
+    def __call__(self, inputs: NdArray, training: bool | None = None) -> NdArray:
         training = nn.merge_param("training", self.training, training)
         h = Dense(self.n_hidden)(inputs)
         h = nn.LayerNorm()(h)
@@ -56,11 +58,11 @@ class MLP(nn.Module):
     n_out: int
     n_hidden: int = 128
     n_layers: int = 1
-    activation: Callable = nn.relu
-    training: Optional[bool] = None
+    activation: callable = nn.relu
+    training: bool | None = None
 
     @nn.compact
-    def __call__(self, inputs: NdArray, training: Optional[bool] = None) -> dist.Normal:
+    def __call__(self, inputs: NdArray, training: bool | None = None) -> dist.Normal:
         training = nn.merge_param("training", self.training, training)
         h = inputs
         for _ in range(self.n_layers):
@@ -79,10 +81,10 @@ class NormalDistOutputNN(nn.Module):
     n_hidden: int = 128
     n_layers: int = 1
     scale_eps: float = 1e-5
-    training: Optional[bool] = None
+    training: bool | None = None
 
     @nn.compact
-    def __call__(self, inputs: NdArray, training: Optional[bool] = None) -> dist.Normal:
+    def __call__(self, inputs: NdArray, training: bool | None = None) -> dist.Normal:
         training = nn.merge_param("training", self.training, training)
         h = inputs
         for _ in range(self.n_layers):
@@ -97,7 +99,7 @@ class ConditionalNormalization(nn.Module):
 
     n_features: int
     n_conditions: int
-    training: Optional[bool] = None
+    training: bool | None = None
     normalization_type: Literal["batch", "layer"] = "layer"
 
     @staticmethod
@@ -123,7 +125,7 @@ class ConditionalNormalization(nn.Module):
 
     @nn.compact
     def __call__(
-        self, x: NdArray, condition: NdArray, training: Optional[bool] = None
+        self, x: NdArray, condition: NdArray, training: bool | None = None
     ) -> jnp.ndarray:
         training = nn.merge_param("training", self.training, training)
         if self.normalization_type == "batch":
@@ -165,13 +167,13 @@ class AttentionBlock(nn.Module):
     dropout_rate: float = 0.0
     n_hidden_mlp: int = 32
     n_layers_mlp: int = 1
-    training: Optional[bool] = None
+    training: bool | None = None
     stop_gradients_mlp: bool = False
-    activation: Callable = nn.gelu
+    activation: callable = nn.gelu
 
     @nn.compact
     def __call__(
-        self, query_embed: NdArray, kv_embed: NdArray, training: Optional[bool] = None
+        self, query_embed: NdArray, kv_embed: NdArray, training: bool | None = None
     ):
         training = nn.merge_param("training", self.training, training)
         has_mc_samples = query_embed.ndim == 3
@@ -246,9 +248,9 @@ class FactorizedEmbedding(nn.Module):
     num_embeddings: int
     features: int
     factorized_features: int
-    dtype: Optional[Dtype] = None
+    dtype: Dtype | None = None
     param_dtype: Dtype = jnp.float32
-    embedding_init: Callable[[PRNGKey, Shape, Dtype], NdArray] = _normal_initializer
+    embedding_init: callable[[PRNGKey, Shape, Dtype], NdArray] = _normal_initializer
 
     embedding: NdArray = dataclasses.field(init=False)
 

@@ -1,4 +1,6 @@
-from typing import Any, Callable, Optional
+from __future__ import annotations
+
+from typing import Any
 
 import flax.linen as nn
 import jax
@@ -42,9 +44,9 @@ class _DecoderZX(nn.Module):
     n_out: int
     n_batch: int
     n_hidden: int = 128
-    activation: Callable = nn.softmax
+    activation: callable = nn.softmax
     dropout_rate: float = 0.1
-    training: Optional[bool] = None
+    training: bool | None = None
 
     @nn.compact
     def __call__(
@@ -52,8 +54,8 @@ class _DecoderZX(nn.Module):
         z: NdArray,
         batch_covariate: NdArray,
         size_factor: NdArray,
-        continuous_covariates: Optional[NdArray],
-        training: Optional[bool] = None,
+        continuous_covariates: NdArray | None,
+        training: bool | None = None,
     ) -> NegativeBinomial:
         h1 = Dense(self.n_out, use_bias=False, name="amat")(z)
         z_drop = nn.Dropout(self.dropout_rate)(
@@ -94,18 +96,18 @@ class _DecoderZXAttention(nn.Module):
     n_out: int
     n_batch: int
     n_latent_sample: int = 16
-    h_activation: Callable = nn.softmax
+    h_activation: callable = nn.softmax
     n_channels: int = 4
     n_heads: int = 2
     dropout_rate: float = 0.1
     stop_gradients: bool = False
     stop_gradients_mlp: bool = False
-    training: Optional[bool] = None
+    training: bool | None = None
     n_hidden: int = 32
     n_layers: int = 1
-    training: Optional[bool] = None
+    training: bool | None = None
     low_dim_batch: bool = True
-    activation: Callable = nn.gelu
+    activation: callable = nn.gelu
 
     @nn.compact
     def __call__(
@@ -113,8 +115,8 @@ class _DecoderZXAttention(nn.Module):
         z: NdArray,
         batch_covariate: NdArray,
         size_factor: NdArray,
-        continuous_covariates: Optional[NdArray],
-        training: Optional[bool] = None,
+        continuous_covariates: NdArray | None,
+        training: bool | None = None,
     ) -> NegativeBinomial:
         has_mc_samples = z.ndim == 3
         z_stop = z if not self.stop_gradients else jax.lax.stop_gradient(z)
@@ -166,12 +168,12 @@ class _DecoderZXAttention(nn.Module):
 class _EncoderUZ(nn.Module):
     n_latent: int
     n_sample: int
-    n_latent_u: Optional[int] = None
+    n_latent_u: int | None = None
     use_nonlinear: bool = False
-    n_factorized_embed_dims: Optional[int] = None
+    n_factorized_embed_dims: int | None = None
     dropout_rate: float = 0.0
-    training: Optional[bool] = None
-    activation: Callable = nn.gelu
+    training: bool | None = None
+    activation: callable = nn.gelu
 
     def setup(self):
         self.dropout = nn.Dropout(self.dropout_rate)
@@ -205,7 +207,7 @@ class _EncoderUZ(nn.Module):
         )
 
     def __call__(
-        self, u: NdArray, sample_covariate: NdArray, training: Optional[bool] = None
+        self, u: NdArray, sample_covariate: NdArray, training: bool | None = None
     ) -> jnp.ndarray:
         training = nn.merge_param("training", self.training, training)
         sample_covariate = sample_covariate.astype(int).flatten()
@@ -249,17 +251,17 @@ class _EncoderUZ(nn.Module):
 class _EncoderUZ2(nn.Module):
     n_latent: int
     n_sample: int
-    n_latent_u: Optional[int] = None
+    n_latent_u: int | None = None
     use_map: bool = False
     n_hidden: int = 32
     n_layers: int = 1
     stop_gradients: bool = False
-    training: Optional[bool] = None
-    activation: Callable = nn.gelu
+    training: bool | None = None
+    activation: callable = nn.gelu
 
     @nn.compact
     def __call__(
-        self, u: NdArray, sample_covariate: NdArray, training: Optional[bool] = None
+        self, u: NdArray, sample_covariate: NdArray, training: bool | None = None
     ):
         training = nn.merge_param("training", self.training, training)
         sample_covariate = sample_covariate.astype(int).flatten()
@@ -291,7 +293,7 @@ class _EncoderUZ2(nn.Module):
 class _EncoderUZ2Attention(nn.Module):
     n_latent: int
     n_sample: int
-    n_latent_u: Optional[int] = None
+    n_latent_u: int | None = None
     n_latent_sample: int = 16
     n_channels: int = 4
     n_heads: int = 2
@@ -301,12 +303,12 @@ class _EncoderUZ2Attention(nn.Module):
     use_map: bool = True
     n_hidden: int = 32
     n_layers: int = 1
-    training: Optional[bool] = None
-    activation: Callable = nn.gelu
+    training: bool | None = None
+    activation: callable = nn.gelu
 
     @nn.compact
     def __call__(
-        self, u: NdArray, sample_covariate: NdArray, training: Optional[bool] = None
+        self, u: NdArray, sample_covariate: NdArray, training: bool | None = None
     ):
         training = nn.merge_param("training", self.training, training)
         sample_covariate = sample_covariate.astype(int).flatten()
@@ -349,12 +351,12 @@ class _EncoderXU(nn.Module):
     n_sample: int
     n_hidden: int
     n_layers: int = 1
-    activation: Callable = nn.gelu
-    training: Optional[bool] = None
+    activation: callable = nn.gelu
+    training: bool | None = None
 
     @nn.compact
     def __call__(
-        self, x: NdArray, sample_covariate: NdArray, training: Optional[bool] = None
+        self, x: NdArray, sample_covariate: NdArray, training: bool | None = None
     ) -> dist.Normal:
         training = nn.merge_param("training", self.training, training)
         x_feat = jnp.log1p(x)
@@ -396,11 +398,11 @@ class MrVAE(JaxBaseModuleClass):
     scale_observations: bool = False
     px_nn_flavor: str = "attention"
     qz_nn_flavor: str = "attention"
-    px_kwargs: Optional[dict] = None
-    qz_kwargs: Optional[dict] = None
-    qu_kwargs: Optional[dict] = None
+    px_kwargs: dict | None = None
+    qz_kwargs: dict | None = None
+    qu_kwargs: dict | None = None
     training: bool = True
-    n_obs_per_sample: Optional[jnp.ndarray] = None
+    n_obs_per_sample: jnp.ndarray | None = None
 
     def setup(self):
         px_kwargs = DEFAULT_PX_KWARGS.copy()

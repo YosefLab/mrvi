@@ -1,5 +1,6 @@
+from __future__ import annotations
+
 from functools import partial
-from typing import Callable, Union
 
 import jax
 import jax.numpy as jnp
@@ -71,7 +72,7 @@ def simple_reciprocal(w, eps=1e-6):
 def geary_c(
     w: jnp.ndarray,
     x: jnp.ndarray,
-    similarity_fn: Callable,
+    similarity_fn: callable,
 ):
     """Computes Geary's C statistic from a distance matrix and a vector of values.
 
@@ -132,10 +133,10 @@ def nn_statistic(
 
 
 def compute_statistic(
-    distances: Union[np.ndarray, jnp.ndarray],
-    node_colors: Union[np.ndarray, jnp.ndarray],
+    distances: np.ndarray | jnp.ndarray,
+    node_colors: np.ndarray | jnp.ndarray,
     statistic: str = "geary",
-    similarity_fn: Callable = simple_reciprocal,
+    similarity_fn: callable = simple_reciprocal,
 ):
     """Computes a statistic for guided analyses.
 
@@ -166,11 +167,11 @@ def compute_statistic(
 
 
 def permutation_test(
-    distances: Union[np.ndarray, jnp.ndarray],
-    node_colors: Union[np.ndarray, jnp.ndarray],
+    distances: np.ndarray | jnp.ndarray,
+    node_colors: np.ndarray | jnp.ndarray,
     statistic: str = "geary",
-    similarity_fn: Callable = simple_reciprocal,
-    n_mc_samples: int = 1000,
+    similarity_fn: callable = simple_reciprocal,
+    n_mc_samples: int = 1_000,
     selected_tail: str = "greater",
     random_seed: int = 0,
     use_vmap: bool = True,

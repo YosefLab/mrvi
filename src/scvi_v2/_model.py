@@ -1,10 +1,12 @@
+from __future__ import annotations
+
 import logging
 import os
 import warnings
 from collections.abc import Sequence
 from copy import deepcopy
 from functools import partial
-from typing import Literal, Optional, Union
+from typing import Literal
 
 import jax
 import jax.numpy as jnp
@@ -133,7 +135,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         pass
 
     def _generate_stacked_rngs(
-        self, n_sets: Union[int, tuple]
+        self, n_sets: int | tuple
     ) -> dict[str, jax.random.PRNGKey]:
         return_1d = isinstance(n_sets, int)
         if return_1d:
@@ -161,11 +163,11 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
     def setup_anndata(
         cls,
         adata: AnnData,
-        layer: Optional[str] = None,
-        sample_key: Optional[str] = None,
-        batch_key: Optional[str] = None,
-        labels_key: Optional[str] = None,
-        continuous_covariate_keys: Optional[list[str]] = None,
+        layer: str | None = None,
+        sample_key: str | None = None,
+        batch_key: str | None = None,
+        labels_key: str | None = None,
+        continuous_covariate_keys: list[str] | None = None,
         **kwargs,
     ):
         setup_method_args = cls._get_setup_method_args(**locals())
@@ -197,14 +199,14 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
     def train(
         self,
-        max_epochs: Optional[int] = None,
-        accelerator: Optional[str] = "auto",
+        max_epochs: int | None = None,
+        accelerator: str | None = "auto",
         devices: int | list[int] | str = "auto",
         train_size: float = 0.9,
-        validation_size: Optional[float] = None,
+        validation_size: float | None = None,
         batch_size: int = 128,
         early_stopping: bool = False,
-        plan_kwargs: Optional[dict] = None,
+        plan_kwargs: dict | None = None,
         **trainer_kwargs,
     ):
         train_kwargs = dict(
@@ -226,9 +228,9 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
     def get_latent_representation(
         self,
-        adata: Optional[AnnData] = None,
+        adata: AnnData | None = None,
         indices=None,
-        batch_size: Optional[int] = None,
+        batch_size: int | None = None,
         use_mean: bool = True,
         give_z: bool = False,
     ) -> np.ndarray:
@@ -276,9 +278,9 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
     def compute_local_statistics(
         self,
         reductions: list[MrVIReduction],
-        adata: Optional[AnnData] = None,
-        indices: Optional[Sequence[int]] = None,
-        batch_size: Optional[int] = None,
+        adata: AnnData | None = None,
+        indices: Sequence[int] | None = None,
+        batch_size: int | None = None,
         use_vmap: bool = True,
         norm: str = "l2",
         mc_samples: int = 10,
@@ -639,8 +641,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
     def get_local_sample_representation(
         self,
-        adata: Optional[AnnData] = None,
-        indices: Optional[list[str]] = None,
+        adata: AnnData | None = None,
+        indices: list[str] | None = None,
         batch_size: int = 256,
         use_mean: bool = True,
         use_vmap: bool = True,
@@ -680,12 +682,12 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
     def get_local_sample_distances(
         self,
-        adata: Optional[AnnData] = None,
+        adata: AnnData | None = None,
         batch_size: int = 256,
         use_mean: bool = True,
         normalize_distances: bool = False,
         use_vmap: bool = True,
-        groupby: Optional[Union[list[str], str]] = None,
+        groupby: list[str] | str | None = None,
         keep_cell: bool = True,
         norm: str = "l2",
         mc_samples: int = 10,
@@ -769,8 +771,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
     def get_aggregated_posterior(
         self,
-        adata: Optional[AnnData] = None,
-        indices: Optional[list[str]] = None,
+        adata: AnnData | None = None,
+        indices: list[str] | None = None,
         batch_size: int = 256,
     ) -> dist.Distribution:
         """
@@ -817,7 +819,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         self,
         adata=None,
         flavor: Literal["ball", "ap", "MoG"] = "ball",
-        subsample_size: int = 5000,
+        subsample_size: int = 5_000,
         quantile_threshold: float = 0.05,
         admissibility_threshold: float = 0.0,
         minibatch_size: int = 256,
@@ -935,21 +937,21 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
     def perform_multivariate_analysis(
         self,
-        adata: Optional[AnnData] = None,
+        adata: AnnData | None = None,
         donor_keys: list[tuple] = None,
-        donor_subset: Optional[list[str]] = None,
+        donor_subset: list[str] | None = None,
         batch_size: int = 256,
         use_vmap: bool = True,
         normalize_design_matrix: bool = True,
         add_batch_specific_offsets: bool = False,
         mc_samples: int = 100,
         store_lfc: bool = False,
-        store_lfc_metadata_subset: Optional[list[str]] = None,
+        store_lfc_metadata_subset: list[str] | None = None,
         store_baseline: bool = False,
         eps_lfc: float = 1e-3,
         filter_donors: bool = False,
         lambd: float = 0.0,
-        delta: Optional[float] = 0.3,
+        delta: float | None = 0.3,
         **filter_donors_kwargs,
     ) -> xr.Dataset:
         """Utility function to perform cell-specific multivariate analysis.
@@ -1336,7 +1338,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         normalize_design_matrix: bool,
         add_batch_specific_offsets: bool,
         store_lfc: bool,
-        store_lfc_metadata_subset: Optional[list[str]] = None,
+        store_lfc_metadata_subset: list[str] | None = None,
     ):
         """
         Starting from a list of donor keys, construct a design matrix of donors and covariates.
@@ -1514,11 +1516,11 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
     def explore_stratifications(
         self,
         distances: xr.Dataset,
-        cell_type_keys: Optional[Union[str, list[str]]] = None,
+        cell_type_keys: list[str] | str | None = None,
         linkage_method: str = "complete",
-        figure_dir: Optional[str] = None,
+        figure_dir: str | None = None,
         show_figures: bool = False,
-        sample_metadata: Optional[Union[str, list[str]]] = None,
+        sample_metadata: list[str] | str | None = None,
         cmap_name: str = "tab10",
         cmap_requires_int: bool = True,
         **sns_kwargs,

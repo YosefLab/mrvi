@@ -1,4 +1,4 @@
-from typing import Union
+from __future__ import annotations
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -45,7 +45,7 @@ def convert_pandas_to_colors(
 
 
 def compute_dendrogram_from_distance_matrix(
-    distance_matrix: Union[np.ndarray, xr.DataArray],
+    distance_matrix: np.ndarray | xr.DataArray,
     linkage_method: str = "complete",
     symmetrize: bool = True,
 ):

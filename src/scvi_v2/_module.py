@@ -5,6 +5,7 @@ from typing import Any, Literal
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
+import numpy as np
 import numpyro.distributions as dist
 from scvi import REGISTRY_KEYS
 from scvi.distributions import JaxNegativeBinomialMeanDisp as NegativeBinomial
@@ -19,7 +20,6 @@ from ._components import (
     NormalDistOutputNN,
 )
 from ._constants import MRVI_REGISTRY_KEYS
-from ._types import NdArray
 
 DEFAULT_PX_KWARGS = {
     "n_hidden": 32,
@@ -56,10 +56,10 @@ class _DecoderZX(nn.Module):
     @nn.compact
     def __call__(
         self,
-        z: NdArray,
-        batch_covariate: NdArray,
-        size_factor: NdArray,
-        continuous_covariates: NdArray | None,
+        z: np.ndarray | jnp.ndarray,
+        batch_covariate: np.ndarray | jnp.ndarray,
+        size_factor: np.ndarray | jnp.ndarray,
+        continuous_covariates: np.ndarray | jnp.ndarray | None,
         training: bool | None = None,
     ) -> NegativeBinomial:
         h1 = Dense(self.n_out, use_bias=False, name="amat")(z)
@@ -117,10 +117,10 @@ class _DecoderZXAttention(nn.Module):
     @nn.compact
     def __call__(
         self,
-        z: NdArray,
-        batch_covariate: NdArray,
-        size_factor: NdArray,
-        continuous_covariates: NdArray | None,
+        z: np.ndarray | jnp.ndarray,
+        batch_covariate: np.ndarray | jnp.ndarray,
+        size_factor: np.ndarray | jnp.ndarray,
+        continuous_covariates: np.ndarray | jnp.ndarray | None,
         training: bool | None = None,
     ) -> NegativeBinomial:
         has_mc_samples = z.ndim == 3
@@ -212,7 +212,10 @@ class _EncoderUZ(nn.Module):
         )
 
     def __call__(
-        self, u: NdArray, sample_covariate: NdArray, training: bool | None = None
+        self,
+        u: np.ndarray | jnp.ndarray,
+        sample_covariate: np.ndarray | jnp.ndarray,
+        training: bool | None = None,
     ) -> jnp.ndarray:
         training = nn.merge_param("training", self.training, training)
         sample_covariate = sample_covariate.astype(int).flatten()
@@ -272,7 +275,10 @@ class _EncoderUZ2(nn.Module):
 
     @nn.compact
     def __call__(
-        self, u: NdArray, sample_covariate: NdArray, training: bool | None = None
+        self,
+        u: np.ndarray | jnp.ndarray,
+        sample_covariate: np.ndarray | jnp.ndarray,
+        training: bool | None = None,
     ):
         training = nn.merge_param("training", self.training, training)
         sample_covariate = sample_covariate.astype(int).flatten()
@@ -319,7 +325,10 @@ class _EncoderUZ2Attention(nn.Module):
 
     @nn.compact
     def __call__(
-        self, u: NdArray, sample_covariate: NdArray, training: bool | None = None
+        self,
+        u: np.ndarray | jnp.ndarray,
+        sample_covariate: np.ndarray | jnp.ndarray,
+        training: bool | None = None,
     ):
         training = nn.merge_param("training", self.training, training)
         sample_covariate = sample_covariate.astype(int).flatten()
@@ -367,7 +376,10 @@ class _EncoderXU(nn.Module):
 
     @nn.compact
     def __call__(
-        self, x: NdArray, sample_covariate: NdArray, training: bool | None = None
+        self,
+        x: np.ndarray | jnp.ndarray,
+        sample_covariate: np.ndarray | jnp.ndarray,
+        training: bool | None = None,
     ) -> dist.Normal:
         training = nn.merge_param("training", self.training, training)
         x_feat = jnp.log1p(x)
@@ -501,7 +513,9 @@ class MrVAE(JaxBaseModuleClass):
     def required_rngs(self):
         return ("params", "u", "dropout", "eps")
 
-    def _get_inference_input(self, tensors: dict[str, NdArray]) -> dict[str, Any]:
+    def _get_inference_input(
+        self, tensors: dict[str, np.ndarray | jnp.ndarray]
+    ) -> dict[str, Any]:
         x = tensors[REGISTRY_KEYS.X_KEY]
         sample_index = tensors[MRVI_REGISTRY_KEYS.SAMPLE_KEY]
         return {"x": x, "sample_index": sample_index}
@@ -548,7 +562,9 @@ class MrVAE(JaxBaseModuleClass):
         }
 
     def _get_generative_input(
-        self, tensors: dict[str, NdArray], inference_outputs: dict[str, Any]
+        self,
+        tensors: dict[str, np.ndarray | jnp.ndarray],
+        inference_outputs: dict[str, Any],
     ) -> dict[str, Any]:
         z = inference_outputs["z"]
         library = inference_outputs["library"]
@@ -590,7 +606,7 @@ class MrVAE(JaxBaseModuleClass):
 
     def loss(
         self,
-        tensors: dict[str, NdArray],
+        tensors: dict[str, np.ndarray | jnp.ndarray],
         inference_outputs: dict[str, Any],
         generative_outputs: dict[str, Any],
         kl_weight: float = 1.0,

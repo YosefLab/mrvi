@@ -15,4 +15,4 @@ __all__ = [
     "permutation_test",
 ]
 
-__version__ = version("scvi-v2")
+__version__ = version("mrvi")

@@ -1,8 +1,8 @@
 from tempfile import TemporaryDirectory
 
 import numpy as np
+from mrvi import MrVI
 from scvi.data import synthetic_iid
-from scvi_v2 import MrVI
 
 
 def test_mrvi():

@@ -1,9 +1,9 @@
+import mrvi
 import pytest
-import scvi_v2
 
 
 def test_package_has_version():
-    _ = scvi_v2.__version__
+    _ = mrvi.__version__
 
 
 @pytest.mark.skip(reason="This decorator should be removed when test passes.")

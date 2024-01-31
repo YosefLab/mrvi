@@ -1,11 +1,11 @@
-# scvi-v2
+# mrvi
 
 [![Tests][badge-tests]][link-tests]
 [![Documentation][badge-docs]][link-docs]
 
-[badge-tests]: https://img.shields.io/github/workflow/status/justjhong/scvi-v2/Test/main
-[link-tests]: https://github.com/YosefLab/scvi-v2/actions/workflows/test.yml
-[badge-docs]: https://img.shields.io/readthedocs/scvi-v2
+[badge-tests]: https://img.shields.io/github/workflow/status/justjhong/mrvi/Test/main
+[link-tests]: https://github.com/YosefLab/mrvi/actions/workflows/test.yml
+[badge-docs]: https://img.shields.io/readthedocs/mrvi
 
 V2 of single-cell Variational Inference.
 
@@ -20,20 +20,20 @@ Please refer to the [documentation][link-docs]. In particular, the
 You need to have Python 3.8 or newer installed on your system. If you don't have
 Python installed, we recommend installing [Miniconda](https://docs.conda.io/en/latest/miniconda.html).
 
-There are several alternative options to install scvi-v2:
+There are several alternative options to install mrvi:
 
 <!--
-1) Install the latest release of `scvi-v2` from `PyPI <https://pypi.org/project/scvi-v2/>`_:
+1) Install the latest release of `mrvi` from `PyPI <https://pypi.org/project/mrvi/>`_:
 
 ```bash
-pip install scvi-v2
+pip install mrvi
 ```
 -->
 
 1. Install the latest development version:
 
 ```bash
-pip install git+https://github.com/justjhong/scvi-v2.git@main
+pip install git+https://github.com/justjhong/mrvi.git@main
 ```
 
 ## Release notes
@@ -50,7 +50,7 @@ If you found a bug, please use the [issue tracker][issue-tracker].
 > t.b.a
 
 [scverse-discourse]: https://discourse.scverse.org/
-[issue-tracker]: https://github.com/justjhong/scvi-v2/issues
-[changelog]: https://scvi-v2.readthedocs.io/latest/changelog.html
-[link-docs]: https://scvi-v2.readthedocs.io
-[link-api]: https://scvi-v2.readthedocs.io/latest/api.html
+[issue-tracker]: https://github.com/justjhong/mrvi/issues
+[changelog]: https://mrvi.readthedocs.io/latest/changelog.html
+[link-docs]: https://mrvi.readthedocs.io
+[link-api]: https://mrvi.readthedocs.io/latest/api.html

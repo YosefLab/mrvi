@@ -4,7 +4,7 @@ requires = ["hatchling"]
 
 
 [project]
-name = "scvi-v2"
+name = "mrvi"
 version = "0.0.1"
 description = "Multi-resolution Variational Inference"
 readme = "README.md"
@@ -16,9 +16,9 @@ authors = [
 maintainers = [
     {name = "Justin Hong", email = "justin.hong@columbia.edu"},
 ]
-urls.Documentation = "https://scvi-v2.readthedocs.io/"
-urls.Source = "https://github.com/YosefLab/scvi-v2"
-urls.Home-page = "https://github.com/YosefLab/scvi-v2"
+urls.Documentation = "https://mrvi.readthedocs.io/"
+urls.Source = "https://github.com/YosefLab/mrvi"
+urls.Home-page = "https://github.com/YosefLab/mrvi"
 dependencies = [
     "scvi-tools>=1.0.0",
     "seaborn>=0.12.1",
@@ -47,7 +47,7 @@ test = [
 ]
 
 [tool.coverage.run]
-source = ["scvi_v2"]
+source = ["mrvi"]
 omit = [
     "**/test_*.py",
 ]

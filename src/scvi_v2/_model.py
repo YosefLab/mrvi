@@ -201,6 +201,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
     def train(
         self,
         max_epochs: int | None = None,
+        accelerator: str | None = "auto",
+        devices: int | list[int] | str = "auto",
         train_size: float = 0.9,
         validation_size: float | None = None,
         batch_size: int = 128,
@@ -210,6 +212,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
     ):
         train_kwargs = dict(
             max_epochs=max_epochs,
+            accelerator=accelerator,
+            devices=devices,
             train_size=train_size,
             validation_size=validation_size,
             batch_size=batch_size,

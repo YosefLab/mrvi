@@ -1,14 +1,17 @@
+from __future__ import annotations
+
 import dataclasses
-from typing import Any, Callable, Literal, Optional
+from typing import Any, Literal
 
 import flax.linen as nn
 import jax
 import jax.numpy as jnp
+import numpy as np
 import numpyro.distributions as dist
 from flax.linen.dtypes import promote_dtype
 from flax.linen.initializers import variance_scaling
 
-from ._types import Dtype, NdArray, PRNGKey, Shape
+from ._types import Dtype, PRNGKey, Shape
 
 _normal_initializer = jax.nn.initializers.normal(stddev=0.1)
 
@@ -30,12 +33,14 @@ class ResnetBlock(nn.Module):
 
     n_out: int
     n_hidden: int = 128
-    internal_activation: Callable = nn.relu
-    output_activation: Callable = nn.relu
-    training: Optional[bool] = None
+    internal_activation: callable = nn.relu
+    output_activation: callable = nn.relu
+    training: bool | None = None
 
     @nn.compact
-    def __call__(self, inputs: NdArray, training: Optional[bool] = None) -> NdArray:  # noqa: D102
+    def __call__(
+        self, inputs: np.ndarray | jnp.ndarray, training: bool | None = None
+    ) -> np.ndarray | jnp.ndarray:
         training = nn.merge_param("training", self.training, training)
         h = Dense(self.n_hidden)(inputs)
         h = nn.LayerNorm()(h)
@@ -56,16 +61,20 @@ class MLP(nn.Module):
     n_out: int
     n_hidden: int = 128
     n_layers: int = 1
-    activation: Callable = nn.relu
-    training: Optional[bool] = None
+    activation: callable = nn.relu
+    training: bool | None = None
 
     @nn.compact
-    def __call__(self, inputs: NdArray, training: Optional[bool] = None) -> dist.Normal:  # noqa: D102
+    def __call__(
+        self, inputs: np.ndarray | jnp.ndarray, training: bool | None = None
+    ) -> dist.Normal:
         training = nn.merge_param("training", self.training, training)
         h = inputs
         for _ in range(self.n_layers):
             h = ResnetBlock(
-                n_out=self.n_hidden, internal_activation=self.activation, output_activation=self.activation
+                n_out=self.n_hidden,
+                internal_activation=self.activation,
+                output_activation=self.activation,
             )(h, training=training)
         return Dense(self.n_out)(h)
 
@@ -77,10 +86,12 @@ class NormalDistOutputNN(nn.Module):
     n_hidden: int = 128
     n_layers: int = 1
     scale_eps: float = 1e-5
-    training: Optional[bool] = None
+    training: bool | None = None
 
     @nn.compact
-    def __call__(self, inputs: NdArray, training: Optional[bool] = None) -> dist.Normal:  # noqa: D102
+    def __call__(
+        self, inputs: np.ndarray | jnp.ndarray, training: bool | None = None
+    ) -> dist.Normal:
         training = nn.merge_param("training", self.training, training)
         h = inputs
         for _ in range(self.n_layers):
@@ -95,12 +106,14 @@ class ConditionalNormalization(nn.Module):
 
     n_features: int
     n_conditions: int
-    training: Optional[bool] = None
+    training: bool | None = None
     normalization_type: Literal["batch", "layer"] = "layer"
 
     @staticmethod
     def _gamma_initializer() -> jax.nn.initializers.Initializer:
-        def init(key: jax.random.KeyArray, shape: tuple, dtype: Any = jnp.float_) -> jnp.ndarray:
+        def init(
+            key: jax.random.KeyArray, shape: tuple, dtype: Any = jnp.float_
+        ) -> jnp.ndarray:
             weights = jax.random.normal(key, shape, dtype) * 0.02 + 1
             return weights
 
@@ -108,7 +121,9 @@ class ConditionalNormalization(nn.Module):
 
     @staticmethod
     def _beta_initializer() -> jax.nn.initializers.Initializer:
-        def init(key: jax.random.KeyArray, shape: tuple, dtype: Any = jnp.float_) -> jnp.ndarray:
+        def init(
+            key: jax.random.KeyArray, shape: tuple, dtype: Any = jnp.float_
+        ) -> jnp.ndarray:
             del key
             weights = jnp.zeros(shape, dtype=dtype)
             return weights
@@ -116,20 +131,35 @@ class ConditionalNormalization(nn.Module):
         return init
 
     @nn.compact
-    def __call__(self, x: NdArray, condition: NdArray, training: Optional[bool] = None) -> jnp.ndarray:  # noqa: D102
+    def __call__(
+        self,
+        x: np.ndarray | jnp.ndarray,
+        condition: np.ndarray | jnp.ndarray,
+        training: bool | None = None,
+    ) -> jnp.ndarray:
         training = nn.merge_param("training", self.training, training)
         if self.normalization_type == "batch":
-            x = nn.BatchNorm(use_bias=False, use_scale=False)(x, use_running_average=not training)
+            x = nn.BatchNorm(use_bias=False, use_scale=False)(
+                x, use_running_average=not training
+            )
         elif self.normalization_type == "layer":
             x = nn.LayerNorm(use_bias=False, use_scale=False)(x)
         else:
-            raise ValueError(f"normalization_type must be one of ['batch', 'layer'], not {self.normalization_type}")
+            raise ValueError(
+                f"normalization_type must be one of ['batch', 'layer'], not {self.normalization_type}"
+            )
         cond_int = condition.squeeze(-1).astype(int)
         gamma = nn.Embed(
-            self.n_conditions, self.n_features, embedding_init=self._gamma_initializer(), name="gamma_conditional"
+            self.n_conditions,
+            self.n_features,
+            embedding_init=self._gamma_initializer(),
+            name="gamma_conditional",
         )(cond_int)
         beta = nn.Embed(
-            self.n_conditions, self.n_features, embedding_init=self._beta_initializer(), name="beta_conditional"
+            self.n_conditions,
+            self.n_features,
+            embedding_init=self._beta_initializer(),
+            name="beta_conditional",
         )(cond_int)
         out = gamma * x + beta
 
@@ -147,17 +177,28 @@ class AttentionBlock(nn.Module):
     dropout_rate: float = 0.0
     n_hidden_mlp: int = 32
     n_layers_mlp: int = 1
-    training: Optional[bool] = None
+    training: bool | None = None
     stop_gradients_mlp: bool = False
-    activation: Callable = nn.gelu
+    activation: callable = nn.gelu
 
     @nn.compact
-    def __call__(self, query_embed: NdArray, kv_embed: NdArray, training: Optional[bool] = None):
+    def __call__(
+        self,
+        query_embed: np.ndarray | jnp.ndarray,
+        kv_embed: np.ndarray | jnp.ndarray,
+        training: bool | None = None,
+    ):
         training = nn.merge_param("training", self.training, training)
         has_mc_samples = query_embed.ndim == 3
 
-        query_embed_stop = query_embed if not self.stop_gradients_mlp else jax.lax.stop_gradient(query_embed)
-        query_for_att = nn.DenseGeneral((self.outerprod_dim, 1), use_bias=False)(query_embed_stop)
+        query_embed_stop = (
+            query_embed
+            if not self.stop_gradients_mlp
+            else jax.lax.stop_gradient(query_embed)
+        )
+        query_for_att = nn.DenseGeneral((self.outerprod_dim, 1), use_bias=False)(
+            query_embed_stop
+        )
         kv_for_att = nn.DenseGeneral((self.outerprod_dim, 1), use_bias=False)(kv_embed)
         eps = nn.MultiHeadDotProductAttention(
             num_heads=self.n_heads,
@@ -172,7 +213,9 @@ class AttentionBlock(nn.Module):
         if not has_mc_samples:
             eps = jnp.reshape(eps, (eps.shape[0], eps.shape[1] * eps.shape[2]))
         else:
-            eps = jnp.reshape(eps, (eps.shape[0], eps.shape[1], eps.shape[2] * eps.shape[3]))
+            eps = jnp.reshape(
+                eps, (eps.shape[0], eps.shape[1], eps.shape[2] * eps.shape[3])
+            )
 
         eps_ = MLP(
             n_out=self.outerprod_dim,
@@ -218,16 +261,21 @@ class FactorizedEmbedding(nn.Module):
     num_embeddings: int
     features: int
     factorized_features: int
-    dtype: Optional[Dtype] = None
+    dtype: Dtype | None = None
     param_dtype: Dtype = jnp.float32
-    embedding_init: Callable[[PRNGKey, Shape, Dtype], NdArray] = _normal_initializer
+    embedding_init: callable[
+        [PRNGKey, Shape, Dtype], np.ndarray | jnp.ndarray
+    ] = _normal_initializer
 
-    embedding: NdArray = dataclasses.field(init=False)
+    embedding: np.ndarray | jnp.ndarray = dataclasses.field(init=False)
 
     def setup(self) -> None:
         """Initialize the embedding matrix."""
         self.embedding = self.param(
-            "embedding", self.embedding_init, (self.num_embeddings, self.factorized_features), self.param_dtype
+            "embedding",
+            self.embedding_init,
+            (self.num_embeddings, self.factorized_features),
+            self.param_dtype,
         )
         self.factor_tensor = self.param(
             "factor_tensor",
@@ -236,7 +284,7 @@ class FactorizedEmbedding(nn.Module):
             self.param_dtype,
         )
 
-    def __call__(self, inputs: NdArray) -> NdArray:
+    def __call__(self, inputs: np.ndarray | jnp.ndarray) -> np.ndarray | jnp.ndarray:
         """
         Embeds the inputs along the last dimension.
 
@@ -255,6 +303,8 @@ class FactorizedEmbedding(nn.Module):
         # Use take because fancy indexing numpy arrays with JAX indices does not
         # work correctly.
         (embedding,) = promote_dtype(self.embedding, dtype=self.dtype, inexact=False)
-        (factor_tensor,) = promote_dtype(self.factor_tensor, dtype=self.dtype, inexact=False)
+        (factor_tensor,) = promote_dtype(
+            self.factor_tensor, dtype=self.dtype, inexact=False
+        )
         final_embedding = jnp.dot(embedding, factor_tensor)
         return jnp.take(final_embedding, inputs, axis=0)

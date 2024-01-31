@@ -1,5 +1,6 @@
+from __future__ import annotations
+
 from functools import partial
-from typing import Callable, List, Union
 
 import jax
 import jax.numpy as jnp
@@ -9,7 +10,7 @@ from ._types import MrVIReduction, _ComputeLocalStatisticsRequirements
 
 
 def _parse_local_statistics_requirements(
-    reductions: List[MrVIReduction],
+    reductions: list[MrVIReduction],
 ) -> _ComputeLocalStatisticsRequirements:
     needs_mean_rep = False
     needs_sampled_rep = False
@@ -71,7 +72,7 @@ def simple_reciprocal(w, eps=1e-6):
 def geary_c(
     w: jnp.ndarray,
     x: jnp.ndarray,
-    similarity_fn: Callable,
+    similarity_fn: callable,
 ):
     """Computes Geary's C statistic from a distance matrix and a vector of values.
 
@@ -132,10 +133,10 @@ def nn_statistic(
 
 
 def compute_statistic(
-    distances: Union[np.ndarray, jnp.ndarray],
-    node_colors: Union[np.ndarray, jnp.ndarray],
+    distances: np.ndarray | jnp.ndarray,
+    node_colors: np.ndarray | jnp.ndarray,
     statistic: str = "geary",
-    similarity_fn: Callable = simple_reciprocal,
+    similarity_fn: callable = simple_reciprocal,
 ):
     """Computes a statistic for guided analyses.
 
@@ -166,11 +167,11 @@ def compute_statistic(
 
 
 def permutation_test(
-    distances: Union[np.ndarray, jnp.ndarray],
-    node_colors: Union[np.ndarray, jnp.ndarray],
+    distances: np.ndarray | jnp.ndarray,
+    node_colors: np.ndarray | jnp.ndarray,
     statistic: str = "geary",
-    similarity_fn: Callable = simple_reciprocal,
-    n_mc_samples: int = 1000,
+    similarity_fn: callable = simple_reciprocal,
+    n_mc_samples: int = 1_000,
     selected_tail: str = "greater",
     random_seed: int = 0,
     use_vmap: bool = True,
@@ -196,7 +197,9 @@ def permutation_test(
     use_vmap
         whether or not to use vmap to compute pvalues
     """
-    t_obs = compute_statistic(distances, node_colors, statistic=statistic, similarity_fn=similarity_fn)
+    t_obs = compute_statistic(
+        distances, node_colors, statistic=statistic, similarity_fn=similarity_fn
+    )
     t_perm = []
 
     key = jax.random.PRNGKey(random_seed)
@@ -208,7 +211,9 @@ def permutation_test(
         return compute_statistic(w, x_, statistic=statistic, similarity_fn=similarity_fn)
 
     if use_vmap:
-        t_perm = jax.vmap(permute_compute, in_axes=(None, None, 0), out_axes=0)(distances, node_colors, keys)
+        t_perm = jax.vmap(permute_compute, in_axes=(None, None, 0), out_axes=0)(
+            distances, node_colors, keys
+        )
     else:
         permute_compute_bound = lambda key: permute_compute(distances, node_colors, key)
         t_perm = jax.lax.map(permute_compute_bound, keys)

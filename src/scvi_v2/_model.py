@@ -269,12 +269,15 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         for array_dict in tqdm(scdl):
             outputs = jit_inference_fn(self.module.rngs, array_dict)
 
-            us.append(outputs["u"])
-            zs.append(outputs["z"])
+            if give_z:
+                zs.append(jax.device_get(outputs["z"]))
+            else:
+                us.append(jax.device_get(outputs["u"]))
 
-        u = np.array(jax.device_get(jnp.concatenate(us, axis=0)))
-        z = np.array(jax.device_get(jnp.concatenate(zs, axis=0)))
-        return z if give_z else u
+        if give_z:
+            return np.array(jnp.concatenate(zs, axis=0))
+        else:
+            return np.array(jnp.concatenate(us, axis=0))
 
     def compute_local_statistics(
         self,

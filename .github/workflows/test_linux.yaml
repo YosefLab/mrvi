@@ -44,7 +44,7 @@ jobs:
 
       - name: Install scvi-tools from main
         run: |
-          pip install --no-cache-dir "scvi-tools @ git+https://github.com/scverse/scvi-tools@main"
+          pip install --no-cache-dir "scvi-tools[criticism] @ git+https://github.com/scverse/scvi-tools@main"
 
       - name: Install dependencies
         run: |

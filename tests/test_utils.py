@@ -1,5 +1,5 @@
 import numpy as np
-from scvi_v2._utils import compute_statistic, permutation_test
+from mrvi._utils import compute_statistic, permutation_test
 from sklearn.metrics import pairwise_distances
 
 

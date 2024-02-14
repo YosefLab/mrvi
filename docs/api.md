@@ -3,8 +3,8 @@
 ## Preprocessing
 
 ```{eval-rst}
-.. module:: scvi_v2.pp
-.. currentmodule:: scvi_v2
+.. module:: mrvi.pp
+.. currentmodule:: mrvi
 
 .. autosummary::
     :toctree: generated
@@ -15,8 +15,8 @@
 ## Tools
 
 ```{eval-rst}
-.. module:: scvi_v2.tl
-.. currentmodule:: scvi_v2
+.. module:: mrvi.tl
+.. currentmodule:: mrvi
 
 .. autosummary::
     :toctree: generated
@@ -27,8 +27,8 @@
 ## Plotting
 
 ```{eval-rst}
-.. module:: scvi_v2.pl
-.. currentmodule:: scvi_v2
+.. module:: mrvi.pl
+.. currentmodule:: mrvi
 
 .. autosummary::
     :toctree: generated

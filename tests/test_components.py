@@ -1,6 +1,6 @@
 import jax
 import jax.numpy as jnp
-from scvi_v2._components import (
+from mrvi._components import (
     AttentionBlock,
     ConditionalNormalization,
     Dense,

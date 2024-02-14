@@ -20,7 +20,7 @@ urls.Documentation = "https://mrvi.readthedocs.io/"
 urls.Source = "https://github.com/YosefLab/mrvi"
 urls.Home-page = "https://github.com/YosefLab/mrvi"
 dependencies = [
-    "scvi-tools>=1.1.0rc2",
+    "scvi-tools[criticism]>=1.1.0",  # criticism for sparse and xarray
     "seaborn>=0.12.1",
     "statsmodels>=0.13.0",
 ]

@@ -1,9 +1,12 @@
+from __future__ import annotations
+
 import logging
 import os
 import warnings
+from collections.abc import Sequence
 from copy import deepcopy
 from functools import partial
-from typing import Dict, List, Literal, Optional, Sequence, Tuple, Union
+from typing import Literal
 
 import jax
 import jax.numpy as jnp
@@ -27,6 +30,7 @@ from sklearn.mixture import GaussianMixture
 from statsmodels.stats.multitest import multipletests
 from tqdm import tqdm
 
+from ._components import MLP
 from ._constants import MRVI_REGISTRY_KEYS
 from ._module import MrVAE
 from ._tree_utils import (
@@ -44,12 +48,19 @@ from ._utils import (
 logger = logging.getLogger(__name__)
 
 DEFAULT_TRAIN_KWARGS = {
+    "max_epochs": 100,
     "early_stopping": True,
     "early_stopping_patience": 15,
     "check_val_every_n_epoch": 1,
-    "batch_size": 128,
+    "batch_size": 256,
     "train_size": 0.9,
-    "plan_kwargs": {"lr": 1e-2, "n_epochs_kl_warmup": 400, "max_norm": 40, "eps": 1e-8, "weight_decay": 1e-8},
+    "plan_kwargs": {
+        "lr": 2e-3,
+        "n_epochs_kl_warmup": 20,
+        "max_norm": 40,
+        "eps": 1e-8,
+        "weight_decay": 1e-8,
+    },
 }
 
 
@@ -91,12 +102,18 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         obs_df = obs_df.loc[~obs_df._scvi_sample.duplicated("first")]
         self.donor_info = obs_df.set_index("_scvi_sample").sort_index()
         self.sample_key = self.adata_manager.get_state_registry("sample").original_key
-        self.sample_order = self.adata_manager.get_state_registry(MRVI_REGISTRY_KEYS.SAMPLE_KEY).categorical_mapping
+        self.sample_order = self.adata_manager.get_state_registry(
+            MRVI_REGISTRY_KEYS.SAMPLE_KEY
+        ).categorical_mapping
 
-        self.n_obs_per_sample = jnp.array(adata.obs._scvi_sample.value_counts().sort_index().values)
+        self.n_obs_per_sample = jnp.array(
+            adata.obs._scvi_sample.value_counts().sort_index().values
+        )
 
         self.data_splitter = None
-        self.can_compute_normalized_dists = model_kwargs.get("qz_nn_flavor", "linear") == "linear"
+        self.can_compute_normalized_dists = (
+            model_kwargs.get("qz_nn_flavor", "linear") == "linear"
+        )
         self.module = MrVAE(
             n_input=self.summary_stats.n_vars,
             n_sample=n_sample,
@@ -106,17 +123,21 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             n_obs_per_sample=self.n_obs_per_sample,
             **model_kwargs,
         )
-        self.can_compute_normalized_dists = (model_kwargs.get("qz_nn_flavor", "linear") == "linear") and (
+        self.can_compute_normalized_dists = (
+            model_kwargs.get("qz_nn_flavor", "linear") == "linear"
+        ) and (
             (model_kwargs.get("n_latent_u", None) is None)
             or (model_kwargs.get("n_latent", 10) == model_kwargs.get("n_latent_u", None))
         )
         self.init_params_ = self._get_init_params(locals())
 
-    def to_device(self, device):  # noqa: #D102
+    def to_device(self, device):
         # TODO(jhong): remove this once we have a better way to handle device.
         pass
 
-    def _generate_stacked_rngs(self, n_sets: Union[int, tuple]) -> Dict[str, jax.random.PRNGKey]:
+    def _generate_stacked_rngs(
+        self, n_sets: int | tuple
+    ) -> dict[str, jax.random.PRNGKey]:
         return_1d = isinstance(n_sets, int)
         if return_1d:
             n_sets_1d = n_sets
@@ -125,24 +146,29 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         rngs_list = [self.module.rngs for _ in range(n_sets_1d)]
         # Combine list of RNG dicts into a single list. This is necessary for vmap/map.
         rngs = {
-            required_rng: jnp.concatenate([rngs_dict[required_rng][None] for rngs_dict in rngs_list], axis=0)
+            required_rng: jnp.concatenate(
+                [rngs_dict[required_rng][None] for rngs_dict in rngs_list], axis=0
+            )
             for required_rng in self.module.required_rngs
         }
         if not return_1d:
             # Reshaping the random keys to the desired shape in
             # the case of multiple sets.
-            rngs = {key: random_key.reshape(n_sets + random_key.shape[1:]) for (key, random_key) in rngs.items()}
+            rngs = {
+                key: random_key.reshape(n_sets + random_key.shape[1:])
+                for (key, random_key) in rngs.items()
+            }
         return rngs
 
     @classmethod
-    def setup_anndata(  # noqa: #D102
+    def setup_anndata(
         cls,
         adata: AnnData,
-        layer: Optional[str] = None,
-        sample_key: Optional[str] = None,
-        batch_key: Optional[str] = None,
-        labels_key: Optional[str] = None,
-        continuous_covariate_keys: Optional[List[str]] = None,
+        layer: str | None = None,
+        sample_key: str | None = None,
+        batch_key: str | None = None,
+        labels_key: str | None = None,
+        continuous_covariate_keys: list[str] | None = None,
         **kwargs,
     ):
         setup_method_args = cls._get_setup_method_args(**locals())
@@ -153,7 +179,9 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             CategoricalObsField(MRVI_REGISTRY_KEYS.SAMPLE_KEY, sample_key),
             CategoricalObsField(REGISTRY_KEYS.BATCH_KEY, batch_key),
             CategoricalObsField(REGISTRY_KEYS.LABELS_KEY, labels_key),
-            NumericalJointObsField(REGISTRY_KEYS.CONT_COVS_KEY, continuous_covariate_keys),
+            NumericalJointObsField(
+                REGISTRY_KEYS.CONT_COVS_KEY, continuous_covariate_keys
+            ),
             NumericalObsField(REGISTRY_KEYS.INDICES_KEY, "_indices"),
         ]
         if labels_key is None:
@@ -164,24 +192,28 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 sr["field_registries"][REGISTRY_KEYS.LABELS_KEY] = {
                     "state_registry": {"categorical_mapping": np.array([0])}
                 }
-        adata_manager = AnnDataManager(fields=anndata_fields, setup_method_args=setup_method_args)
+        adata_manager = AnnDataManager(
+            fields=anndata_fields, setup_method_args=setup_method_args
+        )
         adata_manager.register_fields(adata, **kwargs)
         cls.register_manager(adata_manager)
 
-    def train(  # noqa: #D102
+    def train(
         self,
-        max_epochs: Optional[int] = None,
-        use_gpu: Optional[Union[str, int, bool]] = None,
+        max_epochs: int | None = None,
+        accelerator: str | None = "auto",
+        devices: int | list[int] | str = "auto",
         train_size: float = 0.9,
-        validation_size: Optional[float] = None,
+        validation_size: float | None = None,
         batch_size: int = 128,
         early_stopping: bool = False,
-        plan_kwargs: Optional[dict] = None,
+        plan_kwargs: dict | None = None,
         **trainer_kwargs,
     ):
         train_kwargs = dict(
             max_epochs=max_epochs,
-            use_gpu=use_gpu,
+            accelerator=accelerator,
+            devices=devices,
             train_size=train_size,
             validation_size=validation_size,
             batch_size=batch_size,
@@ -190,14 +222,16 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         )
         train_kwargs = dict(deepcopy(DEFAULT_TRAIN_KWARGS), **train_kwargs)
         plan_kwargs = plan_kwargs or {}
-        train_kwargs["plan_kwargs"] = dict(deepcopy(DEFAULT_TRAIN_KWARGS["plan_kwargs"]), **plan_kwargs)
+        train_kwargs["plan_kwargs"] = dict(
+            deepcopy(DEFAULT_TRAIN_KWARGS["plan_kwargs"]), **plan_kwargs
+        )
         super().train(**train_kwargs)
 
     def get_latent_representation(
         self,
-        adata: Optional[AnnData] = None,
+        adata: AnnData | None = None,
         indices=None,
-        batch_size: Optional[int] = None,
+        batch_size: int | None = None,
         use_mean: bool = True,
         give_z: bool = False,
     ) -> np.ndarray:
@@ -223,27 +257,34 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         """
         self._check_if_trained(warn=False)
         adata = self._validate_anndata(adata)
-        scdl = self._make_data_loader(adata=adata, indices=indices, batch_size=batch_size, iter_ndarray=True)
+        scdl = self._make_data_loader(
+            adata=adata, indices=indices, batch_size=batch_size, iter_ndarray=True
+        )
 
         us = []
         zs = []
-        jit_inference_fn = self.module.get_jit_inference_fn(inference_kwargs={"use_mean": use_mean})
+        jit_inference_fn = self.module.get_jit_inference_fn(
+            inference_kwargs={"use_mean": use_mean}
+        )
         for array_dict in tqdm(scdl):
             outputs = jit_inference_fn(self.module.rngs, array_dict)
 
-            us.append(outputs["u"])
-            zs.append(outputs["z"])
+            if give_z:
+                zs.append(jax.device_get(outputs["z"]))
+            else:
+                us.append(jax.device_get(outputs["u"]))
 
-        u = np.array(jax.device_get(jnp.concatenate(us, axis=0)))
-        z = np.array(jax.device_get(jnp.concatenate(zs, axis=0)))
-        return z if give_z else u
+        if give_z:
+            return np.array(jnp.concatenate(zs, axis=0))
+        else:
+            return np.array(jnp.concatenate(us, axis=0))
 
     def compute_local_statistics(
         self,
-        reductions: List[MrVIReduction],
-        adata: Optional[AnnData] = None,
-        indices: Optional[Sequence[int]] = None,
-        batch_size: Optional[int] = None,
+        reductions: list[MrVIReduction],
+        adata: AnnData | None = None,
+        indices: Sequence[int] | None = None,
+        batch_size: int | None = None,
         use_vmap: bool = True,
         norm: str = "l2",
         mc_samples: int = 10,
@@ -282,7 +323,9 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         adata.obs["_indices"] = np.arange(adata.n_obs).astype(int)
 
         adata = self._validate_anndata(adata)
-        scdl = self._make_data_loader(adata=adata, indices=indices, batch_size=batch_size, iter_ndarray=True)
+        scdl = self._make_data_loader(
+            adata=adata, indices=indices, batch_size=batch_size, iter_ndarray=True
+        )
         n_sample = self.summary_stats.n_sample
 
         reqs = _parse_local_statistics_requirements(reductions)
@@ -325,19 +368,26 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                     rngs, cf_sample = pair
                     return inference_fn(rngs, cf_sample)
 
-                return jax.lax.transpose(jax.lax.map(per_sample_inference_fn, (stacked_rngs, cf_sample)), (1, 0, 2))
+                return jax.lax.transpose(
+                    jax.lax.map(per_sample_inference_fn, (stacked_rngs, cf_sample)),
+                    (1, 0, 2),
+                )
 
         ungrouped_data_arrs = {}
         grouped_data_arrs = {}
         for ur in reqs.ungrouped_reductions:
             ungrouped_data_arrs[ur.name] = []
         for gr in reqs.grouped_reductions:
-            grouped_data_arrs[gr.name] = {}  # Will map group category to running group sum.
+            grouped_data_arrs[
+                gr.name
+            ] = {}  # Will map group category to running group sum.
 
         for array_dict in tqdm(scdl):
             indices = array_dict[REGISTRY_KEYS.INDICES_KEY].astype(int).flatten()
             n_cells = array_dict[REGISTRY_KEYS.X_KEY].shape[0]
-            cf_sample = np.broadcast_to(np.arange(n_sample)[:, None, None], (n_sample, n_cells, 1))
+            cf_sample = np.broadcast_to(
+                np.arange(n_sample)[:, None, None], (n_sample, n_cells, 1)
+            )
             inf_inputs = self.module._get_inference_input(
                 array_dict,
             )
@@ -355,7 +405,10 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 mean_zs = xr.DataArray(
                     mean_zs_,
                     dims=["cell_name", "sample", "latent_dim"],
-                    coords={"cell_name": self.adata.obs_names[indices], "sample": self.sample_order},
+                    coords={
+                        "cell_name": self.adata.obs_names[indices],
+                        "sample": self.sample_order,
+                    },
                     name="sample_representations",
                 )
             if reqs.needs_sampled_representations:
@@ -371,29 +424,40 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 sampled_zs = xr.DataArray(
                     sampled_zs_,
                     dims=["cell_name", "mc_sample", "sample", "latent_dim"],
-                    coords={"cell_name": self.adata.obs_names[indices], "sample": self.sample_order},
+                    coords={
+                        "cell_name": self.adata.obs_names[indices],
+                        "sample": self.sample_order,
+                    },
                     name="sample_representations",
                 )
 
             if reqs.needs_mean_distances:
-                mean_dists = self._compute_distances_from_representations(mean_zs_, indices, norm=norm)
+                mean_dists = self._compute_distances_from_representations(
+                    mean_zs_, indices, norm=norm
+                )
 
             if reqs.needs_sampled_distances or reqs.needs_normalized_distances:
-                sampled_dists = self._compute_distances_from_representations(sampled_zs_, indices, norm=norm)
+                sampled_dists = self._compute_distances_from_representations(
+                    sampled_zs_, indices, norm=norm
+                )
 
                 if reqs.needs_normalized_distances:
                     if norm != "l2":
-                        raise ValueError(f"Norm must be 'l2' when using normalized distances. Got {norm}.")
-                    normalization_means, normalization_vars = self._compute_local_baseline_dists(
+                        raise ValueError(
+                            f"Norm must be 'l2' when using normalized distances. Got {norm}."
+                        )
+                    (
+                        normalization_means,
+                        normalization_vars,
+                    ) = self._compute_local_baseline_dists(
                         array_dict, mc_samples=mc_samples
                     )  # both are shape (n_cells,)
                     normalization_means = normalization_means.reshape(-1, 1, 1, 1)
                     normalization_vars = normalization_vars.reshape(-1, 1, 1, 1)
                     normalized_dists = (
-                        np.clip(sampled_dists - normalization_means, a_min=0, a_max=None) / (normalization_vars**0.5)
-                    ).mean(
-                        dim="mc_sample"
-                    )  # (n_cells, n_samples, n_samples)
+                        np.clip(sampled_dists - normalization_means, a_min=0, a_max=None)
+                        / (normalization_vars**0.5)
+                    ).mean(dim="mc_sample")  # (n_cells, n_samples, n_samples)
 
             # Compute each reduction
             for r in reductions:
@@ -417,9 +481,13 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                     group_by_cats = group_by.unique()
                     for cat in group_by_cats:
                         cat_summed_outputs = outputs.sel(
-                            cell_name=self.adata.obs_names[indices][group_by == cat].values
+                            cell_name=self.adata.obs_names[indices][
+                                group_by == cat
+                            ].values
                         ).sum(dim="cell_name")
-                        cat_summed_outputs = cat_summed_outputs.assign_coords({f"{r.group_by}_name": cat})
+                        cat_summed_outputs = cat_summed_outputs.assign_coords(
+                            {f"{r.group_by}_name": cat}
+                        )
                         if cat not in grouped_data_arrs[r.name]:
                             grouped_data_arrs[r.name][cat] = cat_summed_outputs
                         else:
@@ -437,13 +505,19 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             group_by_counts = group_by.value_counts()
             averaged_grouped_data_arrs = []
             for cat, count in group_by_counts.items():
-                averaged_grouped_data_arrs.append(grouped_data_arrs[gr.name][cat] / count)
-            final_data_arr = xr.concat(averaged_grouped_data_arrs, dim=f"{gr.group_by}_name")
+                averaged_grouped_data_arrs.append(
+                    grouped_data_arrs[gr.name][cat] / count
+                )
+            final_data_arr = xr.concat(
+                averaged_grouped_data_arrs, dim=f"{gr.group_by}_name"
+            )
             final_data_arrs[gr.name] = final_data_arr
 
         return xr.Dataset(data_vars=final_data_arrs)
 
-    def _compute_local_baseline_dists(self, batch: dict, mc_samples: int = 250) -> Tuple[np.ndarray, np.ndarray]:
+    def _compute_local_baseline_dists(
+        self, batch: dict, mc_samples: int = 250
+    ) -> tuple[np.ndarray, np.ndarray]:
         """
         Approximate the distributions used as baselines for normalizing the local sample distances.
 
@@ -462,20 +536,32 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
         def get_A_s(module, u, sample_covariate):
             sample_covariate = sample_covariate.astype(int).flatten()
-            if not module.qz.use_nonlinear:
-                A_s = module.qz.A_s_enc(sample_covariate)
+            if getattr(module.qz, "use_nonlinear", False):
+                A_s = module.qz.A_s_enc(sample_covariate, training=False)
             else:
                 # A_s output by a non-linear function without an explicit intercept
                 sample_one_hot = jax.nn.one_hot(sample_covariate, module.qz.n_sample)
                 A_s_dec_inputs = jnp.concatenate([u, sample_one_hot], axis=-1)
-                A_s = module.qz.A_s_enc(A_s_dec_inputs, training=False)
+
+                if isinstance(module.qz.A_s_enc, MLP):
+                    A_s = module.qz.A_s_enc(A_s_dec_inputs, training=False)
+                else:
+                    # nn.Embed does not support training kwarg
+                    A_s = module.qz.A_s_enc(A_s_dec_inputs)
+
             # cells by n_latent by n_latent
             return A_s.reshape(sample_covariate.shape[0], module.qz.n_latent, -1)
 
         def apply_get_A_s(u, sample_covariate):
             vars_in = {"params": self.module.params, **self.module.state}
             rngs = self.module.rngs
-            A_s = self.module.apply(vars_in, rngs=rngs, method=get_A_s, u=u, sample_covariate=sample_covariate)
+            A_s = self.module.apply(
+                vars_in,
+                rngs=rngs,
+                method=get_A_s,
+                u=u,
+                sample_covariate=sample_covariate,
+            )
             return A_s
 
         if self.can_compute_normalized_dists:
@@ -484,20 +570,28 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             qu_vars_diag = jax.vmap(jnp.diag)(qu.variance)
 
             sample_index = self.module._get_inference_input(batch)["sample_index"]
-            A_s = apply_get_A_s(qu.mean, sample_index)  # use mean of latent representation to compute the baseline
+            A_s = apply_get_A_s(
+                qu.mean, sample_index
+            )  # use mean of latent representation to compute the baseline
             B = jnp.expand_dims(jnp.eye(A_s.shape[1]), 0) + A_s
             u_diff_sigma = 2 * jnp.einsum(
                 "cij, cjk, clk -> cil", B, qu_vars_diag, B
             )  # 2 * (I + A_s) @ qu_vars_diag @ (I + A_s).T
             eigvals = jax.vmap(jnp.linalg.eigh)(u_diff_sigma)[0].astype(float)
-            normal_rng = self.module.rngs["params"]  # Hack to get new rng for normal samples.
+            normal_rng = self.module.rngs[
+                "params"
+            ]  # Hack to get new rng for normal samples.
             normal_samples = jax.random.normal(
                 normal_rng, shape=(eigvals.shape[0], mc_samples, eigvals.shape[1])
             )  # n_cells by mc_samples by n_latent
-            squared_l2_dists = jnp.sum(jnp.einsum("cij, cj -> cij", (normal_samples**2), eigvals), axis=2)
+            squared_l2_dists = jnp.sum(
+                jnp.einsum("cij, cj -> cij", (normal_samples**2), eigvals), axis=2
+            )
             l2_dists = squared_l2_dists**0.5
         else:
-            mc_samples_per_cell = mc_samples * 2  # need double for pairs of samples to compute distance between
+            mc_samples_per_cell = (
+                mc_samples * 2
+            )  # need double for pairs of samples to compute distance between
             jit_inference_fn = self.module.get_jit_inference_fn(
                 inference_kwargs={"use_mean": False, "mc_samples": mc_samples_per_cell}
             )
@@ -511,7 +605,9 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
         return np.array(jnp.mean(l2_dists, axis=1)), np.array(jnp.var(l2_dists, axis=1))
 
-    def _compute_distances_from_representations(self, reps, indices, norm="l2") -> xr.DataArray:
+    def _compute_distances_from_representations(
+        self, reps, indices, norm="l2"
+    ) -> xr.DataArray:
         @jax.jit
         def _compute_distance(rep):
             delta_mat = jnp.expand_dims(rep, 0) - jnp.expand_dims(rep, 1)
@@ -555,8 +651,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
     def get_local_sample_representation(
         self,
-        adata: Optional[AnnData] = None,
-        indices: Optional[List[str]] = None,
+        adata: AnnData | None = None,
+        indices: list[str] | None = None,
         batch_size: int = 256,
         use_mean: bool = True,
         use_vmap: bool = True,
@@ -587,17 +683,21 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             )
         ]
         return self.compute_local_statistics(
-            reductions, adata=adata, indices=indices, batch_size=batch_size, use_vmap=use_vmap
+            reductions,
+            adata=adata,
+            indices=indices,
+            batch_size=batch_size,
+            use_vmap=use_vmap,
         ).sample_representations
 
     def get_local_sample_distances(
         self,
-        adata: Optional[AnnData] = None,
+        adata: AnnData | None = None,
         batch_size: int = 256,
         use_mean: bool = True,
         normalize_distances: bool = False,
         use_vmap: bool = True,
-        groupby: Optional[Union[List[str], str]] = None,
+        groupby: list[str] | str | None = None,
         keep_cell: bool = True,
         norm: str = "l2",
         mc_samples: int = 10,
@@ -640,7 +740,9 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         if normalize_distances:
             if use_mean:
                 warnings.warn(
-                    "Normalizing distances uses sampled distances. Ignoring ``use_mean``.", UserWarning, stacklevel=2
+                    "Normalizing distances uses sampled distances. Ignoring ``use_mean``.",
+                    UserWarning,
+                    stacklevel=2,
                 )
             input = "normalized_distances"
         if groupby and not isinstance(groupby, list):
@@ -648,7 +750,9 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
         reductions = []
         if not keep_cell and not groupby:
-            raise ValueError("Undefined computation because not keep_cell and no groupby.")
+            raise ValueError(
+                "Undefined computation because not keep_cell and no groupby."
+            )
         if keep_cell:
             reductions.append(
                 MrVIReduction(
@@ -667,13 +771,18 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                     )
                 )
         return self.compute_local_statistics(
-            reductions, adata=adata, batch_size=batch_size, use_vmap=use_vmap, norm=norm, mc_samples=mc_samples
+            reductions,
+            adata=adata,
+            batch_size=batch_size,
+            use_vmap=use_vmap,
+            norm=norm,
+            mc_samples=mc_samples,
         )
 
     def get_aggregated_posterior(
         self,
-        adata: Optional[AnnData] = None,
-        indices: Optional[List[str]] = None,
+        adata: AnnData | None = None,
+        indices: list[str] | None = None,
         batch_size: int = 256,
     ) -> dist.Distribution:
         """
@@ -694,11 +803,15 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         """
         self._check_if_trained(warn=False)
         adata = self._validate_anndata(adata)
-        scdl = self._make_data_loader(adata=adata, indices=indices, batch_size=batch_size, iter_ndarray=True)
+        scdl = self._make_data_loader(
+            adata=adata, indices=indices, batch_size=batch_size, iter_ndarray=True
+        )
 
         qu_locs = []
         qu_scales = []
-        jit_inference_fn = self.module.get_jit_inference_fn(inference_kwargs={"use_mean": True})
+        jit_inference_fn = self.module.get_jit_inference_fn(
+            inference_kwargs={"use_mean": True}
+        )
         for array_dict in scdl:
             outputs = jit_inference_fn(self.module.rngs, array_dict)
 
@@ -708,14 +821,15 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         qu_loc = jnp.concatenate(qu_locs, axis=0).T
         qu_scale = jnp.concatenate(qu_scales, axis=0).T
         return dist.MixtureSameFamily(
-            dist.Categorical(probs=jnp.ones(qu_loc.shape[1]) / qu_loc.shape[1]), dist.Normal(qu_loc, qu_scale)
+            dist.Categorical(probs=jnp.ones(qu_loc.shape[1]) / qu_loc.shape[1]),
+            dist.Normal(qu_loc, qu_scale),
         )
 
     def get_outlier_cell_sample_pairs(
         self,
         adata=None,
         flavor: Literal["ball", "ap", "MoG"] = "ball",
-        subsample_size: int = 5000,
+        subsample_size: int = 5_000,
         quantile_threshold: float = 0.05,
         admissibility_threshold: float = 0.0,
         minibatch_size: int = 256,
@@ -753,20 +867,28 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         for sample_name in tqdm(unique_samples):
             sample_idxs = np.where(adata.obs[self.sample_key] == sample_name)[0]
             if subsample_size is not None and sample_idxs.shape[0] > subsample_size:
-                sample_idxs = np.random.choice(sample_idxs, size=subsample_size, replace=False)
+                sample_idxs = np.random.choice(
+                    sample_idxs, size=subsample_size, replace=False
+                )
             adata_s = adata[sample_idxs]
             if flavor == "MoG":
                 n_components = min(adata_s.n_obs // 4, 20)
                 gmm_ = GaussianMixture(n_components=n_components).fit(adata_s.obsm["U"])
-                log_probs_s = jnp.quantile(gmm_.score_samples(adata_s.obsm["U"]), q=quantile_threshold)
+                log_probs_s = jnp.quantile(
+                    gmm_.score_samples(adata_s.obsm["U"]), q=quantile_threshold
+                )
                 log_probs_ = gmm_.score_samples(adata.obsm["U"])[:, None]
             elif flavor == "ap":
                 ap = self.get_aggregated_posterior(adata=adata, indices=sample_idxs)
-                log_probs_s = jnp.quantile(ap.log_prob(adata_s.obsm["U"]).sum(axis=1), q=quantile_threshold)
+                log_probs_s = jnp.quantile(
+                    ap.log_prob(adata_s.obsm["U"]).sum(axis=1), q=quantile_threshold
+                )
                 n_splits = adata.n_obs // minibatch_size
                 log_probs_ = []
                 for u_rep in np.array_split(adata.obsm["U"], n_splits):
-                    log_probs_.append(jax.device_get(ap.log_prob(u_rep).sum(-1, keepdims=True)))
+                    log_probs_.append(
+                        jax.device_get(ap.log_prob(u_rep).sum(-1, keepdims=True))
+                    )
 
                 log_probs_ = np.concatenate(log_probs_, axis=0)  # (n_cells, 1)
             elif flavor == "ball":
@@ -781,7 +903,9 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 for u_rep in np.array_split(adata.obsm["U"], n_splits):
                     log_probs_.append(
                         jax.device_get(
-                            ap.component_distribution.log_prob(np.expand_dims(u_rep, ap.mixture_dim))
+                            ap.component_distribution.log_prob(
+                                np.expand_dims(u_rep, ap.mixture_dim)
+                            )
                             .sum(axis=1)
                             .max(axis=1, keepdims=True)
                         )
@@ -814,27 +938,30 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 ["cell_name", "sample"],
                 log_ratios,
             ),
-            "is_admissible": (["cell_name", "sample"], log_ratios > admissibility_threshold),
+            "is_admissible": (
+                ["cell_name", "sample"],
+                log_ratios > admissibility_threshold,
+            ),
         }
         return xr.Dataset(data_vars, coords=coords)
 
     def perform_multivariate_analysis(
         self,
-        adata: Optional[AnnData] = None,
-        donor_keys: List[Tuple] = None,
-        donor_subset: Optional[List[str]] = None,
+        adata: AnnData | None = None,
+        donor_keys: list[tuple] = None,
+        donor_subset: list[str] | None = None,
         batch_size: int = 256,
         use_vmap: bool = True,
         normalize_design_matrix: bool = True,
         add_batch_specific_offsets: bool = False,
         mc_samples: int = 100,
         store_lfc: bool = False,
-        store_lfc_metadata_subset: Optional[List[str]] = None,
+        store_lfc_metadata_subset: list[str] | None = None,
         store_baseline: bool = False,
         eps_lfc: float = 1e-3,
         filter_donors: bool = False,
         lambd: float = 0.0,
-        delta: float = 0.3,
+        delta: float | None = 0.3,
         **filter_donors_kwargs,
     ) -> xr.Dataset:
         """Utility function to perform cell-specific multivariate analysis.
@@ -886,6 +1013,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             Regularization parameter for the linear model.
         delta
             LFC threshold used to compute posterior DE probabilities.
+            If None does not compute them to save memory consumption.
         """
         adata = self.adata if adata is None else adata
         self._check_if_trained(warn=False)
@@ -894,28 +1022,37 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             adata.obs["_indices"] = np.arange(adata.n_obs).astype(int)
 
         adata = self._validate_anndata(adata)
-        scdl = self._make_data_loader(adata=adata, indices=None, batch_size=batch_size, iter_ndarray=True)
+        scdl = self._make_data_loader(
+            adata=adata, indices=None, batch_size=batch_size, iter_ndarray=True
+        )
         n_sample = self.summary_stats.n_sample
         vars_in = {"params": self.module.params, **self.module.state}
 
         donor_mask = (
-            np.isin(self.sample_order, donor_subset) if donor_subset is not None else np.ones(n_sample, dtype=bool)
+            np.isin(self.sample_order, donor_subset)
+            if donor_subset is not None
+            else np.ones(n_sample, dtype=bool)
         )
         donor_mask = np.array(donor_mask)
         donor_order = self.sample_order[donor_mask]
         n_samples_kept = donor_mask.sum()
 
         if filter_donors:
-            admissible_donors = self.get_outlier_cell_sample_pairs(adata=adata, **filter_donors_kwargs)[
-                "is_admissible"
-            ].loc[{"sample": donor_order}]
+            admissible_donors = self.get_outlier_cell_sample_pairs(
+                adata=adata, **filter_donors_kwargs
+            )["is_admissible"].loc[{"sample": donor_order}]
             assert (admissible_donors.sample == donor_order).all()
             admissible_donors = admissible_donors.values
         else:
             admissible_donors = np.ones((adata.n_obs, n_samples_kept), dtype=bool)
         n_admissible_donors = admissible_donors.sum(1)
 
-        Xmat, Xmat_names, covariates_require_lfc, offset_indices = self._construct_design_matrix(
+        (
+            Xmat,
+            Xmat_names,
+            covariates_require_lfc,
+            offset_indices,
+        ) = self._construct_design_matrix(
             donor_keys=donor_keys,
             donor_mask=donor_mask,
             normalize_design_matrix=normalize_design_matrix,
@@ -981,7 +1118,10 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                     return inference_fn(rngs, cf_sample)
 
                 # eps_ has shape (mc_samples, n_cells, n_donors, n_latent)
-                eps_ = jax.lax.transpose(jax.lax.map(per_sample_inference_fn, (stacked_rngs, cf_sample)), (1, 2, 0, 3))
+                eps_ = jax.lax.transpose(
+                    jax.lax.map(per_sample_inference_fn, (stacked_rngs, cf_sample)),
+                    (1, 2, 0, 3),
+                )
             eps_std = eps_.std(axis=2, keepdims=True)
             eps_mean = eps_.mean(axis=2, keepdims=True)
 
@@ -1018,20 +1158,35 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                     )
 
                 batch_index_ = jnp.arange(self.summary_stats.n_batch)[:, None]
-                batch_index_ = jnp.repeat(batch_index_, repeats=n_cells, axis=1)[..., None]  # (n_batch, n_cells, 1)
+                batch_index_ = jnp.repeat(batch_index_, repeats=n_cells, axis=1)[
+                    ..., None
+                ]  # (n_batch, n_cells, 1)
                 betas_null = jnp.zeros_like(betas_covariates)
 
                 if add_batch_specific_offsets:
-                    batch_weights = jnp.einsum("nd,db->nb", admissible_donors_mat, Xmat[:, offset_indices]).mean(0)
+                    batch_weights = jnp.einsum(
+                        "nd,db->nb", admissible_donors_mat, Xmat[:, offset_indices]
+                    ).mean(0)
                     betas_offset_ = betas_[:, offset_indices, :, :] + eps_mean_
                 else:
-                    batch_weights = (1.0 / self.summary_stats.n_batch) * jnp.ones(self.summary_stats.n_batch)
+                    batch_weights = (1.0 / self.summary_stats.n_batch) * jnp.ones(
+                        self.summary_stats.n_batch
+                    )
                     mc_samples, _, n_cells_, n_latent = betas_covariates.shape
-                    betas_offset_ = jnp.zeros((mc_samples, self.summary_stats.n_batch, n_cells_, n_latent)) + eps_mean_
+                    betas_offset_ = (
+                        jnp.zeros(
+                            (mc_samples, self.summary_stats.n_batch, n_cells_, n_latent)
+                        )
+                        + eps_mean_
+                    )
                 # batch_offset shape (mc_samples, n_batch, n_cells, n_latent)
 
-                f_ = jax.vmap(h_inference_fn, in_axes=(0, None, 0), out_axes=0)  # fn over MC samples
-                f_ = jax.vmap(f_, in_axes=(1, None, None), out_axes=1)  # fn over covariates
+                f_ = jax.vmap(
+                    h_inference_fn, in_axes=(0, None, 0), out_axes=0
+                )  # fn over MC samples
+                f_ = jax.vmap(
+                    f_, in_axes=(1, None, None), out_axes=1
+                )  # fn over covariates
                 f_ = jax.vmap(f_, in_axes=(None, 0, 1), out_axes=0)  # fn over batches
                 h_fn = jax.jit(
                     f_
@@ -1042,8 +1197,14 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
                 lfcs = jnp.log2(x_1 + eps_lfc) - jnp.log2(x_0 + eps_lfc)
                 lfc_mean = jnp.average(lfcs.mean(1), weights=batch_weights, axis=0)
-                lfc_std = jnp.sqrt(jnp.average(lfcs.var(1), weights=batch_weights, axis=0))
-                pde = (jnp.abs(lfcs) >= delta).mean(1).mean(0)
+                if delta is not None:
+                    lfc_std = jnp.sqrt(
+                        jnp.average(lfcs.var(1), weights=batch_weights, axis=0)
+                    )
+                    pde = (jnp.abs(lfcs) >= delta).mean(1).mean(0)
+                else:
+                    lfc_std = None
+                    pde = None
             else:
                 lfc_mean = None
                 lfc_std = None
@@ -1072,7 +1233,9 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         for array_dict in tqdm(scdl):
             indices = array_dict[REGISTRY_KEYS.INDICES_KEY].astype(int).flatten()
             n_cells = array_dict[REGISTRY_KEYS.X_KEY].shape[0]
-            cf_sample = np.broadcast_to((np.where(donor_mask)[0])[:, None, None], (n_samples_kept, n_cells, 1))
+            cf_sample = np.broadcast_to(
+                (np.where(donor_mask)[0])[:, None, None], (n_samples_kept, n_cells, 1)
+            )
             inf_inputs = self.module._get_inference_input(
                 array_dict,
             )
@@ -1082,7 +1245,9 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             stacked_rngs = self._generate_stacked_rngs(cf_sample.shape[0])
 
             rngs_de = self.module.rngs if store_lfc else None
-            admissible_donors_mat = jnp.array(admissible_donors[indices])  # (n_cells, n_donors)
+            admissible_donors_mat = jnp.array(
+                admissible_donors[indices]
+            )  # (n_cells, n_donors)
             n_donors_per_cell = admissible_donors_mat.sum(axis=1)
             admissible_donors_dmat = jax.vmap(jnp.diag)(admissible_donors_mat).astype(
                 float
@@ -1111,8 +1276,9 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             pvalue.append(np.array(res["pvalue"]))
             if store_lfc:
                 lfc.append(np.array(res["lfc_mean"]))
-                lfc_std.append(np.array(res["lfc_std"]))
-                pde.append(np.array(res["pde"]))
+                if delta is not None:
+                    lfc_std.append(np.array(res["lfc_std"]))
+                    pde.append(np.array(res["pde"]))
             if store_baseline:
                 baseline_expression.append(np.array(res["baseline_expression"]))
         beta = np.concatenate(beta, axis=0)
@@ -1151,17 +1317,22 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 n_admissible_donors,
             )
         if store_lfc:
-            if store_lfc_metadata_subset is None:
+            if store_lfc_metadata_subset is None and not add_batch_specific_offsets:
                 coords_lfc = ["covariate", "cell_name", "gene"]
             else:
                 coords_lfc = ["covariate_sub", "cell_name", "gene"]
-                coords["covariate_sub"] = (("covariate_sub"), Xmat_names[covariates_require_lfc])
+                coords["covariate_sub"] = (
+                    ("covariate_sub"),
+                    Xmat_names[covariates_require_lfc],
+                )
             lfc = np.concatenate(lfc, axis=1)
-            lfc_std = np.concatenate(lfc_std, axis=1)
-            pde = np.concatenate(pde, axis=1)
             data_vars["lfc"] = (coords_lfc, lfc)
-            data_vars["lfc_std"] = (coords_lfc, lfc_std)
-            data_vars["pde"] = (coords_lfc, pde)
+            if delta is not None:
+                lfc_std = np.concatenate(lfc_std, axis=1)
+                pde = np.concatenate(pde, axis=1)
+                data_vars["lfc_std"] = (coords_lfc, lfc_std)
+                data_vars["pde"] = (coords_lfc, pde)
+
         if store_baseline:
             baseline_expression = np.concatenate(baseline_expression, axis=1)
             data_vars["baseline_expression"] = (
@@ -1172,12 +1343,12 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
     def _construct_design_matrix(
         self,
-        donor_keys: List[str],
+        donor_keys: list[str],
         donor_mask: np.ndarray,
         normalize_design_matrix: bool,
         add_batch_specific_offsets: bool,
         store_lfc: bool,
-        store_lfc_metadata_subset: Optional[List[str]] = None,
+        store_lfc_metadata_subset: list[str] | None = None,
     ):
         """
         Starting from a list of donor keys, construct a design matrix of donors and covariates.
@@ -1212,9 +1383,11 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         Xmat = []
         Xmat_names = []
         Xmat_dim_to_key = []
+        donor_info = self.donor_info.iloc[donor_mask]
         for donor_key in tqdm(donor_keys):
-            cov = self.donor_info[donor_key]
+            cov = donor_info[donor_key]
             if (cov.dtype == str) or (cov.dtype == "category"):
+                cov = cov.cat.remove_unused_categories()
                 cov = pd.get_dummies(cov, drop_first=True)
                 cov_names = donor_key + np.array(cov.columns)
                 cov = cov.values
@@ -1228,21 +1401,30 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         Xmat_names = np.concatenate(Xmat_names)
         Xmat = np.concatenate(Xmat, axis=1).astype(np.float32)
         Xmat_dim_to_key = np.concatenate(Xmat_dim_to_key)
-        Xmat = Xmat[donor_mask]
 
         if normalize_design_matrix:
-            Xmat = (Xmat - Xmat.min(axis=0)) / (1e-6 + Xmat.max(axis=0) - Xmat.min(axis=0))
+            Xmat = (Xmat - Xmat.min(axis=0)) / (
+                1e-6 + Xmat.max(axis=0) - Xmat.min(axis=0)
+            )
         if add_batch_specific_offsets:
-            cov = self.donor_info["_scvi_batch"]
+            cov = donor_info["_scvi_batch"]
             if cov.nunique() == self.summary_stats.n_batch:
-                cov = np.eye(self.summary_stats.n_batch)[self.donor_info["_scvi_batch"].values]
-                cov_names = ["offset_batch_" + str(i) for i in range(self.summary_stats.n_batch)]
-                Xmat = np.concatenate([cov[donor_mask], Xmat], axis=1)
+                cov = np.eye(self.summary_stats.n_batch)[
+                    donor_info["_scvi_batch"].values
+                ]
+                cov_names = [
+                    "offset_batch_" + str(i) for i in range(self.summary_stats.n_batch)
+                ]
+                Xmat = np.concatenate([cov, Xmat], axis=1)
                 Xmat_names = np.concatenate([np.array(cov_names), Xmat_names])
                 Xmat_dim_to_key = np.concatenate([np.array(cov_names), Xmat_dim_to_key])
 
                 # Retrieve indices of offset covariates in the right order
-                offset_indices = pd.Series(np.arange(len(Xmat_names)), index=Xmat_names).loc[cov_names].values
+                offset_indices = (
+                    pd.Series(np.arange(len(Xmat_names)), index=Xmat_names)
+                    .loc[cov_names]
+                    .values
+                )
                 offset_indices = jnp.array(offset_indices)
             else:
                 warnings.warn(
@@ -1262,7 +1444,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             covariates_require_lfc = (
                 np.isin(Xmat_dim_to_key, store_lfc_metadata_subset)
                 if store_lfc_metadata_subset is not None
-                else np.ones(len(Xmat_names), dtype=bool)
+                else np.isin(Xmat_dim_to_key, donor_keys)
             )
         else:
             covariates_require_lfc = np.zeros(len(Xmat_names), dtype=bool)
@@ -1272,7 +1454,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
     def compute_cell_scores(
         self,
-        donor_keys: List[Tuple],
+        donor_keys: list[tuple],
         adata=None,
         batch_size=256,
         use_vmap: bool = True,
@@ -1303,7 +1485,9 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         # not jitted because the statistic arg is causing troubles
         def _get_scores(w, x, statistic):
             if compute_pval:
-                fn = lambda w, x: permutation_test(w, x, statistic=statistic, n_mc_samples=n_mc_samples)
+                fn = lambda w, x: permutation_test(
+                    w, x, statistic=statistic, n_mc_samples=n_mc_samples
+                )
             else:
                 fn = lambda w, x: compute_statistic(w, x, statistic=statistic)
             return jax.vmap(fn, in_axes=(0, None))(w, x)
@@ -1330,7 +1514,9 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 )
             )
 
-        return self.compute_local_statistics(reductions, adata=adata, batch_size=batch_size, use_vmap=use_vmap)
+        return self.compute_local_statistics(
+            reductions, adata=adata, batch_size=batch_size, use_vmap=use_vmap
+        )
 
     @property
     def original_donor_key(self):
@@ -1340,11 +1526,11 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
     def explore_stratifications(
         self,
         distances: xr.Dataset,
-        cell_type_keys: Optional[Union[str, List[str]]] = None,
+        cell_type_keys: list[str] | str | None = None,
         linkage_method: str = "complete",
-        figure_dir: Optional[str] = None,
+        figure_dir: str | None = None,
         show_figures: bool = False,
-        sample_metadata: Optional[Union[str, List[str]]] = None,
+        sample_metadata: list[str] | str | None = None,
         cmap_name: str = "tab10",
         cmap_requires_int: bool = True,
         **sns_kwargs,
@@ -1372,17 +1558,27 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         # Convert metadata to hex colors
         colors = None
         if sample_metadata is not None:
-            sample_metadata = [sample_metadata] if isinstance(sample_metadata, str) else sample_metadata
-            donor_info_ = self.donor_info.set_index(self.registry_["setup_args"]["sample_key"])
+            sample_metadata = (
+                [sample_metadata]
+                if isinstance(sample_metadata, str)
+                else sample_metadata
+            )
+            donor_info_ = self.donor_info.set_index(
+                self.registry_["setup_args"]["sample_key"]
+            )
             colors = convert_pandas_to_colors(
-                donor_info_.loc[:, sample_metadata], cmap_name=cmap_name, cmap_requires_int=cmap_requires_int
+                donor_info_.loc[:, sample_metadata],
+                cmap_name=cmap_name,
+                cmap_requires_int=cmap_requires_int,
             )
 
         # Subsample distances if necessary
         distances_ = distances
         celltype_dimname = distances.dims[0]
         if cell_type_keys is not None:
-            cell_type_keys = [cell_type_keys] if isinstance(cell_type_keys, str) else cell_type_keys
+            cell_type_keys = (
+                [cell_type_keys] if isinstance(cell_type_keys, str) else cell_type_keys
+            )
             dimname_to_vals = {celltype_dimname: cell_type_keys}
             distances_ = distances.sel(dimname_to_vals)
 
@@ -1396,7 +1592,11 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             assert dist_.ndim == 2
 
             fig = sns.clustermap(
-                dist_.to_pandas(), row_linkage=dendrogram, col_linkage=dendrogram, row_colors=colors, **sns_kwargs
+                dist_.to_pandas(),
+                row_linkage=dendrogram,
+                col_linkage=dendrogram,
+                row_colors=colors,
+                **sns_kwargs,
             )
             fig.fig.suptitle(celltype_name)
             if figure_dir is not None:

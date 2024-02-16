@@ -159,7 +159,7 @@ In `pyproject.toml` add the following changes, and you are good to go!
 
 
  [project]
- name = "scvi-v2"
+ name = "mrvi"
 -version = "0.3.1dev"
 +dynamic = ["version"]
 
@@ -168,7 +168,7 @@ In `pyproject.toml` add the following changes, and you are good to go!
 +source = "vcs"
 +
  [tool.coverage.run]
- source = ["scvi-v2"]
+ source = ["mrvi"]
  omit = [
 ```
 
@@ -191,7 +191,7 @@ In addition to the packages needed to _use_ this package, you need additional py
 the documentation_. It's easy to install them using `pip`:
 
 ```bash
-pip install "scvi-v2[dev,test,doc]"
+pip install "mrvi[dev,test,doc]"
 ```
 
 ### Code-style

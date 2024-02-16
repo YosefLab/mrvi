@@ -1,13 +1,13 @@
-from dataclasses import dataclass
-from typing import Any, Callable, Iterable, Literal, Optional, Tuple, Union
+from __future__ import annotations
 
-import jax.numpy as jnp
-import numpy as np
+from collections.abc import Iterable
+from dataclasses import dataclass
+from typing import Any, Literal
+
 import xarray as xr
 
-NdArray = Union[np.ndarray, jnp.ndarray]
 PRNGKey = Any
-Shape = Tuple[int, ...]
+Shape = tuple[int, ...]
 Dtype = Any
 
 
@@ -30,15 +30,15 @@ class MrVIReduction:
     """
 
     name: str
-    input: Union[
-        Literal["mean_representations"],
-        Literal["mean_distances"],
-        Literal["sampled_representations"],
-        Literal["sampled_distances"],
-        Literal["normalized_distances"],
+    input: Literal[
+        "mean_representations",
+        "mean_distances",
+        "sampled_representations",
+        "sampled_distances",
+        "normalized_distances",
     ]
-    fn: Callable[[xr.DataArray], xr.DataArray] = lambda x: xr.DataArray(x)
-    group_by: Optional[str] = None
+    fn: callable[[xr.DataArray], xr.DataArray] = lambda x: xr.DataArray(x)
+    group_by: str | None = None
 
 
 @dataclass(frozen=True)

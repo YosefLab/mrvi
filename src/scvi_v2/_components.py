@@ -100,7 +100,7 @@ class ConditionalNormalization(nn.Module):
 
     @staticmethod
     def _gamma_initializer() -> jax.nn.initializers.Initializer:
-        def init(key: jax.random.KeyArray, shape: tuple, dtype: Any = jnp.float_) -> jnp.ndarray:
+        def init(key, shape: tuple, dtype: Any = jnp.float_) -> jnp.ndarray:
             weights = jax.random.normal(key, shape, dtype) * 0.02 + 1
             return weights
 
@@ -108,7 +108,7 @@ class ConditionalNormalization(nn.Module):
 
     @staticmethod
     def _beta_initializer() -> jax.nn.initializers.Initializer:
-        def init(key: jax.random.KeyArray, shape: tuple, dtype: Any = jnp.float_) -> jnp.ndarray:
+        def init(key, shape: tuple, dtype: Any = jnp.float_) -> jnp.ndarray:
             del key
             weights = jnp.zeros(shape, dtype=dtype)
             return weights

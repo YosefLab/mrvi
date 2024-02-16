@@ -4,6 +4,7 @@ from tempfile import TemporaryDirectory
 import flax.linen as nn
 import numpy as np
 from mrvi import MrVI
+import jax
 from scvi.data import synthetic_iid
 
 
@@ -32,7 +33,7 @@ def test_mrvi():
         px_nn_flavor="attention",
         qz_nn_flavor="attention",
     )
-    model.train(2, check_val_every_n_epoch=1, train_size=0.5)
+    model.train(10, check_val_every_n_epoch=1, train_size=0.5)
     donor_keys = ["meta1_cat", "meta2", "cont_cov"]
     model.perform_multivariate_analysis(
         donor_keys=donor_keys, store_lfc=True, add_batch_specific_offsets=True
@@ -49,7 +50,7 @@ def test_mrvi():
         filter_donors=True,
         add_batch_specific_offsets=True,
     )
-    model.get_local_sample_distances(normalize_distances=True)
+    model.get_local_sample_distances()
 
     MrVI.setup_anndata(adata, sample_key="sample", batch_key="batch")
     model = MrVI(
@@ -62,7 +63,7 @@ def test_mrvi():
     model.perform_multivariate_analysis(
         donor_keys=donor_keys, store_lfc=True, add_batch_specific_offsets=False
     )
-    model.get_local_sample_distances(normalize_distances=True)
+    model.get_local_sample_distances()
 
     MrVI.setup_anndata(
         adata,
@@ -76,7 +77,7 @@ def test_mrvi():
         qz_nn_flavor="attention",
     )
     model.train(2, check_val_every_n_epoch=1, train_size=0.5)
-    model.get_local_sample_distances(normalize_distances=True)
+    model.get_local_sample_distances()
     model.get_outlier_cell_sample_pairs(flavor="ball", subsample_size=50)
     model.get_outlier_cell_sample_pairs(flavor="MoG", subsample_size=50)
     model.get_outlier_cell_sample_pairs(flavor="ap", subsample_size=50)
@@ -108,7 +109,7 @@ def test_mrvi():
         qz_nn_flavor="attention",
     )
     model.train(2, check_val_every_n_epoch=1, train_size=0.5)
-    model.get_local_sample_distances(normalize_distances=True)
+    model.get_local_sample_distances()
     donor_keys = ["meta1_cat", "meta2", "cont_cov"]
     donor_subset = [f"sample_{i}" for i in range(8)]
     model.perform_multivariate_analysis(donor_keys=donor_keys, donor_subset=donor_subset)
@@ -145,7 +146,7 @@ def test_mrvi():
         qz_nn_flavor="mlp",
     )
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)
-    model.get_local_sample_distances(normalize_distances=True)
+    model.get_local_sample_distances()
 
     model = MrVI(
         adata,
@@ -157,7 +158,7 @@ def test_mrvi():
         qz_nn_flavor="attention",
     )
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)
-    model.get_local_sample_distances(normalize_distances=True)
+    model.get_local_sample_distances()
 
     model = MrVI(
         adata,
@@ -172,8 +173,7 @@ def test_mrvi():
         qz_nn_flavor="attention",
     )
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)
-    model.get_local_sample_distances(normalize_distances=True)
-    model.get_local_sample_distances(normalize_distances=False)
+    model.get_local_sample_distances()
 
     model = MrVI(
         adata,
@@ -194,8 +194,7 @@ def test_mrvi():
         z_u_prior=False,
     )
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)
-    model.get_local_sample_distances(normalize_distances=True)
-    model.get_local_sample_distances(normalize_distances=False)
+    model.get_local_sample_distances()
 
     model = MrVI(
         adata,
@@ -210,7 +209,7 @@ def test_mrvi():
         learn_z_u_prior_scale=True,
     )
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)
-    model.get_local_sample_distances(normalize_distances=True)
+    model.get_local_sample_distances()
 
     # model = MrVI(
     #     adata,
@@ -246,7 +245,7 @@ def test_mrvi():
     # assert np.allclose(local_map, local_vmap, atol=1e-3)
     # assert np.allclose(local_dist_map, local_dist_vmap, atol=1e-3)
 
-    # local_normalized_dists = model.get_local_sample_distances(normalize_distances=True)[
+    # local_normalized_dists = model.get_local_sample_distances()[
     #     "cell"
     # ]
     # assert local_normalized_dists.shape == (
@@ -268,7 +267,7 @@ def test_mrvi():
     # assert np.allclose(grouped_dists_no_cell.meta2, grouped_dists_w_cell.meta2)
 
     # grouped_normalized_dists = model.get_local_sample_distances(
-    #     normalize_distances=True, keep_cell=False, groupby=["meta1", "meta2"]
+    #     , keep_cell=False, groupby=["meta1", "meta2"]
     # )
     # assert grouped_normalized_dists.meta1.shape == (
     #     2,
@@ -308,7 +307,7 @@ def test_mrvi_shrink_u():
         qz_kwargs={"n_factorized_embed_dims": 3},
     )
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)
-    model.get_local_sample_distances(normalize_distances=True)
+    model.get_local_sample_distances()
 
     model = MrVI(
         adata,
@@ -319,7 +318,7 @@ def test_mrvi_shrink_u():
         qz_kwargs={"n_factorized_embed_dims": 3},
     )
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)
-    model.get_local_sample_distances(normalize_distances=True)
+    model.get_local_sample_distances()
 
     model = MrVI(
         adata,
@@ -330,7 +329,7 @@ def test_mrvi_shrink_u():
         qz_kwargs={"n_factorized_embed_dims": 3},
     )
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)
-    model.get_local_sample_distances(normalize_distances=True)
+    model.get_local_sample_distances()
 
     model = MrVI(
         adata,
@@ -341,7 +340,7 @@ def test_mrvi_shrink_u():
         qz_nn_flavor="mlp",
     )
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)
-    model.get_local_sample_distances(normalize_distances=True)
+    model.get_local_sample_distances()
 
     model = MrVI(
         adata,
@@ -354,7 +353,7 @@ def test_mrvi_shrink_u():
         qz_nn_flavor="attention",
     )
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)
-    model.get_local_sample_distances(normalize_distances=True)
+    model.get_local_sample_distances()
 
     model = MrVI(
         adata,
@@ -497,7 +496,7 @@ def test_mrvi_nonlinear():
         qz_kwargs={"use_map": True},
     )
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)
-    model.get_local_sample_distances(normalize_distances=True)
+    model.get_local_sample_distances()
 
     model = MrVI(
         adata,
@@ -506,7 +505,7 @@ def test_mrvi_nonlinear():
         qz_kwargs={"use_map": False},
     )
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)
-    model.get_local_sample_distances(normalize_distances=True)
+    model.get_local_sample_distances()
 
     model = MrVI(
         adata,
@@ -516,7 +515,7 @@ def test_mrvi_nonlinear():
     )
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)
     model.get_local_sample_distances(use_mean=True)
-    model.get_local_sample_distances(normalize_distances=True)
+    model.get_local_sample_distances()
 
     model = MrVI(
         adata,
@@ -528,7 +527,7 @@ def test_mrvi_nonlinear():
     model.get_latent_representation()
     model.get_local_sample_distances(use_mean=True)
     model.get_local_sample_distances(use_mean=False)
-    model.get_local_sample_distances(normalize_distances=True)
+    model.get_local_sample_distances()
 
 
 def test_compute_local_statistics():

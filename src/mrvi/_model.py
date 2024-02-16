@@ -111,9 +111,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         )
 
         self.data_splitter = None
-        self.can_compute_normalized_dists = (
-            model_kwargs.get("qz_nn_flavor", "linear") == "linear"
-        )
         self.module = MrVAE(
             n_input=self.summary_stats.n_vars,
             n_sample=n_sample,
@@ -122,12 +119,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             n_continuous_cov=n_continuous_cov,
             n_obs_per_sample=self.n_obs_per_sample,
             **model_kwargs,
-        )
-        self.can_compute_normalized_dists = (
-            model_kwargs.get("qz_nn_flavor", "linear") == "linear"
-        ) and (
-            (model_kwargs.get("n_latent_u", None) is None)
-            or (model_kwargs.get("n_latent", 10) == model_kwargs.get("n_latent_u", None))
         )
         self.init_params_ = self._get_init_params(locals())
 
@@ -436,29 +427,10 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                     mean_zs_, indices, norm=norm
                 )
 
-            if reqs.needs_sampled_distances or reqs.needs_normalized_distances:
+            if reqs.needs_sampled_distances:
                 sampled_dists = self._compute_distances_from_representations(
                     sampled_zs_, indices, norm=norm
                 )
-
-                if reqs.needs_normalized_distances:
-                    if norm != "l2":
-                        raise ValueError(
-                            f"Norm must be 'l2' when using normalized distances. Got {norm}."
-                        )
-                    (
-                        normalization_means,
-                        normalization_vars,
-                    ) = self._compute_local_baseline_dists(
-                        array_dict, mc_samples=mc_samples
-                    )  # both are shape (n_cells,)
-                    normalization_means = normalization_means.reshape(-1, 1, 1, 1)
-                    normalization_vars = normalization_vars.reshape(-1, 1, 1, 1)
-                    normalized_dists = (
-                        np.clip(sampled_dists - normalization_means, a_min=0, a_max=None)
-                        / (normalization_vars**0.5)
-                    ).mean(dim="mc_sample")  # (n_cells, n_samples, n_samples)
-
             # Compute each reduction
             for r in reductions:
                 if r.input == "mean_representations":
@@ -469,8 +441,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                     inputs = mean_dists
                 elif r.input == "sampled_distances":
                     inputs = sampled_dists
-                elif r.input == "normalized_distances":
-                    inputs = normalized_dists
                 else:
                     raise ValueError(f"Unknown reduction input: {r.input}")
 
@@ -514,96 +484,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             final_data_arrs[gr.name] = final_data_arr
 
         return xr.Dataset(data_vars=final_data_arrs)
-
-    def _compute_local_baseline_dists(
-        self, batch: dict, mc_samples: int = 250
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """
-        Approximate the distributions used as baselines for normalizing the local sample distances.
-
-        Approximates the means and variances of the Euclidean distance between two samples of
-        the z latent representation for the original sample for each cell in ``adata``.
-
-        Reference: https://www.overleaf.com/read/mhdxcrknzxpm.
-
-        Parameters
-        ----------
-        batch
-            Batch of data to compute the local sample representation for.
-        mc_samples
-            Number of Monte Carlo samples to use for computing the local baseline distributions.
-        """
-
-        def get_A_s(module, u, sample_covariate):
-            sample_covariate = sample_covariate.astype(int).flatten()
-            if getattr(module.qz, "use_nonlinear", False):
-                A_s = module.qz.A_s_enc(sample_covariate, training=False)
-            else:
-                # A_s output by a non-linear function without an explicit intercept
-                sample_one_hot = jax.nn.one_hot(sample_covariate, module.qz.n_sample)
-                A_s_dec_inputs = jnp.concatenate([u, sample_one_hot], axis=-1)
-
-                if isinstance(module.qz.A_s_enc, MLP):
-                    A_s = module.qz.A_s_enc(A_s_dec_inputs, training=False)
-                else:
-                    # nn.Embed does not support training kwarg
-                    A_s = module.qz.A_s_enc(A_s_dec_inputs)
-
-            # cells by n_latent by n_latent
-            return A_s.reshape(sample_covariate.shape[0], module.qz.n_latent, -1)
-
-        def apply_get_A_s(u, sample_covariate):
-            vars_in = {"params": self.module.params, **self.module.state}
-            rngs = self.module.rngs
-            A_s = self.module.apply(
-                vars_in,
-                rngs=rngs,
-                method=get_A_s,
-                u=u,
-                sample_covariate=sample_covariate,
-            )
-            return A_s
-
-        if self.can_compute_normalized_dists:
-            jit_inference_fn = self.module.get_jit_inference_fn()
-            qu = jit_inference_fn(self.module.rngs, batch)["qu"]
-            qu_vars_diag = jax.vmap(jnp.diag)(qu.variance)
-
-            sample_index = self.module._get_inference_input(batch)["sample_index"]
-            A_s = apply_get_A_s(
-                qu.mean, sample_index
-            )  # use mean of latent representation to compute the baseline
-            B = jnp.expand_dims(jnp.eye(A_s.shape[1]), 0) + A_s
-            u_diff_sigma = 2 * jnp.einsum(
-                "cij, cjk, clk -> cil", B, qu_vars_diag, B
-            )  # 2 * (I + A_s) @ qu_vars_diag @ (I + A_s).T
-            eigvals = jax.vmap(jnp.linalg.eigh)(u_diff_sigma)[0].astype(float)
-            normal_rng = self.module.rngs[
-                "params"
-            ]  # Hack to get new rng for normal samples.
-            normal_samples = jax.random.normal(
-                normal_rng, shape=(eigvals.shape[0], mc_samples, eigvals.shape[1])
-            )  # n_cells by mc_samples by n_latent
-            squared_l2_dists = jnp.sum(
-                jnp.einsum("cij, cj -> cij", (normal_samples**2), eigvals), axis=2
-            )
-            l2_dists = squared_l2_dists**0.5
-        else:
-            mc_samples_per_cell = (
-                mc_samples * 2
-            )  # need double for pairs of samples to compute distance between
-            jit_inference_fn = self.module.get_jit_inference_fn(
-                inference_kwargs={"use_mean": False, "mc_samples": mc_samples_per_cell}
-            )
-
-            outputs = jit_inference_fn(self.module.rngs, batch)
-
-            # figure out how to compute dists here
-            z = outputs["z"]
-            first_half_z, second_half_z = z[:mc_samples], z[mc_samples:]
-            l2_dists = jnp.sqrt(jnp.sum((first_half_z - second_half_z) ** 2, axis=2)).T
-
-        return np.array(jnp.mean(l2_dists, axis=1)), np.array(jnp.var(l2_dists, axis=1))
 
     def _compute_distances_from_representations(
         self, reps, indices, norm="l2"
@@ -695,7 +575,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         adata: AnnData | None = None,
         batch_size: int = 256,
         use_mean: bool = True,
-        normalize_distances: bool = False,
         use_vmap: bool = True,
         groupby: list[str] | str | None = None,
         keep_cell: bool = True,
@@ -718,10 +597,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             Batch size to use for computing the local sample representation.
         use_mean
             Whether to use the mean of the latent representation as the local sample representation.
-        normalize_distances
-            Whether to normalize the local sample distances. Normalizes by
-            the standard deviation of the original intra-sample distances.
-            Only works with ``use_mean=False``.
         use_vmap
             Whether to use vmap for computing the local sample representation.
             Disabling vmap can be useful if running out of memory on a GPU.
@@ -737,14 +612,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             Only relevants if ``use_mean=False``.
         """
         input = "mean_distances" if use_mean else "sampled_distances"
-        if normalize_distances:
-            if use_mean:
-                warnings.warn(
-                    "Normalizing distances uses sampled distances. Ignoring ``use_mean``.",
-                    UserWarning,
-                    stacklevel=2,
-                )
-            input = "normalized_distances"
         if groupby and not isinstance(groupby, list):
             groupby = [groupby]
 

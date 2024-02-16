@@ -25,11 +25,7 @@ def test_mrvi():
         {True: "batch_0", False: "batch_1"}
     )
     MrVI.setup_anndata(adata, sample_key="sample", batch_key="disjoint_batch")
-    model = MrVI(
-        adata,
-        px_nn_flavor="attention",
-        qz_nn_flavor="attention",
-    )
+    model = MrVI(adata)
     model.train(10, check_val_every_n_epoch=1, train_size=0.5)
     donor_keys = ["meta1_cat", "meta2", "cont_cov"]
     model.perform_multivariate_analysis(
@@ -50,11 +46,7 @@ def test_mrvi():
     model.get_local_sample_distances()
 
     MrVI.setup_anndata(adata, sample_key="sample", batch_key="batch")
-    model = MrVI(
-        adata,
-        px_nn_flavor="attention",
-        qz_nn_flavor="attention",
-    )
+    model = MrVI(adata)
     model.train(2, check_val_every_n_epoch=1, train_size=0.5)
     donor_keys = ["meta1_cat", "meta2", "cont_cov"]
     model.perform_multivariate_analysis(
@@ -68,11 +60,7 @@ def test_mrvi():
         batch_key="batch",
         continuous_covariate_keys=["cont_cov"],
     )
-    model = MrVI(
-        adata,
-        px_nn_flavor="attention",
-        qz_nn_flavor="attention",
-    )
+    model = MrVI(adata)
     model.train(2, check_val_every_n_epoch=1, train_size=0.5)
     model.get_local_sample_distances()
     model.get_outlier_cell_sample_pairs(subsample_size=50)
@@ -98,11 +86,7 @@ def test_mrvi():
         batch_key="batch",
         continuous_covariate_keys=["cont_cov"],
     )
-    model = MrVI(
-        adata,
-        px_nn_flavor="attention",
-        qz_nn_flavor="attention",
-    )
+    model = MrVI(adata)
     model.train(2, check_val_every_n_epoch=1, train_size=0.5)
     model.get_local_sample_distances()
     donor_keys = ["meta1_cat", "meta2", "cont_cov"]
@@ -115,33 +99,6 @@ def test_mrvi():
         batch_key="batch",
         continuous_covariate_keys=["cont_cov"],
     )
-    model = MrVI(
-        adata,
-        n_latent=n_latent,
-        laplace_scale=1.0,
-        qz_nn_flavor="linear",
-        qz_kwargs={"n_factorized_embed_dims": 3},
-    )
-    model.train(1, check_val_every_n_epoch=1, train_size=0.5)
-
-    model = MrVI(
-        adata,
-        n_latent=n_latent,
-        scale_observations=True,
-        qz_nn_flavor="linear",
-        qz_kwargs={"n_factorized_embed_dims": 3},
-    )
-    model.train(1, check_val_every_n_epoch=1, train_size=0.5)
-
-    model = MrVI(
-        adata,
-        n_latent=n_latent,
-        scale_observations=True,
-        qz_kwargs={"use_map": False, "stop_gradients": True},
-        qz_nn_flavor="mlp",
-    )
-    model.train(1, check_val_every_n_epoch=1, train_size=0.5)
-    model.get_local_sample_distances()
 
     model = MrVI(
         adata,
@@ -150,7 +107,6 @@ def test_mrvi():
         qz_kwargs={
             "use_map": False,
         },
-        qz_nn_flavor="attention",
     )
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)
     model.get_local_sample_distances()
@@ -164,8 +120,6 @@ def test_mrvi():
         },
         px_kwargs={"low_dim_batch": False},
         u_prior_mixture=True,
-        px_nn_flavor="attention",
-        qz_nn_flavor="attention",
     )
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)
     model.get_local_sample_distances()
@@ -184,8 +138,6 @@ def test_mrvi():
             "stop_gradients": False,
             "stop_gradients_mlp": True,
         },
-        px_nn_flavor="attention",
-        qz_nn_flavor="attention",
         z_u_prior=False,
     )
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)
@@ -199,8 +151,6 @@ def test_mrvi():
             "use_map": False,
         },
         px_kwargs={"low_dim_batch": True},
-        px_nn_flavor="attention",
-        qz_nn_flavor="attention",
         learn_z_u_prior_scale=True,
     )
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)
@@ -297,55 +247,10 @@ def test_mrvi_shrink_u():
         adata,
         n_latent=n_latent,
         n_latent_u=n_latent_u,
-        laplace_scale=1.0,
-        qz_nn_flavor="linear",
-        qz_kwargs={"n_factorized_embed_dims": 3},
-    )
-    model.train(1, check_val_every_n_epoch=1, train_size=0.5)
-    model.get_local_sample_distances()
-
-    model = MrVI(
-        adata,
-        n_latent=n_latent,
-        n_latent_u=n_latent_u,
-        laplace_scale=1.0,
-        qz_nn_flavor="linear",
-        qz_kwargs={"n_factorized_embed_dims": 3},
-    )
-    model.train(1, check_val_every_n_epoch=1, train_size=0.5)
-    model.get_local_sample_distances()
-
-    model = MrVI(
-        adata,
-        n_latent=n_latent,
-        n_latent_u=n_latent_u,
-        scale_observations=True,
-        qz_nn_flavor="linear",
-        qz_kwargs={"n_factorized_embed_dims": 3},
-    )
-    model.train(1, check_val_every_n_epoch=1, train_size=0.5)
-    model.get_local_sample_distances()
-
-    model = MrVI(
-        adata,
-        n_latent=n_latent,
-        n_latent_u=n_latent_u,
-        scale_observations=True,
-        qz_kwargs={"use_map": False, "stop_gradients": True},
-        qz_nn_flavor="mlp",
-    )
-    model.train(1, check_val_every_n_epoch=1, train_size=0.5)
-    model.get_local_sample_distances()
-
-    model = MrVI(
-        adata,
-        n_latent=n_latent,
-        n_latent_u=n_latent_u,
         scale_observations=True,
         qz_kwargs={
             "use_map": False,
         },
-        qz_nn_flavor="attention",
     )
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)
     model.get_local_sample_distances()
@@ -487,25 +392,6 @@ def test_mrvi_nonlinear():
     model = MrVI(
         adata,
         n_latent=n_latent,
-        qz_nn_flavor="mlp",
-        qz_kwargs={"use_map": True},
-    )
-    model.train(1, check_val_every_n_epoch=1, train_size=0.5)
-    model.get_local_sample_distances()
-
-    model = MrVI(
-        adata,
-        n_latent=n_latent,
-        qz_nn_flavor="mlp",
-        qz_kwargs={"use_map": False},
-    )
-    model.train(1, check_val_every_n_epoch=1, train_size=0.5)
-    model.get_local_sample_distances()
-
-    model = MrVI(
-        adata,
-        n_latent=n_latent,
-        qz_nn_flavor="attention",
         qz_kwargs={"use_map": True},
     )
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)
@@ -515,7 +401,6 @@ def test_mrvi_nonlinear():
     model = MrVI(
         adata,
         n_latent=n_latent,
-        qz_nn_flavor="attention",
         qz_kwargs={"use_map": False},
     )
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)

@@ -78,9 +78,7 @@ def test_mrvi():
     )
     model.train(2, check_val_every_n_epoch=1, train_size=0.5)
     model.get_local_sample_distances()
-    model.get_outlier_cell_sample_pairs(flavor="ball", subsample_size=50)
-    model.get_outlier_cell_sample_pairs(flavor="MoG", subsample_size=50)
-    model.get_outlier_cell_sample_pairs(flavor="ap", subsample_size=50)
+    model.get_outlier_cell_sample_pairs(subsample_size=50)
     model.perform_multivariate_analysis(
         donor_keys=donor_keys, store_lfc=True, add_batch_specific_offsets=False
     )

@@ -695,7 +695,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
     def get_outlier_cell_sample_pairs(
         self,
         adata=None,
-        flavor: Literal["ball", "ap", "MoG"] = "ball",
         subsample_size: int = 5_000,
         quantile_threshold: float = 0.05,
         admissibility_threshold: float = 0.0,
@@ -712,8 +711,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         ----------
         adata
             AnnData object containing the cells for which to compute the outlier cell-sample pairs.
-        flavor
-            Method of approximating posterior on latent representation.
         subsample_size
             Number of cells to use from each sample to approximate the posterior. If None, uses all of the available cells.
         quantile_threshold
@@ -738,49 +735,27 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                     sample_idxs, size=subsample_size, replace=False
                 )
             adata_s = adata[sample_idxs]
-            if flavor == "MoG":
-                n_components = min(adata_s.n_obs // 4, 20)
-                gmm_ = GaussianMixture(n_components=n_components).fit(adata_s.obsm["U"])
-                log_probs_s = jnp.quantile(
-                    gmm_.score_samples(adata_s.obsm["U"]), q=quantile_threshold
-                )
-                log_probs_ = gmm_.score_samples(adata.obsm["U"])[:, None]
-            elif flavor == "ap":
-                ap = self.get_aggregated_posterior(adata=adata, indices=sample_idxs)
-                log_probs_s = jnp.quantile(
-                    ap.log_prob(adata_s.obsm["U"]).sum(axis=1), q=quantile_threshold
-                )
-                n_splits = adata.n_obs // minibatch_size
-                log_probs_ = []
-                for u_rep in np.array_split(adata.obsm["U"], n_splits):
-                    log_probs_.append(
-                        jax.device_get(ap.log_prob(u_rep).sum(-1, keepdims=True))
-                    )
 
-                log_probs_ = np.concatenate(log_probs_, axis=0)  # (n_cells, 1)
-            elif flavor == "ball":
-                ap = self.get_aggregated_posterior(adata=adata, indices=sample_idxs)
-                in_max_comp_log_probs = ap.component_distribution.log_prob(
-                    np.expand_dims(adata_s.obsm["U"], ap.mixture_dim)
-                ).sum(axis=1)
-                log_probs_s = rowwise_max_excluding_diagonal(in_max_comp_log_probs)
+            ap = self.get_aggregated_posterior(adata=adata, indices=sample_idxs)
+            in_max_comp_log_probs = ap.component_distribution.log_prob(
+                np.expand_dims(adata_s.obsm["U"], ap.mixture_dim)
+            ).sum(axis=1)
+            log_probs_s = rowwise_max_excluding_diagonal(in_max_comp_log_probs)
 
-                log_probs_ = []
-                n_splits = adata.n_obs // minibatch_size
-                for u_rep in np.array_split(adata.obsm["U"], n_splits):
-                    log_probs_.append(
-                        jax.device_get(
-                            ap.component_distribution.log_prob(
-                                np.expand_dims(u_rep, ap.mixture_dim)
-                            )
-                            .sum(axis=1)
-                            .max(axis=1, keepdims=True)
+            log_probs_ = []
+            n_splits = adata.n_obs // minibatch_size
+            for u_rep in np.array_split(adata.obsm["U"], n_splits):
+                log_probs_.append(
+                    jax.device_get(
+                        ap.component_distribution.log_prob(
+                            np.expand_dims(u_rep, ap.mixture_dim)
                         )
+                        .sum(axis=1)
+                        .max(axis=1, keepdims=True)
                     )
+                )
 
-                log_probs_ = np.concatenate(log_probs_, axis=0)  # (n_cells, 1)
-            else:
-                raise ValueError(f"Unknown flavor {flavor}")
+            log_probs_ = np.concatenate(log_probs_, axis=0)  # (n_cells, 1)
 
             threshs.append(np.array(log_probs_s))
             log_probs.append(np.array(log_probs_))

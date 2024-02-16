@@ -1,10 +1,7 @@
-from copy import deepcopy
 from tempfile import TemporaryDirectory
 
-import flax.linen as nn
 import numpy as np
 from mrvi import MrVI
-import jax
 from scvi.data import synthetic_iid
 
 

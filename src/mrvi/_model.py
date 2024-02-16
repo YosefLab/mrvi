@@ -6,7 +6,6 @@ import warnings
 from collections.abc import Sequence
 from copy import deepcopy
 from functools import partial
-from typing import Literal
 
 import jax
 import jax.numpy as jnp
@@ -26,11 +25,9 @@ from scvi.data.fields import (
     NumericalObsField,
 )
 from scvi.model.base import BaseModelClass, JaxTrainingMixin
-from sklearn.mixture import GaussianMixture
 from statsmodels.stats.multitest import multipletests
 from tqdm import tqdm
 
-from ._components import MLP
 from ._constants import MRVI_REGISTRY_KEYS
 from ._module import MrVAE
 from ._tree_utils import (
@@ -111,6 +108,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         )
 
         self.data_splitter = None
+
         self.module = MrVAE(
             n_input=self.summary_stats.n_vars,
             n_sample=n_sample,
@@ -760,11 +758,10 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             threshs.append(np.array(log_probs_s))
             log_probs.append(np.array(log_probs_))
 
-        if flavor == "ball":
-            # Compute a threshold across all samples
-            threshs_all = np.concatenate(threshs)
-            global_thresh = np.quantile(threshs_all, q=quantile_threshold)
-            threshs = len(log_probs) * [global_thresh]
+        # Compute a threshold across all samples
+        threshs_all = np.concatenate(threshs)
+        global_thresh = np.quantile(threshs_all, q=quantile_threshold)
+        threshs = len(log_probs) * [global_thresh]
 
         log_probs = np.concatenate(log_probs, 1)
         threshs = np.array(threshs)

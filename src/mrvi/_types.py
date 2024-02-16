@@ -30,11 +30,11 @@ class MrVIReduction:
     """
 
     name: str
-    input: Union[
-        Literal["mean_representations"],
-        Literal["mean_distances"],
-        Literal["sampled_representations"],
-        Literal["sampled_distances"],
+    input: Literal[
+        "mean_representations",
+        "mean_distances",
+        "sampled_representations",
+        "sampled_distances",
     ]
     fn: callable[[xr.DataArray], xr.DataArray] = lambda x: xr.DataArray(x)
     group_by: str | None = None

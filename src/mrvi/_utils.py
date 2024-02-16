@@ -16,7 +16,6 @@ def _parse_local_statistics_requirements(
     needs_sampled_rep = False
     needs_mean_dists = False
     needs_sampled_dists = False
-    needs_normalized_dists = False
 
     ungrouped_reductions = []
     grouped_reductions = []
@@ -32,6 +31,7 @@ def _parse_local_statistics_requirements(
         elif r.input == "sampled_distances":
             needs_sampled_rep = True
             needs_sampled_dists = True
+
         else:
             raise ValueError(f"Unknown reduction input: {r.input}")
 

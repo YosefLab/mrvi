@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import os
 import warnings
 from collections.abc import Sequence
 from copy import deepcopy
@@ -9,11 +8,9 @@ from functools import partial
 
 import jax
 import jax.numpy as jnp
-import matplotlib.pyplot as plt
 import numpy as np
 import numpyro.distributions as dist
 import pandas as pd
-import seaborn as sns
 import xarray as xr
 from anndata import AnnData
 from scvi import REGISTRY_KEYS
@@ -30,10 +27,6 @@ from tqdm import tqdm
 
 from ._constants import MRVI_REGISTRY_KEYS
 from ._module import MrVAE
-from ._tree_utils import (
-    compute_dendrogram_from_distance_matrix,
-    convert_pandas_to_colors,
-)
 from ._types import MrVIReduction
 from ._utils import (
     _parse_local_statistics_requirements,
@@ -106,8 +99,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         self.n_obs_per_sample = jnp.array(
             adata.obs._scvi_sample.value_counts().sort_index().values
         )
-
-        self.data_splitter = None
 
         self.module = MrVAE(
             n_input=self.summary_stats.n_vars,
@@ -1361,87 +1352,3 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
     def original_donor_key(self):
         """Original donor key used for training the model."""
         return self.adata_manager.registry["setup_args"]["sample_key"]
-
-    def explore_stratifications(
-        self,
-        distances: xr.Dataset,
-        cell_type_keys: list[str] | str | None = None,
-        linkage_method: str = "complete",
-        figure_dir: str | None = None,
-        show_figures: bool = False,
-        sample_metadata: list[str] | str | None = None,
-        cmap_name: str = "tab10",
-        cmap_requires_int: bool = True,
-        **sns_kwargs,
-    ):
-        """Analysis of distance matrix stratifications.
-
-        Parameters
-        ----------
-        distances :
-            Cell-type specific distance matrices.
-        cell_type_keys :
-            Subset of cell types to analyze, by default None
-        linkage_method :
-            Linkage method to use to cluster distance matrices, by default "complete"
-        figure_dir :
-            Optional directory in which to save figures, by default None
-        show_figures :
-            Whether to show figures, by default False
-        sample_metadata :
-            Metadata keys to plot, by default None
-        """
-        if figure_dir is not None:
-            os.makedirs(figure_dir, exist_ok=True)
-
-        # Convert metadata to hex colors
-        colors = None
-        if sample_metadata is not None:
-            sample_metadata = (
-                [sample_metadata]
-                if isinstance(sample_metadata, str)
-                else sample_metadata
-            )
-            donor_info_ = self.donor_info.set_index(
-                self.registry_["setup_args"]["sample_key"]
-            )
-            colors = convert_pandas_to_colors(
-                donor_info_.loc[:, sample_metadata],
-                cmap_name=cmap_name,
-                cmap_requires_int=cmap_requires_int,
-            )
-
-        # Subsample distances if necessary
-        distances_ = distances
-        celltype_dimname = distances.dims[0]
-        if cell_type_keys is not None:
-            cell_type_keys = (
-                [cell_type_keys] if isinstance(cell_type_keys, str) else cell_type_keys
-            )
-            dimname_to_vals = {celltype_dimname: cell_type_keys}
-            distances_ = distances.sel(dimname_to_vals)
-
-        figs = []
-        for dist_ in distances_:
-            celltype_name = dist_.coords[celltype_dimname].item()
-            dendrogram = compute_dendrogram_from_distance_matrix(
-                dist_,
-                linkage_method=linkage_method,
-            )
-            assert dist_.ndim == 2
-
-            fig = sns.clustermap(
-                dist_.to_pandas(),
-                row_linkage=dendrogram,
-                col_linkage=dendrogram,
-                row_colors=colors,
-                **sns_kwargs,
-            )
-            fig.fig.suptitle(celltype_name)
-            if figure_dir is not None:
-                fig.savefig(os.path.join(figure_dir, f"{celltype_name}.png"))
-            if show_figures:
-                plt.show()
-                plt.clf()
-            figs.append(fig)
-        return figs

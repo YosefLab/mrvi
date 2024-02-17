@@ -1,5 +1,3 @@
-from tempfile import TemporaryDirectory
-
 import numpy as np
 from mrvi import MrVI
 from scvi.data import synthetic_iid
@@ -314,16 +312,6 @@ def test_mrvi_stratifications():
         15,
     )
     assert np.allclose(ct_dists[0].values, ct_dists[0].values.T, atol=1e-6)
-
-    with TemporaryDirectory() as d:
-        model.explore_stratifications(
-            dists["labels"], sample_metadata="meta1", figure_dir=d
-        )
-    model.explore_stratifications(
-        dists["labels"], sample_metadata="meta1", show_figures=True
-    )
-    model.explore_stratifications(dists["labels"], cell_type_keys="label_0")
-    model.explore_stratifications(dists["labels"], cell_type_keys=["label_0", "label_1"])
 
     donor_keys = [
         ("meta1", "nn"),

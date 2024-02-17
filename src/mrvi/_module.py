@@ -447,32 +447,6 @@ class MrVAE(JaxBaseModuleClass):
             kl_local=(kl_u + kl_z),
         )
 
-    def compute_h_from_x(
-        self,
-        x,
-        sample_index,
-        batch_index,
-        cf_sample=None,
-        continuous_covs=None,
-        mc_samples=10,
-    ):
-        """Compute normalized gene expression from observations"""
-        library = 7.0 * jnp.ones_like(
-            sample_index
-        )  # placeholder, has no effect on the value of h.
-        inference_outputs = self.inference(
-            x, sample_index, mc_samples=mc_samples, cf_sample=cf_sample, use_mean=False
-        )
-        generative_inputs = {
-            "z": inference_outputs["z"],
-            "library": library,
-            "batch_index": batch_index,
-            "continuous_covs": continuous_covs,
-            "label_index": jnp.zeros([x.shape[0], 1]),
-        }
-        generative_outputs = self.generative(**generative_inputs)
-        return generative_outputs["h"]
-
     def compute_h_from_x_eps(
         self,
         x,

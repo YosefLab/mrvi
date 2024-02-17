@@ -313,19 +313,6 @@ def test_mrvi_stratifications():
     )
     assert np.allclose(ct_dists[0].values, ct_dists[0].values.T, atol=1e-6)
 
-    donor_keys = [
-        ("meta1", "nn"),
-        ("meta2", "geary"),
-    ]
-    pvals = model.compute_cell_scores(donor_keys=donor_keys)
-    assert len(pvals.data_vars) == 2
-    assert pvals.data_vars["meta1_nn_pval"].shape == (adata.shape[0],)
-    assert pvals.data_vars["meta2_geary_pval"].shape == (adata.shape[0],)
-    es = model.compute_cell_scores(donor_keys=donor_keys, compute_pval=False)
-    assert len(es.data_vars) == 2
-    assert es.data_vars["meta1_nn_effect_size"].shape == (adata.shape[0],)
-    assert es.data_vars["meta2_geary_effect_size"].shape == (adata.shape[0],)
-
 
 def test_mrvi_nonlinear():
     adata = synthetic_iid()

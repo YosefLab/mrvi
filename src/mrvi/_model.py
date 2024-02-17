@@ -30,8 +30,6 @@ from ._module import MrVAE
 from ._types import MrVIReduction
 from ._utils import (
     _parse_local_statistics_requirements,
-    compute_statistic,
-    permutation_test,
     rowwise_max_excluding_diagonal,
 )
 
@@ -1281,72 +1279,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         covariates_require_lfc = jnp.array(covariates_require_lfc)
 
         return Xmat, Xmat_names, covariates_require_lfc, offset_indices
-
-    def compute_cell_scores(
-        self,
-        donor_keys: list[tuple],
-        adata=None,
-        batch_size=256,
-        use_vmap: bool = True,
-        n_mc_samples: int = 200,
-        compute_pval: bool = True,
-    ) -> xr.Dataset:
-        """Computes for each cell a statistic (effect size or p-value)
-
-        Parameters
-        ----------
-        donor_keys
-            List of tuples, where the first element is the sample key and
-            the second element is the statistic to be computed
-        adata
-            AnnData object to use for computing the local sample representation.
-        batch_size
-            Batch size to use for computing the local sample representation.
-        use_vmap
-            Whether to use vmap for computing the local sample representation.
-            Disabling vmap can be useful if running out of memory on a GPU.
-        n_mc_samples
-            Number of Monte Carlo trials to use for computing the p-values (if `compute_pval` is True).
-        compute_pval
-            Whether to compute p-values or effect sizes.
-        """
-        test_out = "pval" if compute_pval else "effect_size"
-
-        # not jitted because the statistic arg is causing troubles
-        def _get_scores(w, x, statistic):
-            if compute_pval:
-                fn = lambda w, x: permutation_test(
-                    w, x, statistic=statistic, n_mc_samples=n_mc_samples
-                )
-            else:
-                fn = lambda w, x: compute_statistic(w, x, statistic=statistic)
-            return jax.vmap(fn, in_axes=(0, None))(w, x)
-
-        def get_scores_data_arr_fn(cov, sample_covariate_test):
-            return lambda x: xr.DataArray(
-                _get_scores(x.data, cov, sample_covariate_test),
-                dims=["cell_name"],
-                coords={"cell_name": x.coords["cell_name"]},
-            )
-
-        reductions = []
-        for sample_covariate_key, sample_covariate_test in donor_keys:
-            cov = self.donor_info[sample_covariate_key].values
-            if sample_covariate_test == "nn":
-                cov = pd.Categorical(cov).codes
-            cov = jnp.array(cov)
-            fn = get_scores_data_arr_fn(cov, sample_covariate_test)
-            reductions.append(
-                MrVIReduction(
-                    name=f"{sample_covariate_key}_{sample_covariate_test}_{test_out}",
-                    input="mean_distances",
-                    fn=fn,
-                )
-            )
-
-        return self.compute_local_statistics(
-            reductions, adata=adata, batch_size=batch_size, use_vmap=use_vmap
-        )
 
     @property
     def original_donor_key(self):

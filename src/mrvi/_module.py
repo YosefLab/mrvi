@@ -111,7 +111,7 @@ class _DecoderZXAttention(nn.Module):
         )
 
 
-class _EncoderUZ2Attention(nn.Module):
+class EncoderUZ(nn.Module):
     n_latent: int
     n_sample: int
     n_latent_u: int | None = None
@@ -254,7 +254,7 @@ class MrVAE(JaxBaseModuleClass):
             **px_kwargs,
         )
 
-        qz_cls = _EncoderUZ2Attention
+        qz_cls = EncoderUZ
         self.qz = qz_cls(
             self.n_latent,
             self.n_sample,

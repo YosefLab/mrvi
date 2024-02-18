@@ -109,6 +109,11 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         )
         self.init_params_ = self._get_init_params(locals())
 
+    @property
+    def original_donor_key(self):
+        """Original donor key used for training the model."""
+        return self.adata_manager.registry["setup_args"]["sample_key"]
+
     def to_device(self, device):
         # TODO(jhong): remove this once we have a better way to handle device.
         pass
@@ -162,14 +167,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             ),
             NumericalObsField(REGISTRY_KEYS.INDICES_KEY, "_indices"),
         ]
-        if labels_key is None:
-            # Hack to load old models pre labels field.
-            # TODO: remove. not necessary for official release
-            sr = kwargs.get("source_registry", None)
-            if sr is not None:
-                sr["field_registries"][REGISTRY_KEYS.LABELS_KEY] = {
-                    "state_registry": {"categorical_mapping": np.array([0])}
-                }
+
         adata_manager = AnnDataManager(
             fields=anndata_fields, setup_method_args=setup_method_args
         )
@@ -904,7 +902,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             Amat = jnp.einsum("nab,bc,ncd->nad", inv_, Xmat.T, admissible_donors_dmat)
             return Amat, prefactor
 
-        # @partial(jax.jit, static_argnames=["use_mean", "mc_samples"])
+        @partial(jax.jit, static_argnames=["use_mean", "mc_samples"])
         def mapped_inference_fn(
             stacked_rngs,
             x,
@@ -1279,8 +1277,3 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         covariates_require_lfc = jnp.array(covariates_require_lfc)
 
         return Xmat, Xmat_names, covariates_require_lfc, offset_indices
-
-    @property
-    def original_donor_key(self):
-        """Original donor key used for training the model."""
-        return self.adata_manager.registry["setup_args"]["sample_key"]

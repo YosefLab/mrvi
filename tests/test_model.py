@@ -154,73 +154,6 @@ def test_mrvi():
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)
     model.get_local_sample_distances()
 
-    # model = MrVI(
-    #     adata,
-    #     n_latent=n_latent,
-    #     qz_nn_flavor="linear",
-    #     qz_kwargs={"use_nonlinear": True},
-    # )
-    # model.train(1, check_val_every_n_epoch=1, train_size=0.5)
-    # model.is_trained_ = True
-    # _ = model.history
-
-    # assert model.get_latent_representation().shape == (adata.shape[0], n_latent)
-    # local_vmap = model.get_local_sample_representation()
-
-    # assert local_vmap.shape == (adata.shape[0], 15, n_latent)
-    # local_dist_vmap = model.get_local_sample_distances()["cell"]
-    # assert local_dist_vmap.shape == (
-    #     adata.shape[0],
-    #     15,
-    #     15,
-    # )
-    # local_map = model.get_local_sample_representation(use_vmap=False)
-    # model.get_local_sample_distances(use_vmap=False)["cell"]
-    # model.get_local_sample_distances(use_vmap=False, norm="l1")["cell"]
-    # model.get_local_sample_distances(use_vmap=False, norm="linf")["cell"]
-    # local_dist_map = model.get_local_sample_distances(use_vmap=False, norm="l2")["cell"]
-    # assert local_map.shape == (adata.shape[0], 15, n_latent)
-    # assert local_dist_map.shape == (
-    #     adata.shape[0],
-    #     15,
-    #     15,
-    # )
-    # assert np.allclose(local_map, local_vmap, atol=1e-3)
-    # assert np.allclose(local_dist_map, local_dist_vmap, atol=1e-3)
-
-    # local_normalized_dists = model.get_local_sample_distances()[
-    #     "cell"
-    # ]
-    # assert local_normalized_dists.shape == (
-    #     adata.shape[0],
-    #     15,
-    #     15,
-    # )
-    # assert np.allclose(
-    #     local_normalized_dists[0].values, local_normalized_dists[0].values.T, atol=1e-6
-    # )
-
-    # # Test memory efficient groupby.
-    # model.get_local_sample_distances(keep_cell=False, groupby=["meta1", "meta2"])
-    # grouped_dists_no_cell = model.get_local_sample_distances(
-    #     keep_cell=False, groupby=["meta1", "meta2"]
-    # )
-    # grouped_dists_w_cell = model.get_local_sample_distances(groupby=["meta1", "meta2"])
-    # assert np.allclose(grouped_dists_no_cell.meta1, grouped_dists_w_cell.meta1)
-    # assert np.allclose(grouped_dists_no_cell.meta2, grouped_dists_w_cell.meta2)
-
-    # grouped_normalized_dists = model.get_local_sample_distances(
-    #     , keep_cell=False, groupby=["meta1", "meta2"]
-    # )
-    # assert grouped_normalized_dists.meta1.shape == (
-    #     2,
-    #     15,
-    #     15,
-    # )
-
-    # # tests __repr__
-    # print(model)
-
 
 def test_mrvi_shrink_u():
     adata = synthetic_iid()
@@ -332,37 +265,6 @@ def test_mrvi_nonlinear():
     )
 
     n_latent = 10
-    # model = MrVI(
-    #     adata,
-    #     n_latent=n_latent,
-    #     qz_nn_flavor="linear",
-    #     qz_kwargs={"use_nonlinear": True},
-    # )
-    # model.train(1, check_val_every_n_epoch=1, train_size=0.5)
-    # model.is_trained_ = True
-    # _ = model.history
-    # assert model.get_latent_representation().shape == (adata.shape[0], n_latent)
-    # local_vmap = model.get_local_sample_representation()
-
-    # assert local_vmap.shape == (adata.shape[0], 15, n_latent)
-    # local_dist_vmap = model.get_local_sample_distances()["cell"]
-    # assert local_dist_vmap.shape == (
-    #     adata.shape[0],
-    #     15,
-    #     15,
-    # )
-
-    # local_normalized_dists = model.get_local_sample_distances(normalize_distances=True)[
-    #     "cell"
-    # ]
-    # assert local_normalized_dists.shape == (
-    #     adata.shape[0],
-    #     15,
-    #     15,
-    # )
-    # assert np.allclose(
-    #     local_normalized_dists[0].values, local_normalized_dists[0].values.T, atol=1e-6
-    # )
 
     model = MrVI(
         adata,
@@ -392,49 +294,3 @@ def test_compute_local_statistics():
     meta1 = np.random.randint(0, 2, size=n_sample)
     adata.obs["meta1"] = meta1[adata.obs["sample"].values]
     MrVI.setup_anndata(adata, sample_key="sample", batch_key="batch")
-    # n_latent = 10
-    # model = MrVI(
-    #     adata,
-    #     n_latent=n_latent,
-    #     qz_nn_flavor="linear",
-    #     qz_kwargs={"use_nonlinear": True},
-    # )
-    # model.train(1, check_val_every_n_epoch=1, train_size=0.5)
-    # model.is_trained_ = True
-    # _ = model.history
-
-    # reductions = [
-    #     MrVIReduction(
-    #         name="test1",
-    #         input="mean_representations",
-    #         fn=lambda x: x,
-    #         group_by=None,
-    #     ),
-    #     MrVIReduction(
-    #         name="test2",
-    #         input="sampled_representations",
-    #         fn=lambda x: x + 2,
-    #         group_by="meta1",
-    #     ),
-    #     MrVIReduction(
-    #         name="test3",
-    #         input="normalized_distances",
-    #         fn=lambda x: x + 3,
-    #         group_by="meta1",
-    #     ),
-    # ]
-    # outs = model.compute_local_statistics(reductions, mc_samples=10)
-    # assert len(outs.data_vars) == 3
-    # assert outs["test1"].shape == (adata.shape[0], n_sample, n_latent)
-    # assert outs["test2"].shape == (2, 10, n_sample, n_latent)
-    # assert outs["test3"].shape == (2, n_sample, n_sample)
-
-    # adata2 = synthetic_iid()
-    # adata2.obs["sample"] = np.random.choice(15, size=adata.shape[0])
-    # meta1_2 = np.random.randint(0, 2, size=15)
-    # adata2.obs["meta1"] = meta1_2[adata2.obs["sample"].values]
-    # outs2 = model.compute_local_statistics(reductions, adata=adata2, mc_samples=10)
-    # assert len(outs2.data_vars) == 3
-    # assert outs2["test1"].shape == (adata2.shape[0], n_sample, n_latent)
-    # assert outs2["test2"].shape == (2, 10, n_sample, n_latent)
-    # assert outs2["test3"].shape == (2, n_sample, n_sample)

@@ -33,6 +33,7 @@ class MrVIReduction:
         "mean_distances",
         "sampled_representations",
         "sampled_distances",
+        "normalized_distances",
     ]
     fn: callable[[xr.DataArray], xr.DataArray] = lambda x: xr.DataArray(x)
     group_by: str | None = None
@@ -46,5 +47,6 @@ class _ComputeLocalStatisticsRequirements:
     needs_mean_distances: bool
     needs_sampled_representations: bool
     needs_sampled_distances: bool
+    needs_normalized_distances: bool
     ungrouped_reductions: Iterable[MrVIReduction]
     grouped_reductions: Iterable[MrVIReduction]

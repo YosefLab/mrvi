@@ -30,7 +30,6 @@ from ._module import MrVAE
 from ._types import MrVIReduction
 from ._utils import (
     _parse_local_statistics_requirements,
-    rowwise_max_excluding_diagonal,
 )
 
 logger = logging.getLogger(__name__)
@@ -412,10 +411,29 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                     mean_zs_, indices, norm=norm
                 )
 
-            if reqs.needs_sampled_distances:
+            if reqs.needs_sampled_distances or reqs.needs_normalized_distances:
                 sampled_dists = self._compute_distances_from_representations(
                     sampled_zs_, indices, norm=norm
                 )
+
+                if reqs.needs_normalized_distances:
+                    if norm != "l2":
+                        raise ValueError(
+                            f"Norm must be 'l2' when using normalized distances. Got {norm}."
+                        )
+                    (
+                        normalization_means,
+                        normalization_vars,
+                    ) = self._compute_local_baseline_dists(
+                        array_dict, mc_samples=mc_samples
+                    )  # both are shape (n_cells,)
+                    normalization_means = normalization_means.reshape(-1, 1, 1, 1)
+                    normalization_vars = normalization_vars.reshape(-1, 1, 1, 1)
+                    normalized_dists = (
+                        np.clip(sampled_dists - normalization_means, a_min=0, a_max=None)
+                        / (normalization_vars**0.5)
+                    ).mean(dim="mc_sample")  # (n_cells, n_samples, n_samples)
+
             # Compute each reduction
             for r in reductions:
                 if r.input == "mean_representations":
@@ -426,6 +444,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                     inputs = mean_dists
                 elif r.input == "sampled_distances":
                     inputs = sampled_dists
+                elif r.input == "normalized_distances":
+                    inputs = normalized_dists
                 else:
                     raise ValueError(f"Unknown reduction input: {r.input}")
 
@@ -469,6 +489,40 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             final_data_arrs[gr.name] = final_data_arr
 
         return xr.Dataset(data_vars=final_data_arrs)
+
+    def _compute_local_baseline_dists(
+        self, batch: dict, mc_samples: int = 250
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Approximate the distributions used as baselines for normalizing the local sample distances.
+
+        Approximates the means and variances of the Euclidean distance between two samples of
+        the z latent representation for the original sample for each cell in ``adata``.
+
+        Reference: https://www.overleaf.com/read/mhdxcrknzxpm.
+
+        Parameters
+        ----------
+        batch
+            Batch of data to compute the local sample representation for.
+        mc_samples
+            Number of Monte Carlo samples to use for computing the local baseline distributions.
+        """
+        mc_samples_per_cell = (
+            mc_samples * 2
+        )  # need double for pairs of samples to compute distance between
+        jit_inference_fn = self.module.get_jit_inference_fn(
+            inference_kwargs={"use_mean": False, "mc_samples": mc_samples_per_cell}
+        )
+
+        outputs = jit_inference_fn(self.module.rngs, batch)
+
+        # figure out how to compute dists here
+        z = outputs["z"]
+        first_half_z, second_half_z = z[:mc_samples], z[mc_samples:]
+        l2_dists = jnp.sqrt(jnp.sum((first_half_z - second_half_z) ** 2, axis=2)).T
+
+        return np.array(jnp.mean(l2_dists, axis=1)), np.array(jnp.var(l2_dists, axis=1))
 
     def _compute_distances_from_representations(
         self, reps, indices, norm="l2"
@@ -560,6 +614,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         adata: AnnData | None = None,
         batch_size: int = 256,
         use_mean: bool = True,
+        normalize_distances: bool = False,
         use_vmap: bool = True,
         groupby: list[str] | str | None = None,
         keep_cell: bool = True,
@@ -582,6 +637,10 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             Batch size to use for computing the local sample representation.
         use_mean
             Whether to use the mean of the latent representation as the local sample representation.
+        normalize_distances
+            Whether to normalize the local sample distances. Normalizes by
+            the standard deviation of the original intra-sample distances.
+            Only works with ``use_mean=False``.
         use_vmap
             Whether to use vmap for computing the local sample representation.
             Disabling vmap can be useful if running out of memory on a GPU.
@@ -597,6 +656,14 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             Only relevants if ``use_mean=False``.
         """
         input = "mean_distances" if use_mean else "sampled_distances"
+        if normalize_distances:
+            if use_mean:
+                warnings.warn(
+                    "Normalizing distances uses sampled distances. Ignoring ``use_mean``.",
+                    UserWarning,
+                    stacklevel=2,
+                )
+            input = "normalized_distances"
         if groupby and not isinstance(groupby, list):
             groupby = [groupby]
 
@@ -722,33 +789,20 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             adata_s = adata[sample_idxs]
 
             ap = self.get_aggregated_posterior(adata=adata, indices=sample_idxs)
-            in_max_comp_log_probs = ap.component_distribution.log_prob(
-                np.expand_dims(adata_s.obsm["U"], ap.mixture_dim)
-            ).sum(axis=1)
-            log_probs_s = rowwise_max_excluding_diagonal(in_max_comp_log_probs)
-
-            log_probs_ = []
+            log_probs_s = jnp.quantile(
+                ap.log_prob(adata_s.obsm["U"]).sum(axis=1), q=quantile_threshold
+            )
             n_splits = adata.n_obs // minibatch_size
+            log_probs_ = []
             for u_rep in np.array_split(adata.obsm["U"], n_splits):
                 log_probs_.append(
-                    jax.device_get(
-                        ap.component_distribution.log_prob(
-                            np.expand_dims(u_rep, ap.mixture_dim)
-                        )
-                        .sum(axis=1)
-                        .max(axis=1, keepdims=True)
-                    )
+                    jax.device_get(ap.log_prob(u_rep).sum(-1, keepdims=True))
                 )
 
             log_probs_ = np.concatenate(log_probs_, axis=0)  # (n_cells, 1)
 
             threshs.append(np.array(log_probs_s))
             log_probs.append(np.array(log_probs_))
-
-        # Compute a threshold across all samples
-        threshs_all = np.concatenate(threshs)
-        global_thresh = np.quantile(threshs_all, q=quantile_threshold)
-        threshs = len(log_probs) * [global_thresh]
 
         log_probs = np.concatenate(log_probs, 1)
         threshs = np.array(threshs)

@@ -108,6 +108,7 @@ def test_mrvi():
     )
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)
     model.get_local_sample_distances()
+    model.get_local_sample_distances(normalize_distances=True)
 
     model = MrVI(
         adata,
@@ -121,6 +122,7 @@ def test_mrvi():
     )
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)
     model.get_local_sample_distances()
+    model.get_local_sample_distances(normalize_distances=True)
 
     model = MrVI(
         adata,
@@ -140,6 +142,7 @@ def test_mrvi():
     )
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)
     model.get_local_sample_distances()
+    model.get_local_sample_distances(normalize_distances=True)
 
     model = MrVI(
         adata,

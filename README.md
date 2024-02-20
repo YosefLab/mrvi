@@ -7,7 +7,10 @@
 [link-tests]: https://github.com/YosefLab/mrvi/actions/workflows/test.yml
 [badge-docs]: https://img.shields.io/readthedocs/mrvi
 
-V2 of single-cell Variational Inference.
+Multi-resolution Variational Inference.
+
+[!Warning]
+This is a soft launch of the new `mrvi` package. We are working on docs and tutorials.
 
 ## Getting started
 
@@ -22,15 +25,13 @@ Python installed, we recommend installing [Miniconda](https://docs.conda.io/en/l
 
 There are several alternative options to install mrvi:
 
-<!--
-1) Install the latest release of `mrvi` from `PyPI <https://pypi.org/project/mrvi/>`_:
+1. Install the latest release of `mrvi` from `PyPI <https://pypi.org/project/mrvi/>`_:
 
 ```bash
 pip install mrvi
 ```
--->
 
-1. Install the latest development version:
+2. Install the latest development version:
 
 ```bash
 pip install git+https://github.com/justjhong/mrvi.git@main

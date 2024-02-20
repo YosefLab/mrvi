@@ -7,8 +7,6 @@ from typing import Any, Literal
 import xarray as xr
 
 PRNGKey = Any
-Shape = tuple[int, ...]
-Dtype = Any
 
 
 @dataclass(frozen=True)

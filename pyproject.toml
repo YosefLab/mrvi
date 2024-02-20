@@ -5,16 +5,22 @@ requires = ["hatchling"]
 
 [project]
 name = "mrvi"
-version = "0.0.1"
+version = "1.0.0b1"
 description = "Multi-resolution Variational Inference"
 readme = "README.md"
 requires-python = ">=3.9"
 license = {file = "LICENSE"}
 authors = [
     {name = "Justin Hong"},
+    {name = "Pierre Boyeau"},
+    {name = "Adam Gayoso"},
+    {name = "Can Ergan"},
+    {name = "Martin Kim"},
 ]
 maintainers = [
     {name = "Justin Hong", email = "justin.hong@columbia.edu"},
+    {name = "Pierre Boyeau", email = "pierreboyeau@berkeley.edu"},
+    {name = "Martin Kim", email = "martinkim@berkeley.edu"},
 ]
 urls.Documentation = "https://mrvi.readthedocs.io/"
 urls.Source = "https://github.com/YosefLab/mrvi"

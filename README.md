@@ -24,10 +24,10 @@ Python installed, we recommend installing [Miniconda](https://docs.conda.io/en/l
 
 There are several alternative options to install mrvi:
 
-1. Install the latest release of `mrvi` from `PyPI <https://pypi.org/project/mrvi/>`_:
+1. Install the latest pre-release of `mrvi` from `PyPI <https://pypi.org/project/mrvi/>`\_:
 
 ```bash
-pip install mrvi
+pip install --pre mrvi
 ```
 
 2. Install the latest development version:

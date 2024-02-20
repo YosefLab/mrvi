@@ -9,8 +9,7 @@
 
 Multi-resolution Variational Inference.
 
-[!WARNING]
-This is a soft launch of the new `mrvi` package. We are working on docs and tutorials.
+🚧 :warning: This is a soft launch of the new `mrvi` package. We are working on docs and tutorials. :warning: 🚧
 
 ## Getting started
 

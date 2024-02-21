@@ -8,7 +8,7 @@ and this project adheres to [Semantic Versioning][].
 [keep a changelog]: https://keepachangelog.com/en/1.0.0/
 [semantic versioning]: https://semver.org/spec/v2.0.0.html
 
-## [1.0.0b1] - 2023-02-20
+## [1.0.0b1] - 2023-02-21
 
 ### :warning: Breaking Changes
 

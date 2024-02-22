@@ -139,7 +139,7 @@ log_prob_ratio = log_p1 - log_p2
 
 ## Release notes
 
-See the [changelog][changelog].
+See the [changelog](https://github.com/YosefLab/mrvi/blob/main/CHANGELOG.md).
 
 ## Contact
 

@@ -36,6 +36,63 @@ pip install --pre mrvi
 pip install git+https://github.com/justjhong/mrvi.git@main
 ```
 
+## User guide
+
+While a more comprehensive user guide is in the works, you can find here a brief overview of the main features of `mrvi`.
+
+MrVI relies on `scvi-tools` routines for model initialization and training.
+In particular, `mrvi` assumes data to be stored in an AnnData object.
+A first step is to load the data and register it, as follows:
+
+```python
+from mrvi import MrVI
+
+MrVI.setup_anndata(adata,  sample_key="my_sample_key", batch_key="my_batch_key")
+```
+where here `'my_sample_key'` and `'my_batch_key'` are expected to be keys of `adata.obs` that contain the sample and batch assignments, respectively. The next step is to initialize and train the model, which can be done via:
+
+```python
+model = MrVI(adata)
+model.train()
+```
+
+Once the model is trained, we recommend visualizing the validation ELBO to assess convergence, which is stored in `model.history["elbo_validation"]`.
+If the ELBO has not converged, you should consider training the model for more epochs.
+
+MrVI contains two latent spaces, `u`, that captures global cell-type variations, and `z`, that additionally captures sample-specific variations.
+These two latent representations can be accessed via `model.get_latent_representation()`, (with `give_z=True` to access `z`).
+In particular, these latent variables can be seemlessly used for data visualization or clustering using scanpy.
+For instance, visualizing the `u` latent space can be done via:
+
+```python
+import scanpy as sc
+from scvi.model.utils import mde
+
+u = model.get_latent_representation()
+u_mde = mde(u)
+adata.obsm["u_mde"] = u_mde
+sc.pl.embedding(adata, basis="u_mde")
+```
+
+Finally, MrVI can be used to predict sample-sample dissimilarities, using the following snippet:
+
+```python
+# Predict sample-sample dissimilarities per cell type
+dists = model.get_local_sample_distances(
+    adata, keep_cell=False, groupby="initial_clustering", batch_size=32
+)
+
+# OR predict sample-sample dissimilarities for EACH cell
+# WARNING: this can be slow and memory-intensive for large datasets
+dists = model.get_local_sample_distances(
+    adata, keep_cell=True, batch_size=32
+)
+```
+
+
+
+
+
 ## Release notes
 
 See the [changelog][changelog].

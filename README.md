@@ -103,7 +103,7 @@ These dissimilarities can then be visualized via `seaborn.clustermap` or similar
 
 **DE analysis**: MrVI can be used to identify differentially expressed genes (DEGs) between two groups of samples at the single-cell level.
 Here, "samples" refere to the `sample_key` provided in `MrVI.setup_anndata`.
-Identifying such genes can be done as follows, assuming
+Identifying such genes can be done as follows,
 
 ```python
 donor_keys_ = ["Status"]  # Here, Status is the donor covarate of interest

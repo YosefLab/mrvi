@@ -101,9 +101,7 @@ dists = model.get_local_sample_distances(
 These dissimilarities can then be visualized via `seaborn.clustermap` or similar tools.
 
 
-**DE analysis**:
-
-MrVI can be used to identify differentially expressed genes (DEGs) between two groups of samples at the single-cell level.
+**DE analysis**: MrVI can be used to identify differentially expressed genes (DEGs) between two groups of samples at the single-cell level.
 Here, "samples" refere to the `sample_key` provided in `MrVI.setup_anndata`.
 Identifying such genes can be done as follows, assuming
 

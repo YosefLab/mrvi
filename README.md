@@ -40,7 +40,6 @@ pip install git+https://github.com/justjhong/mrvi.git@main
 
 While a more comprehensive user guide is in the works, you can find here a brief overview of the main features of `mrvi`.
 
-
 **Data preparation**:
 MrVI relies on `scvi-tools` routines for model initialization and training.
 In particular, `mrvi` assumes data to be stored in an AnnData object.
@@ -49,10 +48,10 @@ A first step is to load the data and register it, as follows:
 ```python
 from mrvi import MrVI
 
-MrVI.setup_anndata(adata,  sample_key="my_sample_key", batch_key="my_batch_key")
+MrVI.setup_anndata(adata, sample_key="my_sample_key", batch_key="my_batch_key")
 ```
-where here `'my_sample_key'` and `'my_batch_key'` are expected to be keys of `adata.obs` that contain the sample and batch assignments, respectively. 
 
+where here `'my_sample_key'` and `'my_batch_key'` are expected to be keys of `adata.obs` that contain the sample and batch assignments, respectively.
 
 **Model training**:
 The next step is to initialize and train the model, which can be done via:
@@ -64,7 +63,6 @@ model.train()
 
 Once the model is trained, we recommend visualizing the validation ELBO to assess convergence, which is stored in `model.history["elbo_validation"]`.
 If the ELBO has not converged, you should consider training the model for more epochs.
-
 
 **Latent space visualization**:
 MrVI contains two latent spaces, `u`, that captures global cell-type variations, and `z`, that additionally captures sample-specific variations.
@@ -82,7 +80,6 @@ adata.obsm["u_mde"] = u_mde
 sc.pl.embedding(adata, basis="u_mde")
 ```
 
-
 **Computing sample-sample dissimilarities**:
 MrVI can be used to predict sample-sample dissimilarities, using the following snippet:
 
@@ -94,12 +91,10 @@ dists = model.get_local_sample_distances(
 
 # OR predict sample-sample dissimilarities for EACH cell
 # WARNING: this can be slow and memory-intensive for large datasets
-dists = model.get_local_sample_distances(
-    adata, keep_cell=True, batch_size=32
-)
+dists = model.get_local_sample_distances(adata, keep_cell=True, batch_size=32)
 ```
-These dissimilarities can then be visualized via `seaborn.clustermap` or similar tools.
 
+These dissimilarities can then be visualized via `seaborn.clustermap` or similar tools.
 
 **DE analysis**: MrVI can be used to identify differentially expressed genes (DEGs) between two groups of samples at the single-cell level.
 Here, "samples" refere to the `sample_key` provided in `MrVI.setup_anndata`.
@@ -107,17 +102,9 @@ Identifying such genes can be done as follows,
 
 ```python
 donor_keys_ = ["Status"]  # Here, Status is the donor covarate of interest
-multivariate_analysis_kwargs = {
-    "batch_size": 128,
-    "normalize_design_matrix": True,
-    "offset_design_matrix": False,
-    "store_lfc": True,
-    "eps_lfc": 1e-4,
-}
-res = model.perform_multivariate_analysis(
+res = model.differential_expression(
     donor_keys=donor_keys_,
     donor_subset=donor_subset,
-    **multivariate_analysis_kwargs,
 )
 ```
 
@@ -134,8 +121,6 @@ log_p2 = da_res.log_probs.loc[{"sample": gp2}]
 log_p2 = logsumexp(log_p2, axis=1) - np.log(log_p2.shape[1])
 log_prob_ratio = log_p1 - log_p2
 ```
-
-
 
 ## Release notes
 

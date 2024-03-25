@@ -26,16 +26,16 @@ def test_mrvi():
     model = MrVI(adata)
     model.train(10, check_val_every_n_epoch=1, train_size=0.5)
     donor_keys = ["meta1_cat", "meta2", "cont_cov"]
-    model.perform_multivariate_analysis(
+    model.differential_expression(
         donor_keys=donor_keys, store_lfc=True, add_batch_specific_offsets=True
     )
-    model.perform_multivariate_analysis(
+    model.differential_expression(
         donor_keys=donor_keys,
         store_lfc=True,
         lambd=1e-1,
         add_batch_specific_offsets=True,
     )
-    model.perform_multivariate_analysis(
+    model.differential_expression(
         donor_keys=donor_keys,
         store_lfc=True,
         filter_donors=True,
@@ -47,7 +47,7 @@ def test_mrvi():
     model = MrVI(adata)
     model.train(2, check_val_every_n_epoch=1, train_size=0.5)
     donor_keys = ["meta1_cat", "meta2", "cont_cov"]
-    model.perform_multivariate_analysis(
+    model.differential_expression(
         donor_keys=donor_keys, store_lfc=True, add_batch_specific_offsets=False
     )
     model.get_local_sample_distances()
@@ -62,7 +62,7 @@ def test_mrvi():
     model.train(2, check_val_every_n_epoch=1, train_size=0.5)
     model.get_local_sample_distances()
     model.get_outlier_cell_sample_pairs(subsample_size=50)
-    model.perform_multivariate_analysis(
+    model.differential_expression(
         donor_keys=donor_keys, store_lfc=True, add_batch_specific_offsets=False
     )
 
@@ -70,11 +70,9 @@ def test_mrvi():
     MrVI.setup_anndata(adata, sample_key="sample", batch_key="batch_placeholder")
     model = MrVI(adata)
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)
-    model.perform_multivariate_analysis(donor_keys=donor_keys, store_lfc=True)
-    model.perform_multivariate_analysis(
-        donor_keys=donor_keys, store_lfc=True, lambd=1e-1
-    )
-    model.perform_multivariate_analysis(
+    model.differential_expression(donor_keys=donor_keys, store_lfc=True)
+    model.differential_expression(donor_keys=donor_keys, store_lfc=True, lambd=1e-1)
+    model.differential_expression(
         donor_keys=donor_keys, store_lfc=True, filter_donors=True
     )
 
@@ -89,7 +87,7 @@ def test_mrvi():
     model.get_local_sample_distances()
     donor_keys = ["meta1_cat", "meta2", "cont_cov"]
     donor_subset = [f"sample_{i}" for i in range(8)]
-    model.perform_multivariate_analysis(donor_keys=donor_keys, donor_subset=donor_subset)
+    model.differential_expression(donor_keys=donor_keys, donor_subset=donor_subset)
 
     MrVI.setup_anndata(
         adata,

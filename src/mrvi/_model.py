@@ -824,12 +824,12 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         }
         return xr.Dataset(data_vars, coords=coords)
 
-    def perform_multivariate_analysis(
+    def differential_expression(
         self,
         adata: AnnData | None = None,
         donor_keys: list[tuple] = None,
         donor_subset: list[str] | None = None,
-        batch_size: int = 256,
+        batch_size: int = 128,
         use_vmap: bool = True,
         normalize_design_matrix: bool = True,
         add_batch_specific_offsets: bool = False,
@@ -837,18 +837,18 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         store_lfc: bool = False,
         store_lfc_metadata_subset: list[str] | None = None,
         store_baseline: bool = False,
-        eps_lfc: float = 1e-3,
+        eps_lfc: float = 1e-4,
         filter_donors: bool = False,
         lambd: float = 0.0,
         delta: float | None = 0.3,
         **filter_donors_kwargs,
     ) -> xr.Dataset:
-        """Utility function to perform cell-specific multivariate analysis.
+        """Utility function to perform cell-specific multivariate differential expression.
 
         For every cell, we first compute all counterfactual cell-state shifts, defined as
-        e_d = z_d - u, where z_d is the latent representation of the cell for donor d and u is the donor-unaware latent representation.
-        Then, we fit a linear model in each cell of the form
-        e_d = X_d * beta_d + iid gaussian noise.
+        e_d = z_d - u, where z_d is the latent representation of the cell for donor d and u
+        is the donor-unaware latent representation. Then, we fit a linear model in each cell
+        of the form: e_d = X_d * beta_d + iid gaussian noise.
 
         Parameters
         ----------
@@ -1015,6 +1015,9 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
             betas = betas * eps_std
 
+            lfc_mean = None
+            lfc_std = None
+            pde = None
             if store_lfc:
                 betas_ = betas.transpose((0, 2, 1, 3))
                 eps_mean_ = eps_mean.transpose((0, 2, 1, 3))
@@ -1081,13 +1084,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                         jnp.average(lfcs.var(1), weights=batch_weights, axis=0)
                     )
                     pde = (jnp.abs(lfcs) >= delta).mean(1).mean(0)
-                else:
-                    lfc_std = None
-                    pde = None
-            else:
-                lfc_mean = None
-                lfc_std = None
-                pde = None
+
             if store_baseline:
                 baseline_expression = x_1.mean(1)
             else:

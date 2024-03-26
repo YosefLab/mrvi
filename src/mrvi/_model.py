@@ -725,6 +725,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         """
         self._check_if_trained(warn=False)
         adata = self._validate_anndata(adata)
+        if indices is None:
+            indices = np.arange(self.adata.n_obs)
         if sample is not None:
             indices = np.intersect1d(
                 np.array(indices), np.where(adata.obs[self.sample_key] == sample)[0]
@@ -772,7 +774,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                     jax.device_get(ap.log_prob(u_rep).sum(-1, keepdims=True))
                 )
 
-            log_probs_ = np.concatenate(log_probs_, axis=0)  # (n_cells, 1)
+            log_probs.append(np.concatenate(log_probs_, axis=0))  # (n_cells, 1)
 
         log_probs = np.concatenate(log_probs, 1)
 
@@ -801,7 +803,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 if len(cov_samples) == 0:
                     continue
 
-                sel_log_probs = log_probs.loc[{"sample": cov_samples}]
+                sel_log_probs = log_probs_arr.log_probs.loc[{"sample": cov_samples}]
                 val_log_probs = logsumexp(sel_log_probs, axis=1) - np.log(
                     sel_log_probs.shape[1]
                 )
@@ -910,8 +912,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
     def differential_expression(
         self,
+        sample_cov_keys: list[str],
         adata: AnnData | None = None,
-        sample_cov_keys: list[str] | None = None,
         sample_subset: list[str] | None = None,
         batch_size: int = 128,
         use_vmap: bool = True,
@@ -936,12 +938,12 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
         Parameters
         ----------
-        adata
-            AnnData object to use for computing the local sample representation.
-            If None, the analysis is performed on all cells in the dataset.
         sample_cov_keys
             List of sample covariates to consider for the multivariate analysis.
             These keys should be present in `adata.obs`.
+        adata
+            AnnData object to use for computing the local sample representation.
+            If None, the analysis is performed on all cells in the dataset.
         sample_subset
             Optional list of samples to consider for the multivariate analysis.
             If None, all samples are considered.
@@ -1344,20 +1346,20 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         Xmat_names = []
         Xmat_dim_to_key = []
         sample_info = self.sample_info.iloc[sample_mask]
-        for sample_key in tqdm(sample_cov_keys):
-            cov = sample_info[sample_key]
+        for sample_cov_key in tqdm(sample_cov_keys):
+            cov = sample_info[sample_cov_key]
             if (cov.dtype == str) or (cov.dtype == "category"):
                 cov = cov.cat.remove_unused_categories()
                 cov = pd.get_dummies(cov, drop_first=True)
-                cov_names = sample_key + np.array(cov.columns)
+                cov_names = sample_cov_key + np.array(cov.columns)
                 cov = cov.values
             else:
-                cov_names = np.array([sample_key])
+                cov_names = np.array([sample_cov_key])
                 cov = cov.values[:, None]
             n_covs = cov.shape[1]
             Xmat.append(cov)
             Xmat_names.append(cov_names)
-            Xmat_dim_to_key.append([sample_key] * n_covs)
+            Xmat_dim_to_key.append([sample_cov_key] * n_covs)
         Xmat_names = np.concatenate(Xmat_names)
         Xmat = np.concatenate(Xmat, axis=1).astype(np.float32)
         Xmat_dim_to_key = np.concatenate(Xmat_dim_to_key)

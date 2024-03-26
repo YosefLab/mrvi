@@ -101,10 +101,9 @@ Here, "samples" refere to the `sample_key` provided in `MrVI.setup_anndata`.
 Identifying such genes can be done as follows,
 
 ```python
-donor_keys_ = ["Status"]  # Here, Status is the donor covarate of interest
+donor_keys = ["Status"]  # Here, Status is the donor covariate of interest
 res = model.differential_expression(
-    donor_keys=donor_keys_,
-    donor_subset=donor_subset,
+    donor_keys=donor_keys,
 )
 ```
 

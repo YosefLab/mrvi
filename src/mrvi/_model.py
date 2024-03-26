@@ -13,6 +13,7 @@ import numpyro.distributions as dist
 import pandas as pd
 import xarray as xr
 from anndata import AnnData
+from scipy.special import logsumexp
 from scvi import REGISTRY_KEYS
 from scvi.data import AnnDataManager
 from scvi.data.fields import (
@@ -61,7 +62,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         AnnData object that has been registered via ``setup_anndata``.
     n_latent
         Dimensionality of the latent space.
-    n_latent_donor
+    n_latent_sample
         Dimensionality of the latent space for sample embeddings.
     encoder_n_hidden
         Number of nodes per hidden layer in the encoder.
@@ -87,7 +88,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
         obs_df = adata.obs.copy()
         obs_df = obs_df.loc[~obs_df._scvi_sample.duplicated("first")]
-        self.donor_info = obs_df.set_index("_scvi_sample").sort_index()
+        self.sample_info = obs_df.set_index("_scvi_sample").sort_index()
         self.sample_key = self.adata_manager.get_state_registry("sample").original_key
         self.sample_order = self.adata_manager.get_state_registry(
             MRVI_REGISTRY_KEYS.SAMPLE_KEY
@@ -109,8 +110,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         self.init_params_ = self._get_init_params(locals())
 
     @property
-    def original_donor_key(self):
-        """Original donor key used for training the model."""
+    def original_sample_key(self):
+        """Original sample key used for training the model."""
         return self.adata_manager.registry["setup_args"]["sample_key"]
 
     def to_device(self, device):
@@ -570,7 +571,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
     def get_local_sample_representation(
         self,
         adata: AnnData | None = None,
-        indices: list[str] | None = None,
+        indices: list[int] | None = None,
         batch_size: int = 256,
         use_mean: bool = True,
         use_vmap: bool = True,
@@ -700,7 +701,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
     def get_aggregated_posterior(
         self,
         adata: AnnData | None = None,
-        indices: list[str] | None = None,
+        sample: str | int | None = None,
+        indices: list[int] | None = None,
         batch_size: int = 256,
     ) -> dist.Distribution:
         """
@@ -710,6 +712,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         ----------
         adata
             AnnData object to use. Defaults to the AnnData object used to initialize the model.
+        sample
+            Name or index of the sample to filter on. If None, uses all cells.
         indices
             Indices of cells to use.
         batch_size
@@ -721,6 +725,10 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         """
         self._check_if_trained(warn=False)
         adata = self._validate_anndata(adata)
+        if sample is not None:
+            indices = np.intersect1d(
+                np.array(indices), np.where(adata.obs[self.sample_key] == sample)[0]
+            )
         scdl = self._make_data_loader(
             adata=adata, indices=indices, batch_size=batch_size, iter_ndarray=True
         )
@@ -742,6 +750,85 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             dist.Categorical(probs=jnp.ones(qu_loc.shape[1]) / qu_loc.shape[1]),
             dist.Normal(qu_loc, qu_scale),
         )
+
+    def differential_abundance(
+        self,
+        adata: AnnData | None = None,
+        sample_cov_keys: list[str] | None = None,
+        sample_subset: list[str] | None = None,
+        minibatch_size: int = 128,
+    ) -> xr.Dataset:
+        adata = self._validate_anndata(adata)
+        us = self.get_latent_representation(adata, use_mean=True, give_z=False)
+
+        log_probs = []
+        unique_samples = adata.obs[self.sample_key].unique()
+        for sample_name in tqdm(unique_samples):
+            ap = self.get_aggregated_posterior(adata=adata, sample=sample_name)
+            n_splits = adata.n_obs // minibatch_size
+            log_probs_ = []
+            for u_rep in np.array_split(us, n_splits):
+                log_probs_.append(
+                    jax.device_get(ap.log_prob(u_rep).sum(-1, keepdims=True))
+                )
+
+            log_probs_ = np.concatenate(log_probs_, axis=0)  # (n_cells, 1)
+
+        log_probs = np.concatenate(log_probs, 1)
+
+        coords = {
+            "cell_name": adata.obs_names.to_numpy(),
+            "sample": unique_samples,
+        }
+        data_vars = {
+            "log_probs": (["cell_name", "sample"], log_probs),
+        }
+        log_probs_arr = xr.Dataset(data_vars, coords=coords)
+
+        if sample_cov_keys is None or len(sample_cov_keys) == 0:
+            return log_probs_arr
+
+        sample_cov_log_probs_map = {}  # maps sample_cov_key to log_probs dataframe (n_cells, n_cov_values)
+        for sample_cov_key in sample_cov_keys:
+            sample_cov_unique_values = self.sample_info[sample_cov_key].unique()
+            per_val_log_probs = {}
+            for sample_cov_value in sample_cov_unique_values:
+                cov_samples = (
+                    self.sample_info[sample_cov_key] == sample_cov_value
+                ).index.to_numpy()
+                if sample_subset is not None:
+                    cov_samples = np.intersect1d(cov_samples, np.array(sample_subset))
+                if len(cov_samples) == 0:
+                    continue
+
+                sel_log_probs = log_probs.loc[{"sample": cov_samples}]
+                val_log_probs = logsumexp(sel_log_probs, axis=1) - np.log(
+                    sel_log_probs.shape[1]
+                )
+                per_val_log_probs[sample_cov_value] = val_log_probs
+            sample_cov_log_probs_map[sample_cov_key] = pd.DataFrame.from_dict(
+                per_val_log_probs
+            )
+
+        coords = {
+            "cell_name": adata.obs_names.to_numpy(),
+            "sample": unique_samples,
+            **{
+                sample_cov_key: sample_cov_log_probs.columns
+                for sample_cov_key, sample_cov_log_probs in sample_cov_log_probs_map.items()
+            },
+        }
+        data_vars = {
+            "log_probs": (["cell_name", "sample"], log_probs),
+            **{
+                f"{sample_cov_key}_log_probs": (
+                    ["cell_name", sample_cov_key],
+                    sample_cov_log_probs.values,
+                )
+                for sample_cov_key, sample_cov_log_probs in sample_cov_log_probs_map.items()
+            },
+        }
+        return xr.Dataset(data_vars, coords=coords)
 
     def get_outlier_cell_sample_pairs(
         self,
@@ -769,10 +856,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         admissibility_threshold
             Threshold for admissibility. Cell-sample pairs with admissibility below this threshold are considered outliers.
         """
-        adata = self.adata if adata is None else adata
         adata = self._validate_anndata(adata)
-
-        # Compute u reps
         us = self.get_latent_representation(adata, use_mean=True, give_z=False)
         adata.obsm["U"] = us
 
@@ -827,8 +911,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
     def differential_expression(
         self,
         adata: AnnData | None = None,
-        donor_keys: list[tuple] = None,
-        donor_subset: list[str] | None = None,
+        sample_cov_keys: list[str] | None = None,
+        sample_subset: list[str] | None = None,
         batch_size: int = 128,
         use_vmap: bool = True,
         normalize_design_matrix: bool = True,
@@ -838,16 +922,16 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         store_lfc_metadata_subset: list[str] | None = None,
         store_baseline: bool = False,
         eps_lfc: float = 1e-4,
-        filter_donors: bool = False,
+        filter_inadmissible_samples: bool = False,
         lambd: float = 0.0,
         delta: float | None = 0.3,
-        **filter_donors_kwargs,
+        **filter_samples_kwargs,
     ) -> xr.Dataset:
         """Utility function to perform cell-specific multivariate differential expression.
 
         For every cell, we first compute all counterfactual cell-state shifts, defined as
-        e_d = z_d - u, where z_d is the latent representation of the cell for donor d and u
-        is the donor-unaware latent representation. Then, we fit a linear model in each cell
+        e_d = z_d - u, where z_d is the latent representation of the cell for sample d and u
+        is the sample-unaware latent representation. Then, we fit a linear model in each cell
         of the form: e_d = X_d * beta_d + iid gaussian noise.
 
         Parameters
@@ -855,12 +939,12 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         adata
             AnnData object to use for computing the local sample representation.
             If None, the analysis is performed on all cells in the dataset.
-        donor_keys
-            List of donor metadata to consider for the multivariate analysis.
+        sample_cov_keys
+            List of sample covariates to consider for the multivariate analysis.
             These keys should be present in `adata.obs`.
-        donor_subset
-            Optional list of donors to consider for the multivariate analysis.
-            If None, all donors are considered.
+        sample_subset
+            Optional list of samples to consider for the multivariate analysis.
+            If None, all samples are considered.
         batch_size
             Batch size to use for computing the local sample representation.
         use_vmap
@@ -878,15 +962,15 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             a smaller set of cells to analyze, e.g., by specifying `adata`.
         store_lfc_metadata_subset
             Specifies a subset of metadata for which log-fold changes are computed.
-            These keys must be a subset of `donor_keys`.
+            These keys must be a subset of `sample_cov_keys`.
             Only applies when `store_lfc=True`.
         store_baseline
             Whether to store the expression in the module if logfoldchanges are computed.
         eps_lfc
             Epsilon to add to the log-fold changes to avoid detecting genes with low expression.
-        filter_donors
-            Whether to filter out-of-distribution donors prior to performing the analysis.
-        filter_donors_kwargs
+        filter_inadmissible_samples
+            Whether to filter out-of-distribution samples prior to performing the analysis.
+        filter_inadmissible_samples_kwargs
             Keyword arguments to pass to `get_outlier_cell_sample_pairs`.
         lambd
             Regularization parameter for the linear model.
@@ -907,24 +991,24 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         n_sample = self.summary_stats.n_sample
         vars_in = {"params": self.module.params, **self.module.state}
 
-        donor_mask = (
-            np.isin(self.sample_order, donor_subset)
-            if donor_subset is not None
+        sample_mask = (
+            np.isin(self.sample_order, sample_subset)
+            if sample_subset is not None
             else np.ones(n_sample, dtype=bool)
         )
-        donor_mask = np.array(donor_mask)
-        donor_order = self.sample_order[donor_mask]
-        n_samples_kept = donor_mask.sum()
+        sample_mask = np.array(sample_mask)
+        sample_order = self.sample_order[sample_mask]
+        n_samples_kept = sample_mask.sum()
 
-        if filter_donors:
-            admissible_donors = self.get_outlier_cell_sample_pairs(
-                adata=adata, **filter_donors_kwargs
-            )["is_admissible"].loc[{"sample": donor_order}]
-            assert (admissible_donors.sample == donor_order).all()
-            admissible_donors = admissible_donors.values
+        if filter_inadmissible_samples:
+            admissible_samples = self.get_outlier_cell_sample_pairs(
+                adata=adata, **filter_samples_kwargs
+            )["is_admissible"].loc[{"sample": sample_order}]
+            assert (admissible_samples.sample == sample_order).all()
+            admissible_samples = admissible_samples.values
         else:
-            admissible_donors = np.ones((adata.n_obs, n_samples_kept), dtype=bool)
-        n_admissible_donors = admissible_donors.sum(1)
+            admissible_samples = np.ones((adata.n_obs, n_samples_kept), dtype=bool)
+        n_admissible_samples = admissible_samples.sum(1)
 
         (
             Xmat,
@@ -932,8 +1016,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             covariates_require_lfc,
             offset_indices,
         ) = self._construct_design_matrix(
-            donor_keys=donor_keys,
-            donor_mask=donor_mask,
+            sample_cov_keys=sample_cov_keys,
+            sample_mask=sample_mask,
             normalize_design_matrix=normalize_design_matrix,
             add_batch_specific_offsets=add_batch_specific_offsets,
             store_lfc=store_lfc,
@@ -944,15 +1028,15 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
         @partial(jax.jit, backend="cpu")
         def process_design_matrix(
-            admissible_donors_dmat,
+            admissible_samples_dmat,
             Xmat,
         ):
-            xtmx = jnp.einsum("ak,nkl,lm->nam", Xmat.T, admissible_donors_dmat, Xmat)
+            xtmx = jnp.einsum("ak,nkl,lm->nam", Xmat.T, admissible_samples_dmat, Xmat)
             xtmx += lambd * jnp.eye(n_covariates)
 
             prefactor = jnp.real(jax.vmap(jax.scipy.linalg.sqrtm)(xtmx))
             inv_ = jax.vmap(jnp.linalg.pinv)(xtmx)
-            Amat = jnp.einsum("nab,bc,ncd->nad", inv_, Xmat.T, admissible_donors_dmat)
+            Amat = jnp.einsum("nab,bc,ncd->nad", inv_, Xmat.T, admissible_samples_dmat)
             return Amat, prefactor
 
         @partial(jax.jit, static_argnames=["use_mean", "mc_samples"])
@@ -964,8 +1048,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             cf_sample,
             Amat,
             prefactor,
-            n_donors_per_cell,
-            admissible_donors_mat,
+            n_samples_per_cell,
+            admissible_samples_mat,
             use_mean,
             mc_samples,
             rngs_de=None,
@@ -996,7 +1080,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                     rngs, cf_sample = pair
                     return inference_fn(rngs, cf_sample)
 
-                # eps_ has shape (mc_samples, n_cells, n_donors, n_latent)
+                # eps_ has shape (mc_samples, n_cells, n_samples, n_latent)
                 eps_ = jax.lax.transpose(
                     jax.lax.map(per_sample_inference_fn, (stacked_rngs, cf_sample)),
                     (1, 2, 0, 3),
@@ -1004,14 +1088,14 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             eps_std = eps_.std(axis=2, keepdims=True)
             eps_mean = eps_.mean(axis=2, keepdims=True)
 
-            eps = (eps_ - eps_mean) / (1e-6 + eps_std)  # over donors
+            eps = (eps_ - eps_mean) / (1e-6 + eps_std)  # over samples
             # MLE for betas
             betas = jnp.einsum("nks,ansd->ankd", Amat, eps)
 
             # Statistical tests
             betas_norm = jnp.einsum("ankd,nkl->anld", betas, prefactor)
             ts = (betas_norm**2).mean(axis=0).sum(axis=-1)
-            pvals = 1 - jax.scipy.stats.chi2.cdf(ts, df=n_donors_per_cell[:, None])
+            pvals = 1 - jax.scipy.stats.chi2.cdf(ts, df=n_samples_per_cell[:, None])
 
             betas = betas * eps_std
 
@@ -1047,7 +1131,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
                 if add_batch_specific_offsets:
                     batch_weights = jnp.einsum(
-                        "nd,db->nb", admissible_donors_mat, Xmat[:, offset_indices]
+                        "nd,db->nb", admissible_samples_mat, Xmat[:, offset_indices]
                     ).mean(0)
                     betas_offset_ = betas_[:, offset_indices, :, :] + eps_mean_
                 else:
@@ -1110,7 +1194,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             indices = array_dict[REGISTRY_KEYS.INDICES_KEY].astype(int).flatten()
             n_cells = array_dict[REGISTRY_KEYS.X_KEY].shape[0]
             cf_sample = np.broadcast_to(
-                (np.where(donor_mask)[0])[:, None, None], (n_samples_kept, n_cells, 1)
+                (np.where(sample_mask)[0])[:, None, None], (n_samples_kept, n_cells, 1)
             )
             inf_inputs = self.module._get_inference_input(
                 array_dict,
@@ -1121,15 +1205,15 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             stacked_rngs = self._generate_stacked_rngs(cf_sample.shape[0])
 
             rngs_de = self.module.rngs if store_lfc else None
-            admissible_donors_mat = jnp.array(
-                admissible_donors[indices]
-            )  # (n_cells, n_donors)
-            n_donors_per_cell = admissible_donors_mat.sum(axis=1)
-            admissible_donors_dmat = jax.vmap(jnp.diag)(admissible_donors_mat).astype(
+            admissible_samples_mat = jnp.array(
+                admissible_samples[indices]
+            )  # (n_cells, n_samples)
+            n_samples_per_cell = admissible_samples_mat.sum(axis=1)
+            admissible_samples_dmat = jax.vmap(jnp.diag)(admissible_samples_mat).astype(
                 float
-            )  # (n_cells, n_donors, n_donors)
-            # element nij is 1 if donor i is admissible and i=j for cell n
-            Amat, prefactor = process_design_matrix(admissible_donors_dmat, Xmat)
+            )  # (n_cells, n_samples, n_samples)
+            # element nij is 1 if sample i is admissible and i=j for cell n
+            Amat, prefactor = process_design_matrix(admissible_samples_dmat, Xmat)
             Amat = jax.device_put(Amat, self.device)
             prefactor = jax.device_put(prefactor, self.device)
 
@@ -1141,8 +1225,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 cf_sample=jnp.array(cf_sample),
                 Amat=Amat,
                 prefactor=prefactor,
-                n_donors_per_cell=n_donors_per_cell,
-                admissible_donors_mat=admissible_donors_mat,
+                n_samples_per_cell=n_samples_per_cell,
+                admissible_samples_mat=admissible_samples_mat,
                 use_mean=False,
                 rngs_de=rngs_de,
                 mc_samples=mc_samples,
@@ -1187,10 +1271,10 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 padj,
             ),
         }
-        if filter_donors:
-            data_vars["n_donor"] = (
+        if filter_inadmissible_samples:
+            data_vars["n_samples"] = (
                 ["cell_name"],
-                n_admissible_donors,
+                n_admissible_samples,
             )
         if store_lfc:
             if store_lfc_metadata_subset is None and not add_batch_specific_offsets:
@@ -1219,28 +1303,28 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
 
     def _construct_design_matrix(
         self,
-        donor_keys: list[str],
-        donor_mask: np.ndarray,
+        sample_cov_keys: list[str],
+        sample_mask: np.ndarray,
         normalize_design_matrix: bool,
         add_batch_specific_offsets: bool,
         store_lfc: bool,
         store_lfc_metadata_subset: list[str] | None = None,
     ):
         """
-        Starting from a list of donor keys, construct a design matrix of donors and covariates.
+        Starting from a list of sample covariate keys, construct a design matrix of samples and covariates.
 
         Categorical covariates are one-hot encoded.
         This method returns a tuple of:
         1. The design matrix
         2. A name for each column in the design matrix
-        3. The original donor key for each column in the design matrix
+        3. The original sample key for each column in the design matrix
 
         Parameters
         ----------
-        donor_keys:
-            List of donor metadata to use as covariates.
-        donor_mask:
-            Mask of admissible donors. Must have the same length as the number of donors in the dataset.
+        sample_cov_keys:
+            List of sample metadata to use as covariates.
+        sample_mask:
+            Mask of admissible samples. Must have the same length as the number of samples in the dataset.
         normalize_design_matrix:
             Whether the design matrix should be 0-1 normalized. This is useful to ensure that the
             beta coefficients are comparable across covariates.
@@ -1259,21 +1343,21 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         Xmat = []
         Xmat_names = []
         Xmat_dim_to_key = []
-        donor_info = self.donor_info.iloc[donor_mask]
-        for donor_key in tqdm(donor_keys):
-            cov = donor_info[donor_key]
+        sample_info = self.sample_info.iloc[sample_mask]
+        for sample_key in tqdm(sample_cov_keys):
+            cov = sample_info[sample_key]
             if (cov.dtype == str) or (cov.dtype == "category"):
                 cov = cov.cat.remove_unused_categories()
                 cov = pd.get_dummies(cov, drop_first=True)
-                cov_names = donor_key + np.array(cov.columns)
+                cov_names = sample_key + np.array(cov.columns)
                 cov = cov.values
             else:
-                cov_names = np.array([donor_key])
+                cov_names = np.array([sample_key])
                 cov = cov.values[:, None]
             n_covs = cov.shape[1]
             Xmat.append(cov)
             Xmat_names.append(cov_names)
-            Xmat_dim_to_key.append([donor_key] * n_covs)
+            Xmat_dim_to_key.append([sample_key] * n_covs)
         Xmat_names = np.concatenate(Xmat_names)
         Xmat = np.concatenate(Xmat, axis=1).astype(np.float32)
         Xmat_dim_to_key = np.concatenate(Xmat_dim_to_key)
@@ -1283,10 +1367,10 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 1e-6 + Xmat.max(axis=0) - Xmat.min(axis=0)
             )
         if add_batch_specific_offsets:
-            cov = donor_info["_scvi_batch"]
+            cov = sample_info["_scvi_batch"]
             if cov.nunique() == self.summary_stats.n_batch:
                 cov = np.eye(self.summary_stats.n_batch)[
-                    donor_info["_scvi_batch"].values
+                    sample_info["_scvi_batch"].values
                 ]
                 cov_names = [
                     "offset_batch_" + str(i) for i in range(self.summary_stats.n_batch)
@@ -1305,7 +1389,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             else:
                 warnings.warn(
                     """
-                        Number of batches in donor_info does not match number of batches in summary_stats.
+                        Number of batches in sample_info does not match number of batches in summary_stats.
                         `add_batch_specific_offsets=True` assumes that samples are not shared across batches.
                         Setting `add_batch_specific_offsets=False`...
                     """,
@@ -1320,7 +1404,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             covariates_require_lfc = (
                 np.isin(Xmat_dim_to_key, store_lfc_metadata_subset)
                 if store_lfc_metadata_subset is not None
-                else np.isin(Xmat_dim_to_key, donor_keys)
+                else np.isin(Xmat_dim_to_key, sample_cov_keys)
             )
         else:
             covariates_require_lfc = np.zeros(len(Xmat_names), dtype=bool)

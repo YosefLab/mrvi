@@ -101,9 +101,9 @@ Here, "samples" refere to the `sample_key` provided in `MrVI.setup_anndata`.
 Identifying such genes can be done as follows,
 
 ```python
-donor_keys = ["Status"]  # Here, Status is the donor covariate of interest
-res = model.differential_expression(
-    donor_keys=donor_keys,
+sample_cov_keys = ["Status"]  # Here, Status is the sample covariate of interest
+de_res = model.differential_expression(
+    sample_cov_keys=sample_cov_keys,
 )
 ```
 
@@ -111,14 +111,10 @@ res = model.differential_expression(
 MrVI can also be used to assess differences in cell-type compositions across sample groups, using the following snippet:
 
 ```python
-da_res = model.get_outlier_cell_sample_pairs()
-gp1 = model.donor_info.query('Status == "A"').patient_id.values
-gp2 = model.donor_info.query('Status == "B"').patient_id.values
-log_p1 = da_res.log_probs.loc[{"sample": gp1}]
-log_p1 = logsumexp(log_p1, axis=1) - np.log(log_p1.shape[1])
-log_p2 = da_res.log_probs.loc[{"sample": gp2}]
-log_p2 = logsumexp(log_p2, axis=1) - np.log(log_p2.shape[1])
-log_prob_ratio = log_p1 - log_p2
+da_res = model.differential_abundance(sample_cov_keys=sample_cov_keys)
+A_log_probs = da_res.Status_log_probs.loc[{"Status": "A"}]
+B_log_probs = da_res.Status_log_probs.loc[{"Status": "B"}]
+A_B_log_prob_ratio = A_log_probs - B_log_probs
 ```
 
 ## Release notes

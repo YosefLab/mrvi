@@ -1042,7 +1042,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             - `baseline_expression`: Baseline expression levels for each covariate across cells and genes, if `store_baseline` is True.
             - `n_samples`: Number of admissible samples for each cell, if `filter_inadmissible_samples` is True.
         """
-        if sample_cov_keys is not None:
+        if sample_cov_keys is None:
             # Hack: kept as kwarg to maintain order of arguments.
             raise ValueError("Must assign `sample_cov_keys`")
         adata = self.adata if adata is None else adata

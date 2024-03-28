@@ -107,7 +107,12 @@ def test_mrvi_de(adata, setup_kwargs, de_kwargs):
 
 @pytest.mark.parametrize(
     "da_kwargs",
-    [{"sample_cov_keys": ["meta1_cat"]}, {"sample_cov_keys": ["meta1_cat", "batch"]}],
+    [
+        {"sample_cov_keys": ["meta1_cat"]},
+        {"sample_cov_keys": ["meta1_cat", "batch"]},
+        {"sample_cov_keys": ["meta1_cat"], "compute_log_enrichment": True},
+        {"sample_cov_keys": ["meta1_cat", "batch"], "compute_log_enrichment": True},
+    ],
 )
 def test_mrvi_da(adata, da_kwargs):
     MrVI.setup_anndata(adata, sample_key="sample", batch_key="batch")

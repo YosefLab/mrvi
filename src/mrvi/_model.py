@@ -791,7 +791,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             If not given, the data object stored in the model is used.
         sample_cov_keys
             Keys for covariates (batch, etc.) that should also be taken into account
-            when computing the differential abundance.
+            when computing the differential abundance. At the moment, only discrete covariates are supported.
         sample_subset
             Only compute differential abundance for these sample labels.
         batch_size
@@ -805,6 +805,19 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             - `{cov_key}_log_probs`: For each key in `sample_cov_keys`, an array of shape (n_cells, n_cov_values) containing the log probabilities for each cell across covariate values.
         """
         adata = self._validate_anndata(adata)
+
+        if sample_cov_keys is not None:
+            for key in sample_cov_keys:
+                n_cov_values = len(adata.obs[key].unique())
+                n_samples = len(adata.obs[self.sample_key].unique())
+                if n_cov_values > n_samples / 2:
+                    warnings.warn(
+                        f"The covariate '{key}' does not seem to refer to a discrete key. "
+                        f"It has {len(n_cov_values)} unique values, which exceeds one half of the total samples ({n_samples}).",
+                        UserWarning,
+                        stacklevel=2,
+                    )
+
         us = self.get_latent_representation(
             adata, use_mean=True, give_z=False, batch_size=batch_size
         )
@@ -905,6 +918,8 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             Quantile of the within-sample log probabilities to use as a baseline for admissibility.
         admissibility_threshold
             Threshold for admissibility. Cell-sample pairs with admissibility below this threshold are considered outliers.
+        batch_size
+            Size of the batch to use for computing outlier cell-sample pairs.
         """
         adata = self._validate_anndata(adata)
         us = self.get_latent_representation(adata, use_mean=True, give_z=False)

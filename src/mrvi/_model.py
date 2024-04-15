@@ -397,7 +397,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                     mean_zs_,
                     dims=["cell_name", "sample", "latent_dim"],
                     coords={
-                        "cell_name": self.adata.obs_names[indices],
+                        "cell_name": self.adata.obs_names[indices].values,
                         "sample": self.sample_order,
                     },
                     name="sample_representations",
@@ -416,7 +416,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                     sampled_zs_,
                     dims=["cell_name", "mc_sample", "sample", "latent_dim"],
                     coords={
-                        "cell_name": self.adata.obs_names[indices],
+                        "cell_name": self.adata.obs_names[indices].values,
                         "sample": self.sample_order,
                     },
                     name="sample_representations",
@@ -562,7 +562,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 dists,
                 dims=["cell_name", "sample_x", "sample_y"],
                 coords={
-                    "cell_name": self.adata.obs_names[indices],
+                    "cell_name": self.adata.obs_names[indices].values,
                     "sample_x": self.sample_order,
                     "sample_y": self.sample_order,
                 },
@@ -575,7 +575,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                 dists,
                 dims=["cell_name", "mc_sample", "sample_x", "sample_y"],
                 coords={
-                    "cell_name": self.adata.obs_names[indices],
+                    "cell_name": self.adata.obs_names[indices].values,
                     "mc_sample": np.arange(reps.shape[1]),
                     "sample_x": self.sample_order,
                     "sample_y": self.sample_order,

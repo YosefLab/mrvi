@@ -7,6 +7,7 @@ from scvi.data import synthetic_iid
 @pytest.fixture
 def adata():
     adata = synthetic_iid()
+    adata.obs.index.name = "cell_id"
     adata.obs["sample"] = np.random.choice(15, size=adata.shape[0])
     adata.obs["sample_str"] = [chr(i + ord("a")) for i in adata.obs["sample"]]
     meta1 = np.random.randint(0, 2, size=15)

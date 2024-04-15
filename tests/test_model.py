@@ -8,6 +8,7 @@ from scvi.data import synthetic_iid
 def adata():
     adata = synthetic_iid()
     adata.obs["sample"] = np.random.choice(15, size=adata.shape[0])
+    adata.obs["sample_str"] = [chr(i + ord("a")) for i in adata.obs["sample"]]
     meta1 = np.random.randint(0, 2, size=15)
     adata.obs["meta1"] = meta1[adata.obs["sample"].values]
     meta2 = np.random.randn(15)
@@ -23,7 +24,7 @@ def adata():
 
 
 def test_mrvi(adata):
-    MrVI.setup_anndata(adata, sample_key="sample", batch_key="batch")
+    MrVI.setup_anndata(adata, sample_key="sample_str", batch_key="batch")
     model = MrVI(adata)
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)
     model.get_local_sample_distances()
@@ -36,7 +37,7 @@ def test_mrvi(adata):
     "setup_kwargs, de_kwargs",
     [
         (
-            {"sample_key": "sample", "batch_key": "batch"},
+            {"sample_key": "sample_str", "batch_key": "batch"},
             [
                 {
                     "sample_cov_keys": ["meta1_cat", "meta2", "cont_cov"],
@@ -64,7 +65,7 @@ def test_mrvi(adata):
         ),
         (
             {
-                "sample_key": "sample",
+                "sample_key": "sample_str",
                 "batch_key": "batch",
                 "continuous_covariate_keys": ["cont_cov"],
             },
@@ -77,7 +78,7 @@ def test_mrvi(adata):
             ],
         ),
         (
-            {"sample_key": "sample", "batch_key": "dummy_batch"},
+            {"sample_key": "sample_str", "batch_key": "dummy_batch"},
             [
                 {
                     "sample_cov_keys": ["meta1_cat", "meta2", "cont_cov"],
@@ -106,6 +107,10 @@ def test_mrvi_de(adata, setup_kwargs, de_kwargs):
 
 
 @pytest.mark.parametrize(
+    "sample_key",
+    ["sample", "sample_str"],
+)
+@pytest.mark.parametrize(
     "da_kwargs",
     [
         {"sample_cov_keys": ["meta1_cat"]},
@@ -114,8 +119,8 @@ def test_mrvi_de(adata, setup_kwargs, de_kwargs):
         {"sample_cov_keys": ["meta1_cat", "batch"], "compute_log_enrichment": True},
     ],
 )
-def test_mrvi_da(adata, da_kwargs):
-    MrVI.setup_anndata(adata, sample_key="sample", batch_key="batch")
+def test_mrvi_da(adata, sample_key, da_kwargs):
+    MrVI.setup_anndata(adata, sample_key=sample_key, batch_key="batch")
     model = MrVI(adata)
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)
     model.differential_abundance(**da_kwargs)
@@ -153,7 +158,7 @@ def test_mrvi_da(adata, da_kwargs):
 def test_mrvi_model_kwargs(adata, model_kwargs):
     MrVI.setup_anndata(
         adata,
-        sample_key="sample",
+        sample_key="sample_str",
         batch_key="batch",
         continuous_covariate_keys=["cont_cov"],
     )
@@ -166,14 +171,14 @@ def test_mrvi_model_kwargs(adata, model_kwargs):
 def test_mrvi_sample_subset(adata):
     MrVI.setup_anndata(
         adata,
-        sample_key="sample",
+        sample_key="sample_str",
         batch_key="batch",
         continuous_covariate_keys=["cont_cov"],
     )
     model = MrVI(adata)
     model.train(1, check_val_every_n_epoch=1, train_size=0.5)
     sample_cov_keys = ["meta1_cat", "meta2", "cont_cov"]
-    sample_subset = list(range(8))
+    sample_subset = [chr(i + ord("a")) for i in range(8)]
     model.differential_expression(
         sample_cov_keys=sample_cov_keys, sample_subset=sample_subset
     )
@@ -182,7 +187,7 @@ def test_mrvi_sample_subset(adata):
 def test_mrvi_shrink_u(adata):
     MrVI.setup_anndata(
         adata,
-        sample_key="sample",
+        sample_key="sample_str",
         batch_key="batch",
         continuous_covariate_keys=["cont_cov"],
     )
@@ -202,6 +207,7 @@ def test_mrvi_shrink_u(adata):
 def adata_stratifications():
     adata = synthetic_iid()
     adata.obs["sample"] = np.random.choice(15, size=adata.shape[0])
+    adata.obs["sample_str"] = [chr(i + ord("a")) for i in adata.obs["sample"]]
     meta1 = np.random.randint(0, 2, size=15)
     adata.obs["meta1"] = meta1[adata.obs["sample"].values]
     meta2 = np.random.randn(15)
@@ -214,7 +220,7 @@ def adata_stratifications():
 def test_mrvi_stratifications(adata_stratifications):
     MrVI.setup_anndata(
         adata_stratifications,
-        sample_key="sample",
+        sample_key="sample_str",
         batch_key="batch",
         continuous_covariate_keys=["cont_cov"],
     )
@@ -232,11 +238,3 @@ def test_mrvi_stratifications(adata_stratifications):
     ct_dists = dists["label_2"]
     assert ct_dists.shape == (2, 15, 15)
     assert np.allclose(ct_dists[0].values, ct_dists[0].values.T, atol=1e-6)
-
-
-def test_compute_local_statistics(adata):
-    n_sample = 15
-    adata.obs["sample"] = np.random.choice(n_sample, size=adata.shape[0])
-    meta1 = np.random.randint(0, 2, size=n_sample)
-    adata.obs["meta1"] = meta1[adata.obs["sample"].values]
-    MrVI.setup_anndata(adata, sample_key="sample", batch_key="batch")

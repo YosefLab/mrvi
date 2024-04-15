@@ -107,7 +107,9 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
         obs_df = adata.obs.copy()
         obs_df = obs_df.loc[~obs_df._scvi_sample.duplicated("first")]
         self.sample_info = obs_df.set_index("_scvi_sample").sort_index()
-        self.sample_key = self.adata_manager.get_state_registry("sample").original_key
+        self.sample_key = self.adata_manager.get_state_registry(
+            MRVI_REGISTRY_KEYS.SAMPLE_KEY
+        ).original_key
         self.sample_order = self.adata_manager.get_state_registry(
             MRVI_REGISTRY_KEYS.SAMPLE_KEY
         ).categorical_mapping
@@ -126,11 +128,6 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             **model_kwargs,
         )
         self.init_params_ = self._get_init_params(locals())
-
-    @property
-    def original_sample_key(self):
-        """Original sample key used for training the model."""
-        return self.adata_manager.registry["setup_args"]["sample_key"]
 
     def to_device(self, device):
         # TODO(jhong): remove this once we have a better way to handle device.
@@ -865,7 +862,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
                     self.sample_info[
                         self.sample_info[sample_cov_key] == sample_cov_value
                     ]
-                ).index.to_numpy()
+                )[self.sample_key].to_numpy()
                 if sample_subset is not None:
                     cov_samples = np.intersect1d(cov_samples, np.array(sample_subset))
                 if len(cov_samples) == 0:
@@ -1470,7 +1467,7 @@ class MrVI(JaxTrainingMixin, BaseModelClass):
             if (cov.dtype == str) or (cov.dtype == "category"):
                 cov = cov.cat.remove_unused_categories()
                 cov = pd.get_dummies(cov, drop_first=True)
-                cov_names = sample_cov_key + np.array(cov.columns)
+                cov_names = np.array([f"{sample_cov_key}_{col}" for col in cov.columns])
                 cov = cov.values
             else:
                 cov_names = np.array([sample_cov_key])

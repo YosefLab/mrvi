@@ -33,7 +33,7 @@ pip install --pre mrvi
 2. Install the latest development version:
 
 ```bash
-pip install git+https://github.com/justjhong/mrvi.git@main
+pip install git+https://github.com/YosefLab/mrvi.git@main
 ```
 
 ## User guide

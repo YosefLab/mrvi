@@ -8,7 +8,19 @@ and this project adheres to [Semantic Versioning][].
 [keep a changelog]: https://keepachangelog.com/en/1.0.0/
 [semantic versioning]: https://semver.org/spec/v2.0.0.html
 
-## [1.0.0b1] - 2023-02-21
+## [1.0.1] - 2024-05-10
+
+### :warning: Deprecation Warning
+
+-   The MrVI implementation has been moved to `scvi-tools` (`from scvi.external import MRVI`),
+    and this package will no longer be maintained.
+
+### Added
+
+-   Adds deprecation warning in the form of a FutureWarning on import.
+-   Various fixes and UX improvements to the model kwargs, DE, and DA functions.
+
+## [1.0.0b1] - 2024-02-21
 
 ### :warning: Breaking Changes
 

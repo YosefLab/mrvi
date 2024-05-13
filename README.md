@@ -9,7 +9,7 @@
 
 Multi-resolution Variational Inference.
 
-🚧 :warning: This is a soft launch of the new `mrvi` package. We are working on docs and tutorials. :warning: 🚧
+🚧 :warning: [DEPRECATED] For the latest version of MrVI, please use the implementation in the `scvi-tools` package (`from scvi.external import MRVI`). This package will no longer be maintained. :warning: 🚧
 
 ## Getting started
 
@@ -128,7 +128,12 @@ If you found a bug, please use the [issue tracker][issue-tracker].
 
 ## Citation
 
-> t.b.a
+> **Deep generative modeling of sample-level heterogeneity in single-cell genomics**
+>
+> Pierre Boyeau, Justin Hong, Adam Gayoso, Martin Kim, Jose L. McFaline-Figueroa, Michael I. Jordan,
+> Elham Azizi, Can Ergen, & Nir Yosef
+>
+> _bioRxiv_ 2024 May 10. doi: [10.1101/2022.10.04.510898](https://doi.org/10.1101/2022.10.04.510898).
 
 [scverse-discourse]: https://discourse.scverse.org/
 [issue-tracker]: https://github.com/justjhong/mrvi/issues

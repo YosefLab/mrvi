@@ -1,7 +1,7 @@
 # mrvi
 
 [![Tests][badge-tests]][link-tests]
-[![Documentation][badge-docs]][link-docs]
+<!-- [![Documentation][badge-docs]][link-docs] -->
 
 [badge-tests]: https://img.shields.io/github/workflow/status/justjhong/mrvi/Test/main
 [link-tests]: https://github.com/YosefLab/mrvi/actions/workflows/test.yml
@@ -9,9 +9,20 @@
 
 Multi-resolution Variational Inference.
 
-🚧 :warning: [DEPRECATED] For the latest version of MrVI, please use the implementation in the `scvi-tools` package (`from scvi.external import MRVI`). This package will no longer be maintained. :warning: 🚧
+## 🚨 THIS IMPLEMENTATION IS NO LONGER MAINTAINED 🚨
 
-## Getting started
+This standalone package will receive no further updates or support.
+
+Use instead the implementation in the `scvi-tools` package:
+
+```python
+from scvi.external import MRVI
+```
+
+The up-to-date documentation for the `scvi-tools` implementation can be found in the form of a [user-guide](https://scvi-tools.readthedocs.io/en/latest/user_guide/models/mrvi.html) and a [tutorial](https://scvi-tools.readthedocs.io/en/latest/tutorials/notebooks/scrna/MrVI_tutorial.html).
+
+
+<!-- ## Getting started
 
 Please refer to the [documentation][link-docs]. In particular, the
 
@@ -139,4 +150,4 @@ If you found a bug, please use the [issue tracker][issue-tracker].
 [issue-tracker]: https://github.com/justjhong/mrvi/issues
 [changelog]: https://mrvi.readthedocs.io/latest/changelog.html
 [link-docs]: https://mrvi.readthedocs.io
-[link-api]: https://mrvi.readthedocs.io/latest/api.html
+[link-api]: https://mrvi.readthedocs.io/latest/api.html -->
